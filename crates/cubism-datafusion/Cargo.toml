@@ -1,0 +1,11 @@
+[package]
+name = "cubism-datafusion"
+description = "DataFusion execution for Cubism: XUnit explode operator and sketch UDAFs (M2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cubism-core = { path = "../cubism-core" }
+# DataFusion dependency lands in M2 with the XUnitExplode stream adapter.

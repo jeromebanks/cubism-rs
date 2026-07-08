@@ -1,0 +1,16 @@
+[package]
+name = "cubism-core"
+description = "Core cube algebra: XUnit/YPath model, filter rules, lattice generation, spec types, and mergeable sketch aggregators"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_norway = "0.9"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

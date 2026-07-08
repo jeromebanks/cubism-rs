@@ -1,0 +1,27 @@
+# Example Cubism cube spec (apiVersion v1).
+apiVersion: v1
+name: web_events
+dimensions:
+  - name: geo
+    levels: [country, city]
+  - name: platform
+    levels:
+      - name: device
+        expr: device_type
+      - browser
+  - name: gender
+filterRules:
+  - type: max_dimensions
+    n: 3
+  - type: not_together
+    dims: [geo, platform]
+measures:
+  - name: pageviews
+    agg: sum
+    input: pv
+  - name: reach
+    agg: count_distinct
+    input: user_id
+  - name: events
+    agg: count
+includeGlobal: true
