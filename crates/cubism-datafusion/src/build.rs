@@ -42,6 +42,9 @@ pub async fn build_cube(
     let (keys_udf, decode_udf, dict) = cube_udfs(spec);
     ctx.register_udf(keys_udf);
     ctx.register_udf(decode_udf);
+    let (kmv_udaf, kmv_estimate) = crate::udaf::sketch_udfs();
+    ctx.register_udaf(kmv_udaf);
+    ctx.register_udf(kmv_estimate);
 
     let sql = cube_sql(spec, source)?;
     let df = ctx.sql(&sql).await?;
@@ -65,25 +68,42 @@ pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
     let mut final_cols = Vec::new();
     for (i, measure) in spec.measures.iter().enumerate() {
         let alias = format!("__m{i}");
-        let agg_expr = match measure.agg {
-            AggKind::Sum => format!("SUM({alias})"),
-            AggKind::Count => "COUNT(*)".to_string(),
-            AggKind::Min => format!("MIN({alias})"),
-            AggKind::Max => format!("MAX({alias})"),
-            AggKind::Avg => format!("AVG({alias})"),
+        let name = &measure.name;
+        match measure.agg {
+            AggKind::Sum | AggKind::Min | AggKind::Max | AggKind::Avg => {
+                let f = match measure.agg {
+                    AggKind::Sum => "SUM",
+                    AggKind::Min => "MIN",
+                    AggKind::Max => "MAX",
+                    _ => "AVG",
+                };
+                measure_selects.push(format!("{} AS {alias}", measure.input.as_ref().unwrap()));
+                agg_selects.push(format!("{f}({alias}) AS \"{name}\""));
+                final_cols.push(format!("\"{name}\""));
+            }
+            AggKind::Count => {
+                agg_selects.push(format!("COUNT(*) AS \"{name}\""));
+                final_cols.push(format!("\"{name}\""));
+            }
+            AggKind::CountDistinct => {
+                // Sketch measures emit two columns: the presented estimate
+                // and the mergeable sketch blob (the serving layer's set-ops
+                // and incremental merges consume the blob).
+                measure_selects.push(format!(
+                    "CAST({} AS VARCHAR) AS {alias}",
+                    measure.input.as_ref().unwrap()
+                ));
+                agg_selects.push(format!("cubism_kmv_sketch({alias}) AS \"{name}__sketch\""));
+                final_cols.push(format!(
+                    "cubism_kmv_estimate(\"{name}__sketch\") AS \"{name}\", \"{name}__sketch\""
+                ));
+            }
             other => {
                 return plan_err!(
-                    "measure '{}': agg {other:?} is not implemented in the engine yet \
-                     (sketch aggregators arrive in M3)",
-                    measure.name
+                    "measure '{name}': agg {other:?} is not implemented in the engine yet"
                 );
             }
-        };
-        if let Some(input) = &measure.input {
-            measure_selects.push(format!("{input} AS {alias}"));
         }
-        agg_selects.push(format!("{agg_expr} AS \"{}\"", measure.name));
-        final_cols.push(format!("\"{}\"", measure.name));
     }
     if agg_selects.is_empty() {
         return plan_err!("cube spec has no measures");
@@ -212,9 +232,52 @@ includeGlobal: true
     }
 
     #[tokio::test]
-    async fn sketch_aggs_report_not_implemented() {
-        let spec = CubeSpec::from_yaml(&SPEC.replace("agg: sum", "agg: count_distinct")).unwrap();
+    async fn unimplemented_aggs_report_planning_error() {
+        let spec = CubeSpec::from_yaml(&SPEC.replace("agg: sum", "agg: quantile")).unwrap();
         let err = cube_sql(&spec, "events").unwrap_err().to_string();
-        assert!(err.contains("M3"), "unexpected error: {err}");
+        assert!(err.contains("not implemented"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn count_distinct_produces_exact_estimates_and_mergeable_sketches() {
+        use cubism_core::sketch::KmvSketch;
+        use datafusion::arrow::array::{BinaryArray, Float64Array};
+
+        let spec = CubeSpec::from_yaml(&SPEC.replace(
+            "measures:",
+            "measures:\n  - name: reach\n    agg: count_distinct\n    input: user_id",
+        ))
+        .unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_batch("events", sample_batch()).unwrap();
+        let (df, _dict) = build_cube(&ctx, &spec, "events").await.unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let mut reach = HashMap::new();
+        let mut sketches: HashMap<String, KmvSketch> = HashMap::new();
+        for batch in &batches {
+            let xunit = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let est = batch.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+            let blob = batch.column(2).as_any().downcast_ref::<BinaryArray>().unwrap();
+            for i in 0..batch.num_rows() {
+                reach.insert(xunit.value(i).to_string(), est.value(i));
+                sketches
+                    .insert(xunit.value(i).to_string(), KmvSketch::from_bytes(blob.value(i)).unwrap());
+            }
+        }
+
+        // Under-full sketches are exact: users are u1,u2,u1,u3.
+        assert_eq!(reach["/G"], 3.0);
+        assert_eq!(reach["/gender/gender=F"], 2.0); // u1, u3
+        assert_eq!(reach["/gender/gender=M"], 1.0); // u2
+        assert_eq!(reach["/geo/country=CZ"], 2.0); // u1, u2
+
+        // The blobs are mergeable and set-operable at query time: F ∪ M = /G,
+        // F ∩ CZ = {u1}.
+        let f = &sketches["/gender/gender=F"];
+        let m = &sketches["/gender/gender=M"];
+        let cz = &sketches["/geo/country=CZ"];
+        assert_eq!(f.merge(m).estimate(), 3.0);
+        assert_eq!(f.intersection_estimate(cz), 1.0);
     }
 }

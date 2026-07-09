@@ -16,4 +16,7 @@ measures:
     input: pv
   - name: events
     agg: count
+  - name: reach
+    agg: count_distinct
+    input: user_id
 includeGlobal: true

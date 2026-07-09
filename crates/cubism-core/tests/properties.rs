@@ -6,6 +6,7 @@
 use cubism_core::encoding::{decode_xunit, encode_xunit, XUnitDictionary};
 use cubism_core::lattice::{generate_xunits, generate_xunits_unpruned};
 use cubism_core::rules::{include_xunit, FilterRule};
+use cubism_core::sketch::KmvSketch;
 use cubism_core::{XUnit, YPath};
 use proptest::prelude::*;
 
@@ -131,5 +132,35 @@ proptest! {
         }
 
         prop_assert_eq!(pruned, reference);
+    }
+
+    // --- Sketch merge algebra: the properties the whole system leans on. ---
+
+    #[test]
+    fn kmv_merge_is_commutative_and_associative(
+        a in prop::collection::vec(any::<u64>(), 0..200),
+        b in prop::collection::vec(any::<u64>(), 0..200),
+        c in prop::collection::vec(any::<u64>(), 0..200),
+        k in 8u32..64,
+    ) {
+        let (a, b, c) = (
+            KmvSketch::from_hashes(k, a),
+            KmvSketch::from_hashes(k, b),
+            KmvSketch::from_hashes(k, c),
+        );
+        prop_assert_eq!(a.merge(&b), b.merge(&a));
+        prop_assert_eq!(a.merge(&b).merge(&c), a.merge(&b.merge(&c)));
+        // Identity and idempotence.
+        prop_assert_eq!(a.merge(&KmvSketch::new(k)), a.clone());
+        prop_assert_eq!(a.merge(&a), a);
+    }
+
+    #[test]
+    fn kmv_bytes_round_trip(
+        hashes in prop::collection::vec(any::<u64>(), 0..200),
+        k in 8u32..64,
+    ) {
+        let s = KmvSketch::from_hashes(k, hashes);
+        prop_assert_eq!(KmvSketch::from_bytes(&s.to_bytes()).unwrap(), s);
     }
 }

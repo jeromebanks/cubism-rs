@@ -21,11 +21,13 @@ pub mod encoding;
 pub mod error;
 pub mod lattice;
 pub mod rules;
+pub mod sketch;
 pub mod spec;
 pub mod ypath;
 
 pub use encoding::XUnitDictionary;
 pub use error::CubismError;
 pub use rules::FilterRule;
+pub use sketch::KmvSketch;
 pub use spec::{AggKind, CubeSpec, DimensionSpec, LevelSpec, MeasureSpec};
 pub use ypath::{XUnit, YPath};

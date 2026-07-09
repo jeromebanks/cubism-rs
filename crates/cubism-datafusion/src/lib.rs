@@ -5,6 +5,7 @@
 //! [`build_cube`] for the end-to-end entry point.
 
 pub mod build;
+pub mod udaf;
 pub mod udf;
 
 pub use build::{build_cube, cube_sql};
