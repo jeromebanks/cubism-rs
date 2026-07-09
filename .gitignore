@@ -2,3 +2,4 @@
 *.parquet
 .DS_Store
 proptest-regressions/
+*.swp

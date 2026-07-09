@@ -1,11 +1,12 @@
-//! DataFusion execution layer for Cubism (M2).
+//! DataFusion execution layer for Cubism.
 //!
-//! Will provide:
-//! - `XUnitExplodeExec`: a `RecordBatchStream` adapter that evaluates the
-//!   spec's dimension extractor expressions per batch and emits
-//!   `(xunit_key: Binary, measure columns...)` rows for the pruned lattice.
-//! - Sketch UDAFs bridging `cubism-core` aggregators into DataFusion's
-//!   `Accumulator`/`GroupsAccumulator` model.
-//! - `build_cube(spec, ctx)`: the end-to-end entry point.
+//! The explode step runs as a scalar UDF (`cubism_xunit_keys`) + SQL
+//! `unnest` — streaming execution with minimal DataFusion API surface. See
+//! [`build_cube`] for the end-to-end entry point.
 
+pub mod build;
+pub mod udf;
+
+pub use build::{build_cube, cube_sql};
 pub use cubism_core;
+pub use datafusion;

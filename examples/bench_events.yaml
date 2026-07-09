@@ -1,0 +1,19 @@
+# Benchmark cube: 3 dimensions (two hierarchical), full lattice within max 3 dims.
+apiVersion: v1
+name: bench_events
+dimensions:
+  - name: geo
+    levels: [country, city]
+  - name: platform
+    levels: [device, browser]
+  - name: gender
+filterRules:
+  - type: max_dimensions
+    n: 3
+measures:
+  - name: pvs
+    agg: sum
+    input: pv
+  - name: events
+    agg: count
+includeGlobal: true

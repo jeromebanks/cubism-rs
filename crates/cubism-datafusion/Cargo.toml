@@ -8,4 +8,8 @@ repository.workspace = true
 
 [dependencies]
 cubism-core = { path = "../cubism-core" }
+datafusion = "54.0.0"
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
 # DataFusion dependency lands in M2 with the XUnitExplode stream adapter.

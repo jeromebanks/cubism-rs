@@ -1,0 +1,220 @@
+//! End-to-end cube build: spec + registered source table → aggregated cube.
+//!
+//! The build compiles the spec into one SQL statement over the source:
+//!
+//! ```sql
+//! WITH __cubism_input AS (
+//!   SELECT CAST(<level expr> AS VARCHAR) AS __l0, ..., <measure input> AS __m0, ...
+//!   FROM <source>
+//! ),
+//! __cubism_exploded AS (
+//!   SELECT unnest(cubism_xunit_keys(__l0, ...)) AS __xunit_key, __m0, ...
+//!   FROM __cubism_input
+//! ),
+//! __cubism_cells AS (
+//!   SELECT __xunit_key, SUM(__m0) AS "pageviews", ... FROM __cubism_exploded
+//!   GROUP BY __xunit_key
+//! )
+//! SELECT cubism_xunit_str(__xunit_key) AS xunit, "pageviews", ...
+//! FROM __cubism_cells
+//! ```
+//!
+//! Level expressions and measure inputs are raw SQL from the spec, evaluated
+//! by DataFusion — that's the design: the spec's `expr` fields are the
+//! engine's expression language.
+
+use crate::udf::{cube_udfs, SharedDictionary};
+use cubism_core::{AggKind, CubeSpec};
+use datafusion::common::{plan_err, Result};
+use datafusion::dataframe::DataFrame;
+use datafusion::execution::context::SessionContext;
+
+/// Compile and run a cube build over `source` (an already-registered table
+/// or a subquery). Returns the lazy DataFrame (collect/stream/write it) and
+/// the string dictionary used by this build.
+pub async fn build_cube(
+    ctx: &SessionContext,
+    spec: &CubeSpec,
+    source: &str,
+) -> Result<(DataFrame, SharedDictionary)> {
+    spec.validate().map_err(|e| datafusion::common::DataFusionError::Plan(e.to_string()))?;
+
+    let (keys_udf, decode_udf, dict) = cube_udfs(spec);
+    ctx.register_udf(keys_udf);
+    ctx.register_udf(decode_udf);
+
+    let sql = cube_sql(spec, source)?;
+    let df = ctx.sql(&sql).await?;
+    Ok((df, dict))
+}
+
+/// Generate the cube-build SQL for a spec (exposed for inspection/tests).
+pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
+    let mut level_selects = Vec::new();
+    let mut level_args = Vec::new();
+    for dim in spec.sorted_dimensions() {
+        for level in dim.effective_levels() {
+            let alias = format!("__l{}", level_args.len());
+            level_selects.push(format!("CAST({} AS VARCHAR) AS {alias}", level.expression()));
+            level_args.push(alias);
+        }
+    }
+
+    let mut measure_selects = Vec::new();
+    let mut agg_selects = Vec::new();
+    let mut final_cols = Vec::new();
+    for (i, measure) in spec.measures.iter().enumerate() {
+        let alias = format!("__m{i}");
+        let agg_expr = match measure.agg {
+            AggKind::Sum => format!("SUM({alias})"),
+            AggKind::Count => "COUNT(*)".to_string(),
+            AggKind::Min => format!("MIN({alias})"),
+            AggKind::Max => format!("MAX({alias})"),
+            AggKind::Avg => format!("AVG({alias})"),
+            other => {
+                return plan_err!(
+                    "measure '{}': agg {other:?} is not implemented in the engine yet \
+                     (sketch aggregators arrive in M3)",
+                    measure.name
+                );
+            }
+        };
+        if let Some(input) = &measure.input {
+            measure_selects.push(format!("{input} AS {alias}"));
+        }
+        agg_selects.push(format!("{agg_expr} AS \"{}\"", measure.name));
+        final_cols.push(format!("\"{}\"", measure.name));
+    }
+    if agg_selects.is_empty() {
+        return plan_err!("cube spec has no measures");
+    }
+
+    let input_cols = level_selects.iter().chain(&measure_selects).cloned().collect::<Vec<_>>();
+    Ok(format!(
+        "WITH __cubism_input AS (\n  SELECT {input}\n  FROM {source}\n),\n\
+         __cubism_exploded AS (\n  SELECT unnest(cubism_xunit_keys({args})) AS __xunit_key{measures}\n  FROM __cubism_input\n),\n\
+         __cubism_cells AS (\n  SELECT __xunit_key, {aggs}\n  FROM __cubism_exploded\n  GROUP BY __xunit_key\n)\n\
+         SELECT cubism_xunit_str(__xunit_key) AS xunit, {finals}\nFROM __cubism_cells",
+        input = input_cols.join(", "),
+        args = level_args.join(", "),
+        measures = spec
+            .measures
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.input.is_some())
+            .map(|(i, _)| format!(", __m{i}"))
+            .collect::<String>(),
+        aggs = agg_selects.join(", "),
+        finals = final_cols.join(", "),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::array::{Int64Array, RecordBatch, StringArray};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn sample_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("country", DataType::Utf8, true),
+            Field::new("city", DataType::Utf8, true),
+            Field::new("gender", DataType::Utf8, true),
+            Field::new("pv", DataType::Int64, false),
+            Field::new("user_id", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("CZ"), Some("CZ"), Some("US"), None])),
+                Arc::new(StringArray::from(vec![Some("Prague"), Some("Brno"), None, None])),
+                Arc::new(StringArray::from(vec![Some("F"), Some("M"), Some("F"), Some("F")])),
+                Arc::new(Int64Array::from(vec![10, 20, 40, 80])),
+                Arc::new(StringArray::from(vec!["u1", "u2", "u1", "u3"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    const SPEC: &str = r#"
+apiVersion: v1
+name: test_cube
+dimensions:
+  - name: geo
+    levels: [country, city]
+  - name: gender
+measures:
+  - name: pvs
+    agg: sum
+    input: pv
+  - name: events
+    agg: count
+includeGlobal: true
+"#;
+
+    async fn run_cube(spec_yaml: &str) -> HashMap<String, (i64, i64)> {
+        let spec = CubeSpec::from_yaml(spec_yaml).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_batch("events", sample_batch()).unwrap();
+        let (df, _dict) = build_cube(&ctx, &spec, "events").await.unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let mut cells = HashMap::new();
+        for batch in &batches {
+            let xunit = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let pvs = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+            let events = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+            for i in 0..batch.num_rows() {
+                cells.insert(xunit.value(i).to_string(), (pvs.value(i), events.value(i)));
+            }
+        }
+        cells
+    }
+
+    #[tokio::test]
+    async fn end_to_end_cube_matches_hand_computed_cells() {
+        let cells = run_cube(SPEC).await;
+
+        // Global rollup sees every row.
+        assert_eq!(cells["/G"], (150, 4));
+        // Country level: CZ rows 1+2, US row 3; row 4 has null country (no geo cell).
+        assert_eq!(cells["/geo/country=CZ"], (30, 2));
+        assert_eq!(cells["/geo/country=US"], (40, 1));
+        // City level: US row has null city -> truncated at country.
+        assert_eq!(cells["/geo/country=CZ/city=Prague"], (10, 1));
+        assert!(!cells.keys().any(|k| k.contains("US") && k.contains("city")));
+        // Flat dimension: gender F = rows 1,3,4.
+        assert_eq!(cells["/gender/gender=F"], (130, 3));
+        // Cross cells combine dimensions.
+        assert_eq!(cells["/gender/gender=F,/geo/country=CZ"], (10, 1));
+        assert_eq!(cells["/gender/gender=F,/geo/country=CZ/city=Prague"], (10, 1));
+
+        // Distinct cells across all rows: geo {CZ, CZ/Prague, CZ/Brno, US} +
+        // gender {F, M} + crosses {CZ+F, CZ/Prague+F, CZ+M, CZ/Brno+M, US+F}
+        // + global = 12.
+        assert_eq!(cells.len(), 12);
+    }
+
+    #[tokio::test]
+    async fn filter_rules_prune_the_cube() {
+        let spec_filtered = SPEC.replace(
+            "measures:",
+            "filterRules:\n  - type: top_level\n    dim: geo\nmeasures:",
+        );
+        let cells = run_cube(&spec_filtered).await;
+        // Only single-dimension geo cells survive, plus the rule-bypassing global.
+        assert_eq!(cells["/geo/country=CZ"], (30, 2));
+        assert!(cells.contains_key("/G"));
+        assert!(!cells.keys().any(|k| k.contains("gender")));
+        assert_eq!(cells.len(), 5); // CZ, CZ/Prague, CZ/Brno, US, /G
+    }
+
+    #[tokio::test]
+    async fn sketch_aggs_report_not_implemented() {
+        let spec = CubeSpec::from_yaml(&SPEC.replace("agg: sum", "agg: count_distinct")).unwrap();
+        let err = cube_sql(&spec, "events").unwrap_err().to_string();
+        assert!(err.contains("M3"), "unexpected error: {err}");
+    }
+}
