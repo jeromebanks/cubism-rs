@@ -9,6 +9,12 @@
 //! golden-file tests: sketch blobs are persisted state, so any format change
 //! must bump the version and keep a decode path for the old one.
 
+pub mod centroid;
 pub mod kmv;
+pub mod sample;
+pub mod topk;
 
+pub use centroid::Centroid;
 pub use kmv::KmvSketch;
+pub use sample::ExemplarSample;
+pub use topk::TopK;

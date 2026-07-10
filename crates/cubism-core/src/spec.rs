@@ -110,6 +110,10 @@ pub struct MeasureSpec {
     /// Input column/expression. Optional only for `count`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<String>,
+    /// Score column/expression — required by `top_k` (`input` is the key,
+    /// `by` is what it's ranked by), invalid elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 /// The v0.1 aggregator set. Sketch-backed kinds carry mergeable buffers
@@ -268,6 +272,18 @@ impl CubeSpec {
                     "measure '{}': agg '{:?}' requires an 'input' column or expression",
                     measure.name, measure.agg
                 ));
+            }
+            match (measure.agg, &measure.by) {
+                (AggKind::TopK, None) => errors.push(format!(
+                    "measure '{}': top_k requires 'by' (the score expression; 'input' is the key)",
+                    measure.name
+                )),
+                (AggKind::TopK, Some(_)) => {}
+                (_, Some(_)) => errors.push(format!(
+                    "measure '{}': 'by' is only valid for top_k",
+                    measure.name
+                )),
+                _ => {}
             }
         }
 

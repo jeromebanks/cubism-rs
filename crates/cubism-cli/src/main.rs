@@ -56,10 +56,21 @@ async fn run(spec_path: &str, input: &str, output: Option<&str>, show: usize) ->
     );
 
     if show > 0 {
+        // Sketch blob columns are binary noise on a terminal — display
+        // everything else.
+        let display_cols: Vec<&str> = cube
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .filter(|n| !n.ends_with("__sketch"))
+            .collect();
         cube.clone()
-            .sort(vec![
-                cubism_datafusion::datafusion::prelude::col(&spec.measures[0].name).sort(false, false),
-            ])
+            .select_columns(&display_cols)
+            .and_then(|d| {
+                d.sort(vec![cubism_datafusion::datafusion::prelude::col(&spec.measures[0].name)
+                    .sort(false, false)])
+            })
             .and_then(|d| d.limit(0, Some(show)))
             .map_err(|e| e.to_string())?
             .show()

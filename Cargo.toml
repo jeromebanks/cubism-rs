@@ -4,6 +4,7 @@ members = [
     "crates/cubism-core",
     "crates/cubism-datafusion",
     "crates/cubism-cli",
+    "bindings/cubism-py",
 ]
 
 [workspace.package]

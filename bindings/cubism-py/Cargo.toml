@@ -1,0 +1,18 @@
+[package]
+name = "cubism-py"
+description = "Python bindings for Cubism: declarative cube builds and mergeable sketches"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "cubism"
+crate-type = ["cdylib"]
+
+[dependencies]
+cubism-core = { path = "../../crates/cubism-core" }
+cubism-datafusion = { path = "../../crates/cubism-datafusion" }
+arrow = { version = "58.3", features = ["pyarrow"] }
+pyo3 = { version = "0.28", features = ["extension-module"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }

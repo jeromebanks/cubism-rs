@@ -42,9 +42,13 @@ pub async fn build_cube(
     let (keys_udf, decode_udf, dict) = cube_udfs(spec);
     ctx.register_udf(keys_udf);
     ctx.register_udf(decode_udf);
-    let (kmv_udaf, kmv_estimate) = crate::udaf::sketch_udfs();
-    ctx.register_udaf(kmv_udaf);
-    ctx.register_udf(kmv_estimate);
+    let (udafs, presenters) = crate::udaf::sketch_udfs();
+    for udaf in udafs {
+        ctx.register_udaf(udaf);
+    }
+    for udf in presenters {
+        ctx.register_udf(udf);
+    }
 
     let sql = cube_sql(spec, source)?;
     let df = ctx.sql(&sql).await?;
@@ -63,12 +67,23 @@ pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
         }
     }
 
-    let mut measure_selects = Vec::new();
+    // Each measure contributes: projections of its input expression(s) into
+    // aliased columns (which the explode stage passes through), one aggregate
+    // over those columns, and its final-select presentation. Sketch measures
+    // emit two final columns: the presented value and the mergeable sketch
+    // blob (the serving layer's set-ops and incremental merges consume the
+    // blob).
+    let mut measure_selects: Vec<String> = Vec::new();
+    let mut passthrough: Vec<String> = Vec::new();
     let mut agg_selects = Vec::new();
     let mut final_cols = Vec::new();
     for (i, measure) in spec.measures.iter().enumerate() {
         let alias = format!("__m{i}");
         let name = &measure.name;
+        let input = || measure.input.as_ref().unwrap();
+        let sketch_finals = |presenter: &str| {
+            format!("{presenter}(\"{name}__sketch\") AS \"{name}\", \"{name}__sketch\"")
+        };
         match measure.agg {
             AggKind::Sum | AggKind::Min | AggKind::Max | AggKind::Avg => {
                 let f = match measure.agg {
@@ -77,7 +92,8 @@ pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
                     AggKind::Max => "MAX",
                     _ => "AVG",
                 };
-                measure_selects.push(format!("{} AS {alias}", measure.input.as_ref().unwrap()));
+                measure_selects.push(format!("{} AS {alias}", input()));
+                passthrough.push(alias.clone());
                 agg_selects.push(format!("{f}({alias}) AS \"{name}\""));
                 final_cols.push(format!("\"{name}\""));
             }
@@ -86,21 +102,37 @@ pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
                 final_cols.push(format!("\"{name}\""));
             }
             AggKind::CountDistinct => {
-                // Sketch measures emit two columns: the presented estimate
-                // and the mergeable sketch blob (the serving layer's set-ops
-                // and incremental merges consume the blob).
-                measure_selects.push(format!(
-                    "CAST({} AS VARCHAR) AS {alias}",
-                    measure.input.as_ref().unwrap()
-                ));
+                measure_selects.push(format!("CAST({} AS VARCHAR) AS {alias}", input()));
+                passthrough.push(alias.clone());
                 agg_selects.push(format!("cubism_kmv_sketch({alias}) AS \"{name}__sketch\""));
-                final_cols.push(format!(
-                    "cubism_kmv_estimate(\"{name}__sketch\") AS \"{name}\", \"{name}__sketch\""
-                ));
+                final_cols.push(sketch_finals("cubism_kmv_estimate"));
             }
-            other => {
+            AggKind::TopK => {
+                let by = measure.by.as_ref().unwrap();
+                measure_selects.push(format!("CAST({} AS VARCHAR) AS {alias}k", input()));
+                measure_selects.push(format!("CAST({by} AS DOUBLE) AS {alias}s"));
+                passthrough.push(format!("{alias}k"));
+                passthrough.push(format!("{alias}s"));
+                agg_selects
+                    .push(format!("cubism_topk_sketch({alias}k, {alias}s) AS \"{name}__sketch\""));
+                final_cols.push(sketch_finals("cubism_topk_json"));
+            }
+            AggKind::ReservoirSample => {
+                measure_selects.push(format!("CAST({} AS VARCHAR) AS {alias}", input()));
+                passthrough.push(alias.clone());
+                agg_selects.push(format!("cubism_sample_sketch({alias}) AS \"{name}__sketch\""));
+                final_cols.push(sketch_finals("cubism_sample_json"));
+            }
+            AggKind::Centroid => {
+                measure_selects.push(format!("{} AS {alias}", input()));
+                passthrough.push(alias.clone());
+                agg_selects
+                    .push(format!("cubism_centroid_sketch({alias}) AS \"{name}__sketch\""));
+                final_cols.push(sketch_finals("cubism_centroid_mean"));
+            }
+            AggKind::Quantile => {
                 return plan_err!(
-                    "measure '{name}': agg {other:?} is not implemented in the engine yet"
+                    "measure '{name}': quantile is not implemented in the engine yet"
                 );
             }
         }
@@ -117,13 +149,7 @@ pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
          SELECT cubism_xunit_str(__xunit_key) AS xunit, {finals}\nFROM __cubism_cells",
         input = input_cols.join(", "),
         args = level_args.join(", "),
-        measures = spec
-            .measures
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| m.input.is_some())
-            .map(|(i, _)| format!(", __m{i}"))
-            .collect::<String>(),
+        measures = passthrough.iter().map(|a| format!(", {a}")).collect::<String>(),
         aggs = agg_selects.join(", "),
         finals = final_cols.join(", "),
     ))
@@ -229,6 +255,111 @@ includeGlobal: true
         assert!(cells.contains_key("/G"));
         assert!(!cells.keys().any(|k| k.contains("gender")));
         assert_eq!(cells.len(), 5); // CZ, CZ/Prague, CZ/Brno, US, /G
+    }
+
+    #[tokio::test]
+    async fn top_k_and_sample_measures_work_end_to_end() {
+        let spec = CubeSpec::from_yaml(
+            r#"
+apiVersion: v1
+name: topk_cube
+dimensions:
+  - name: gender
+measures:
+  - name: top_cities
+    agg: top_k
+    input: city
+    by: pv
+  - name: user_sample
+    agg: reservoir_sample
+    input: user_id
+includeGlobal: true
+"#,
+        )
+        .unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_batch("events", sample_batch()).unwrap();
+        let (df, _dict) = build_cube(&ctx, &spec, "events").await.unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let mut cells: HashMap<String, (String, String)> = HashMap::new();
+        for batch in &batches {
+            let xunit = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let topk = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+            let sample = batch.column(3).as_any().downcast_ref::<StringArray>().unwrap();
+            for i in 0..batch.num_rows() {
+                cells.insert(
+                    xunit.value(i).to_string(),
+                    (topk.value(i).to_string(), sample.value(i).to_string()),
+                );
+            }
+        }
+
+        // Global: Prague pv=10, Brno pv=20 (rows 3,4 have null city — no key).
+        let (topk, sample) = &cells["/G"];
+        assert_eq!(topk, r#"[{"key":"Brno","score":20.0},{"key":"Prague","score":10.0}]"#);
+        // Distinct users u1,u2,u3 all fit in the sample.
+        let users: Vec<String> = serde_json::from_str(sample).unwrap();
+        let mut sorted = users.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["u1", "u2", "u3"]);
+    }
+
+    #[tokio::test]
+    async fn centroid_measure_works_on_embedding_columns() {
+        use datafusion::arrow::array::{Float64Builder, ListArray, ListBuilder};
+
+        let mut emb = ListBuilder::new(Float64Builder::new());
+        emb.values().append_slice(&[1.0, 0.0]);
+        emb.append(true);
+        emb.values().append_slice(&[0.0, 1.0]);
+        emb.append(true);
+        let emb: ListArray = emb.finish();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("channel", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["eng", "eng"])),
+                Arc::new(emb),
+            ],
+        )
+        .unwrap();
+
+        let spec = CubeSpec::from_yaml(
+            r#"
+apiVersion: v1
+name: gbrain_cube
+dimensions:
+  - name: channel
+measures:
+  - name: topic_centroid
+    agg: centroid
+    input: embedding
+"#,
+        )
+        .unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_batch("docs", batch).unwrap();
+        let (df, _dict) = build_cube(&ctx, &spec, "docs").await.unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 1); // one cell: /channel/channel=eng
+        let means = batch.column(1).as_any().downcast_ref::<ListArray>().unwrap();
+        let mean = means.value(0);
+        let mean = mean
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .unwrap();
+        assert_eq!((mean.value(0), mean.value(1)), (0.5, 0.5));
     }
 
     #[tokio::test]
