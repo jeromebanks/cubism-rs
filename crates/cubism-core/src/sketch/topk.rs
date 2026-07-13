@@ -76,8 +76,13 @@ impl TopK {
         if self.entries.len() <= self.max_tracked() {
             return;
         }
+        // Cut back to `capacity`, not `max_tracked`: pruning to the
+        // threshold would evict one entry per new key, degenerating every
+        // add into an O(n log n) re-sort. Pruning to `capacity` restores
+        // the overflow headroom, so re-sorts amortize over
+        // `capacity * (OVERFLOW_FACTOR - 1)` inserts.
         let mut ranked = self.ranked();
-        ranked.truncate(self.max_tracked());
+        ranked.truncate(self.capacity as usize);
         self.entries = ranked.into_iter().collect();
     }
 

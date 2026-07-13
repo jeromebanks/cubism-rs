@@ -46,5 +46,16 @@ The output parquet is the serving artifact: one row per cell, canonical
 `xunit` string, presented measures, and mergeable sketch blobs (see
 `docs/sketches.md` for consuming them).
 
+## `cubism serve <cube.parquet> [--port 8080]`
+
+Serve a cube file: a read-only JSON API (`/api/meta`, `/api/cells`,
+`/api/cell`, `/api/setops`) plus an embedded dashboard at `/`. Binds to
+`127.0.0.1` only. Full endpoint reference: `docs/serving.md`.
+
+```text
+$ cubism serve cube.parquet
+serving 1227 cells at http://127.0.0.1:8080
+```
+
 Exit codes: 0 success, 1 on any error (unreadable input, invalid spec,
 execution failure) with the reason on stderr.

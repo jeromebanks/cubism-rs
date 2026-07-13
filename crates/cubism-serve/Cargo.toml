@@ -1,0 +1,22 @@
+[package]
+name = "cubism-serve"
+description = "REST serving layer + embedded dashboard over a Cubism cube file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cubism-core = { path = "../cubism-core" }
+# must track the arrow version DataFusion 54 ships (58.3)
+arrow = "58.3"
+parquet = { version = "58.3", features = ["arrow"] }
+axum = "0.8"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+cubism-datafusion = { path = "../cubism-datafusion" }
+tempfile = "3"

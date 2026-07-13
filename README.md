@@ -7,6 +7,44 @@ over pre-aggregated data.
 A ground-up Rust rewrite of a battle-tested Spark aggregation library
 (Qubism), built on Apache Arrow / DataFusion.
 
+## Watch it work on your own Claude Code sessions
+
+Claude Code keeps session transcripts on your machine. Cubism turns their
+**metadata** (tools, models, outcomes, token counts — never message content;
+nothing leaves your machine) into a cube in well under a second:
+
+```bash
+uvx maturin build --release -m bindings/cubism-py/Cargo.toml -o target/wheels
+uv run --with target/wheels/cubism-*.whl python examples/claude_trace_import.py --output examples/claude_events.parquet
+uv run --with target/wheels/cubism-*.whl python examples/01_your_claude_sessions.py
+```
+
+and answers, from one declarative spec: where your tokens and (nominal)
+dollars go by project × model × week, which tools fail on you and how often,
+which sessions were the expensive ones (real IDs you can `claude --resume`),
+and how much the prompt cache is carrying.
+
+Then put a dashboard on it — the cube parquet is a complete serving
+artifact:
+
+```bash
+cargo run --release -p cubism-cli -- run examples/claude_local.yaml \
+    --input examples/claude_events.parquet --output cube.parquet --show 0
+cargo run --release -p cubism-cli -- serve cube.parquet   # -> http://127.0.0.1:8080
+```
+
+Slice charts, a cell inspector, and an interactive set-operations panel
+that intersects any two cells' sketches at request time
+([`docs/serving.md`](docs/serving.md)).
+
+That's **Act I** (`examples/01_your_claude_sessions.py`). **Act II**
+(`examples/02_org_scale.py`, [rendered notebook](examples/02_org_scale.ipynb))
+replays the same idea at org scale — 5M synthetic tool calls, 500 engineers,
+8 weeks — where the sketch machinery starts doing things pre-aggregation
+normally can't: query-time set intersections across cells that were never
+aggregated together, affinity/lift from pure sketch algebra, per-cell top-k
+and exemplar drill-downs, and embedding-centroid "nearest semantic cells".
+
 ## The model
 
 - **YPath** — one dimension's hierarchical coordinate: `/geo/country=CZ/city=Prague`
@@ -50,20 +88,25 @@ bash.intersection_estimate(err)   # sessions that used Bash AND errored —
 ```
 
 Build the wheel with `uvx maturin build --release -m bindings/cubism-py/Cargo.toml`,
-then see `examples/agent_trace_demo.py` for a full agent-observability walkthrough.
+then see the two-act demo: `examples/01_your_claude_sessions.py` (your real
+data) and `examples/02_org_scale.py` (5M events, sketches, semantic cells).
 
 ## Workspace
 
 | Crate | Purpose |
 |---|---|
 | `cubism-core` | Engine-agnostic model: spec types, XUnit algebra, lattice generation, binary keys, sketches (no DataFusion dependency) |
-| `cubism-datafusion` | DataFusion execution: XUnit explode operator + sketch UDAFs |
-| `cubism-cli` | `cubism validate <spec.yaml>` today; `cubism run` next |
+| `cubism-datafusion` | DataFusion execution: XUnit explode UDFs, sketch UDAFs + presenters, spec→SQL cube builds |
+| `cubism-serve` | REST API + embedded dashboard over a cube file (`docs/serving.md`) |
+| `cubism-cli` | `cubism validate` / `cubism run` / `cubism serve` (see `docs/cli.md`) |
+| `bindings/cubism-py` | Python module (`pip`-installable wheel via maturin): `build_cube` → `pyarrow.Table`, sketch set algebra |
 
 ## Docs
 
 Start here:
 
+- [`docs/dogfooding.md`](docs/dogfooding.md) — run the analysis on your own
+  Claude Code sessions, solo or as a team merging each member's cube.
 - [`docs/concepts.md`](docs/concepts.md) — the data model: YPaths, XUnits,
   the cube lattice, filter rules, and why mergeable measures are the point.
 - [`docs/spec-reference.md`](docs/spec-reference.md) — every spec field,
@@ -78,6 +121,8 @@ Go deeper:
 - [`docs/python.md`](docs/python.md) — Python API reference and recipes
   (overlap, Jaccard matrices, affinity/lift, incremental merge).
 - [`docs/cli.md`](docs/cli.md) — `cubism validate` / `cubism run`.
+- [`docs/serving.md`](docs/serving.md) — `cubism serve`: the JSON API and
+  the embedded dashboard.
 
 Operate and extend:
 
@@ -87,15 +132,20 @@ Operate and extend:
 - [`docs/extending.md`](docs/extending.md) — extension points: spec
   expressions, new sketches, UDAFs, and scalar UDFs, with toy examples and
   the end-to-end checklist.
+- [`docs/high-cardinality.md`](docs/high-cardinality.md) — what happens
+  when a dimension contains a UUID or raw timestamp, the
+  `maxDictionaryEntries` guardrail, and the modeling patterns that fix it.
 
 ## Status
 
-Early development (M1 of the roadmap): the model, spec format, filter rules,
-lattice generation, and binary key encoding are implemented and tested.
-Execution (DataFusion), sketches, and Python bindings are next.
+Pre-release. Implemented and tested end-to-end: the model, spec format,
+filter rules, lattice generation, binary key encoding, DataFusion execution,
+four sketch aggregators (KMV, top-k, exemplar sample, centroid) with
+vectorized group accumulators, the CLI, and the Python bindings. Not yet:
+quantiles, published packages (crates.io / PyPI), streaming ingestion.
 
 ```
-cargo test          # 41 tests incl. property tests + legacy parity fixtures
+cargo test          # 75 tests incl. property tests + legacy parity fixtures
 cargo run -p cubism-cli -- validate examples/web_events.yaml
 ```
 

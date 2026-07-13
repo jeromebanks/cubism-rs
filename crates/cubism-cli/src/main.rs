@@ -12,7 +12,7 @@ use cubism_datafusion::datafusion::prelude::{CsvReadOptions, ParquetReadOptions,
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "usage:\n  cubism validate <spec.yaml>\n  cubism run <spec.yaml> --input <events.parquet|csv> [--output cube.parquet] [--show N]";
+const USAGE: &str = "usage:\n  cubism validate <spec.yaml>\n  cubism run <spec.yaml> --input <events.parquet|csv> [--output cube.parquet] [--show N]\n  cubism serve <cube.parquet> [--port 8080]";
 
 fn load_spec(path: &str) -> Result<CubeSpec, String> {
     let yaml = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -87,11 +87,35 @@ async fn run(spec_path: &str, input: &str, output: Option<&str>, show: usize) ->
     Ok(())
 }
 
+async fn serve(cube_path: &str, port: u16) -> Result<(), String> {
+    let store = cubism_serve::CubeStore::from_path(cube_path).map_err(|e| e.to_string())?;
+    cubism_serve::serve(store, port).await.map_err(|e| e.to_string())
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("validate") if args.len() == 2 => validate(&args[1]),
+        Some("serve") if args.len() >= 2 => {
+            let mut port = 8080u16;
+            let mut flag_err = None;
+            let mut i = 2;
+            while i < args.len() {
+                match (args[i].as_str(), args.get(i + 1)) {
+                    ("--port", Some(v)) => match v.parse() {
+                        Ok(p) => port = p,
+                        Err(_) => flag_err = Some(format!("--port expects a number, got '{v}'")),
+                    },
+                    (flag, _) => flag_err = Some(format!("unknown or incomplete flag '{flag}'")),
+                }
+                i += 2;
+            }
+            match flag_err {
+                Some(e) => Err(e),
+                None => serve(&args[1], port).await,
+            }
+        }
         Some("run") if args.len() >= 2 => {
             let spec_path = &args[1];
             let mut input = None;

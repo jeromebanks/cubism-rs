@@ -1,0 +1,37 @@
+# Cube over your own Claude Code sessions.
+# Input: claude_events.parquet from examples/claude_trace_import.py
+apiVersion: v1
+name: claude_sessions
+dimensions:
+  - name: project
+  - name: model
+    levels: [model_family, model]
+  - name: tool
+    levels: [tool_group, tool]
+  - name: outcome
+  - name: loop
+  - name: time
+    levels: [week, day]
+filterRules:
+  - type: max_dimensions
+    n: 2
+measures:
+  - name: cost
+    agg: sum
+    input: cost_usd
+  - name: tokens
+    agg: sum
+    input: tokens
+  - name: cache_read
+    agg: sum
+    input: tokens_cache_read
+  - name: calls
+    agg: count
+  - name: sessions
+    agg: count_distinct
+    input: session_id
+  - name: costliest_sessions
+    agg: top_k
+    input: session_id
+    by: cost_usd
+includeGlobal: true

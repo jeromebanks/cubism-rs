@@ -220,6 +220,30 @@ includeGlobal: true
     }
 
     #[tokio::test]
+    async fn dictionary_guard_fails_fast_on_high_cardinality_dimension() {
+        // user_id as a dimension: 3 distinct values but the cap allows far
+        // fewer interned strings, standing in for the UUID-dimension case.
+        let spec_yaml = r#"
+apiVersion: v1
+name: exploding
+dimensions:
+  - name: user_id
+  - name: gender
+measures:
+  - name: events
+    agg: count
+maxDictionaryEntries: 3
+includeGlobal: true
+"#;
+        let spec = CubeSpec::from_yaml(spec_yaml).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_batch("events", sample_batch()).unwrap();
+        let (df, _dict) = build_cube(&ctx, &spec, "events").await.unwrap();
+        let err = df.collect().await.unwrap_err().to_string();
+        assert!(err.contains("maxDictionaryEntries"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
     async fn end_to_end_cube_matches_hand_computed_cells() {
         let cells = run_cube(SPEC).await;
 

@@ -12,6 +12,9 @@ dimensions: [...]         # required, at least one
 filterRules: [...]        # optional, default []
 measures: [...]           # required in practice (a cube with no measures fails at plan time)
 includeGlobal: false      # optional, default false
+maxDictionaryEntries: 1000000  # optional; build fails fast past this many distinct
+                               # interned dimension values — the guardrail against
+                               # UUID/timestamp dimensions (docs/high-cardinality.md)
 ```
 
 ## `dimensions`

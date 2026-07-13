@@ -15,13 +15,15 @@ use cubism_core::sketch::kmv::{hash_value, KmvSketch, DEFAULT_SKETCH_SIZE};
 use cubism_core::sketch::sample::DEFAULT_SAMPLE_CAPACITY;
 use cubism_core::sketch::topk::DEFAULT_TOPK_CAPACITY;
 use cubism_core::sketch::{Centroid, ExemplarSample, TopK};
-use datafusion::arrow::array::{Array, ArrayRef, AsArray, Float64Builder};
+use datafusion::arrow::array::{
+    Array, ArrayRef, AsArray, BinaryBuilder, BooleanArray, Float64Builder,
+};
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion::common::{exec_err, Result, ScalarValue};
 use datafusion::logical_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion::logical_expr::{
-    Accumulator, AggregateUDF, AggregateUDFImpl, ColumnarValue, ScalarFunctionArgs, ScalarUDF,
-    ScalarUDFImpl, Signature, Volatility,
+    Accumulator, AggregateUDF, AggregateUDFImpl, ColumnarValue, EmitTo, GroupsAccumulator,
+    ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
 use std::sync::Arc;
 
@@ -55,6 +57,17 @@ impl AggregateUDFImpl for KmvSketchUdaf {
             true,
         ))])
     }
+
+    fn groups_accumulator_supported(&self, _args: AccumulatorArgs) -> bool {
+        true
+    }
+
+    fn create_groups_accumulator(
+        &self,
+        _args: AccumulatorArgs,
+    ) -> Result<Box<dyn GroupsAccumulator>> {
+        Ok(Box::new(SketchGroupsAccumulator::new(KmvKernel { k: self.k })))
+    }
 }
 
 #[derive(Debug)]
@@ -65,11 +78,21 @@ struct KmvAccumulator {
 impl Accumulator for KmvAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         let arr = values[0].as_string::<i32>();
-        let batch = KmvSketch::from_hashes(
-            self.sketch.k(),
-            arr.iter().flatten().map(|s| hash_value(s.as_bytes())),
-        );
-        self.sketch = self.sketch.merge(&batch);
+        // High-cardinality GROUP BYs deliver many tiny per-group slices;
+        // per-row insert (O(log k) reject once full) beats building and
+        // merging a throwaway sketch per call. Bulk-build only wins on
+        // slices comparable to k.
+        if arr.len() > self.sketch.k() as usize {
+            let batch = KmvSketch::from_hashes(
+                self.sketch.k(),
+                arr.iter().flatten().map(|s| hash_value(s.as_bytes())),
+            );
+            self.sketch = self.sketch.merge(&batch);
+        } else {
+            for s in arr.iter().flatten() {
+                self.sketch.insert_hash(hash_value(s.as_bytes()));
+            }
+        }
         Ok(())
     }
 
@@ -166,6 +189,17 @@ impl AggregateUDFImpl for TopKUdaf {
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
         Ok(vec![Arc::new(Field::new(format!("{}[topk]", args.name), DataType::Binary, true))])
     }
+
+    fn groups_accumulator_supported(&self, _args: AccumulatorArgs) -> bool {
+        true
+    }
+
+    fn create_groups_accumulator(
+        &self,
+        _args: AccumulatorArgs,
+    ) -> Result<Box<dyn GroupsAccumulator>> {
+        Ok(Box::new(SketchGroupsAccumulator::new(TopKKernel { capacity: self.capacity })))
+    }
 }
 
 #[derive(Debug)]
@@ -238,6 +272,17 @@ impl AggregateUDFImpl for SampleUdaf {
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
         Ok(vec![Arc::new(Field::new(format!("{}[sample]", args.name), DataType::Binary, true))])
     }
+
+    fn groups_accumulator_supported(&self, _args: AccumulatorArgs) -> bool {
+        true
+    }
+
+    fn create_groups_accumulator(
+        &self,
+        _args: AccumulatorArgs,
+    ) -> Result<Box<dyn GroupsAccumulator>> {
+        Ok(Box::new(SketchGroupsAccumulator::new(SampleKernel { capacity: self.capacity })))
+    }
 }
 
 #[derive(Debug)]
@@ -305,6 +350,17 @@ impl AggregateUDFImpl for CentroidUdaf {
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
         Ok(vec![Arc::new(Field::new(format!("{}[centroid]", args.name), DataType::Binary, true))])
     }
+
+    fn groups_accumulator_supported(&self, _args: AccumulatorArgs) -> bool {
+        true
+    }
+
+    fn create_groups_accumulator(
+        &self,
+        _args: AccumulatorArgs,
+    ) -> Result<Box<dyn GroupsAccumulator>> {
+        Ok(Box::new(SketchGroupsAccumulator::new(CentroidKernel)))
+    }
 }
 
 #[derive(Debug)]
@@ -320,21 +376,37 @@ impl Accumulator for CentroidAccumulator {
                 values[0].data_type()
             );
         };
-        for i in 0..lists.len() {
-            if lists.is_null(i) {
-                continue;
+        let Some(floats) = lists
+            .values()
+            .as_primitive_opt::<datafusion::arrow::datatypes::Float64Type>()
+        else {
+            return exec_err!(
+                "cubism_centroid_sketch expects DOUBLE elements, got {}",
+                lists.values().data_type()
+            );
+        };
+        let offsets = lists.value_offsets();
+        if floats.null_count() == 0 {
+            // fast path: index the child values directly, no per-row
+            // downcast/Arc/Vec
+            let values = floats.values();
+            for i in 0..lists.len() {
+                if lists.is_null(i) {
+                    continue;
+                }
+                let (start, end) = (offsets[i] as usize, offsets[i + 1] as usize);
+                self.centroid.add(&values[start..end]).map_err(to_df_err)?;
             }
-            let inner = lists.value(i);
-            let Some(floats) =
-                inner.as_primitive_opt::<datafusion::arrow::datatypes::Float64Type>()
-            else {
-                return exec_err!(
-                    "cubism_centroid_sketch expects DOUBLE elements, got {}",
-                    inner.data_type()
-                );
-            };
-            let vector: Vec<f64> = floats.iter().map(|v| v.unwrap_or(0.0)).collect();
-            self.centroid.add(&vector).map_err(to_df_err)?;
+        } else {
+            for i in 0..lists.len() {
+                if lists.is_null(i) {
+                    continue;
+                }
+                let (start, end) = (offsets[i] as usize, offsets[i + 1] as usize);
+                let vector: Vec<f64> =
+                    (start..end).map(|j| if floats.is_null(j) { 0.0 } else { floats.value(j) }).collect();
+                self.centroid.add(&vector).map_err(to_df_err)?;
+            }
         }
         Ok(())
     }
@@ -456,6 +528,309 @@ impl ScalarUDFImpl for CentroidMeanUdf {
             }
         }
         Ok(ColumnarValue::Array(Arc::new(out.finish())))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vectorized group accumulators.
+//
+// Without these, DataFusion falls back to GroupsAccumulatorAdapter, which
+// re-partitions and gathers every batch's input arrays once per touched
+// group per aggregate — with thousands of cells that tax dwarfs the sketch
+// work itself (measured 19x on the org demo). Here each batch is walked
+// once, updating `sketches[group]` per row.
+// ---------------------------------------------------------------------------
+
+/// Per-sketch logic for [`SketchGroupsAccumulator`]: how to make an empty
+/// sketch, apply one input batch, and (de)serialize.
+trait SketchKernel: std::fmt::Debug + Send + Sync + 'static {
+    type Sketch: Clone + std::fmt::Debug + Send + Sync;
+    fn empty(&self) -> Self::Sketch;
+    /// Walk the batch once, updating `groups[group_indices[row]]` per row.
+    fn update_rows(
+        &self,
+        groups: &mut [Self::Sketch],
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+    ) -> Result<()>;
+    fn merge_blob(sketch: &mut Self::Sketch, blob: &[u8]) -> Result<()>;
+    fn to_bytes(sketch: &Self::Sketch) -> Vec<u8>;
+    fn mem_size(sketch: &Self::Sketch) -> usize;
+}
+
+/// Rows excluded by `opt_filter` must not reach the sketch.
+fn filtered(opt_filter: Option<&BooleanArray>, row: usize) -> bool {
+    opt_filter.is_some_and(|f| !f.value(row))
+}
+
+#[derive(Debug)]
+struct SketchGroupsAccumulator<K: SketchKernel> {
+    kernel: K,
+    groups: Vec<K::Sketch>,
+}
+
+impl<K: SketchKernel> SketchGroupsAccumulator<K> {
+    fn new(kernel: K) -> Self {
+        SketchGroupsAccumulator { kernel, groups: Vec::new() }
+    }
+
+    fn resize(&mut self, total_num_groups: usize) {
+        if self.groups.len() < total_num_groups {
+            self.groups.resize(total_num_groups, self.kernel.empty());
+        }
+    }
+
+    fn emit(&mut self, emit_to: EmitTo) -> Vec<K::Sketch> {
+        match emit_to {
+            EmitTo::All => std::mem::take(&mut self.groups),
+            EmitTo::First(n) => self.groups.drain(..n).collect(),
+        }
+    }
+}
+
+impl<K: SketchKernel> GroupsAccumulator for SketchGroupsAccumulator<K> {
+    fn update_batch(
+        &mut self,
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+        total_num_groups: usize,
+    ) -> Result<()> {
+        self.resize(total_num_groups);
+        self.kernel.update_rows(&mut self.groups, values, group_indices, opt_filter)
+    }
+
+    fn evaluate(&mut self, emit_to: EmitTo) -> Result<ArrayRef> {
+        let mut out = BinaryBuilder::new();
+        for sketch in self.emit(emit_to) {
+            out.append_value(K::to_bytes(&sketch));
+        }
+        Ok(Arc::new(out.finish()))
+    }
+
+    fn state(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
+        // state == evaluate == the serialized blob, for every sketch kind
+        Ok(vec![self.evaluate(emit_to)?])
+    }
+
+    fn merge_batch(
+        &mut self,
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+        total_num_groups: usize,
+    ) -> Result<()> {
+        self.resize(total_num_groups);
+        let blobs = values[0].as_binary::<i32>();
+        for (row, &group) in group_indices.iter().enumerate() {
+            if blobs.is_null(row) || filtered(opt_filter, row) {
+                continue;
+            }
+            K::merge_blob(&mut self.groups[group], blobs.value(row))?;
+        }
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.groups.iter().map(K::mem_size).sum::<usize>()
+    }
+}
+
+#[derive(Debug)]
+struct KmvKernel {
+    k: u32,
+}
+
+impl SketchKernel for KmvKernel {
+    type Sketch = KmvSketch;
+
+    fn empty(&self) -> KmvSketch {
+        KmvSketch::new(self.k)
+    }
+
+    fn update_rows(
+        &self,
+        groups: &mut [KmvSketch],
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+    ) -> Result<()> {
+        let arr = values[0].as_string::<i32>();
+        for (row, &group) in group_indices.iter().enumerate() {
+            if arr.is_null(row) || filtered(opt_filter, row) {
+                continue;
+            }
+            groups[group].insert_hash(hash_value(arr.value(row).as_bytes()));
+        }
+        Ok(())
+    }
+
+    fn merge_blob(sketch: &mut KmvSketch, blob: &[u8]) -> Result<()> {
+        *sketch = sketch.merge(&KmvSketch::from_bytes(blob).map_err(to_df_err)?);
+        Ok(())
+    }
+
+    fn to_bytes(sketch: &KmvSketch) -> Vec<u8> {
+        sketch.to_bytes()
+    }
+
+    fn mem_size(sketch: &KmvSketch) -> usize {
+        std::mem::size_of::<KmvSketch>() + sketch.len() * 8
+    }
+}
+
+#[derive(Debug)]
+struct TopKKernel {
+    capacity: u32,
+}
+
+impl SketchKernel for TopKKernel {
+    type Sketch = TopK;
+
+    fn empty(&self) -> TopK {
+        TopK::new(self.capacity)
+    }
+
+    fn update_rows(
+        &self,
+        groups: &mut [TopK],
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+    ) -> Result<()> {
+        let keys = values[0].as_string::<i32>();
+        let scores = values[1].as_primitive::<datafusion::arrow::datatypes::Float64Type>();
+        for (row, &group) in group_indices.iter().enumerate() {
+            if keys.is_null(row) || scores.is_null(row) || filtered(opt_filter, row) {
+                continue;
+            }
+            groups[group].add(keys.value(row), scores.value(row));
+        }
+        Ok(())
+    }
+
+    fn merge_blob(sketch: &mut TopK, blob: &[u8]) -> Result<()> {
+        *sketch = sketch.merge(&TopK::from_bytes(blob).map_err(to_df_err)?);
+        Ok(())
+    }
+
+    fn to_bytes(sketch: &TopK) -> Vec<u8> {
+        sketch.to_bytes()
+    }
+
+    fn mem_size(sketch: &TopK) -> usize {
+        std::mem::size_of::<TopK>() + sketch.len() * 32
+    }
+}
+
+#[derive(Debug)]
+struct SampleKernel {
+    capacity: u32,
+}
+
+impl SketchKernel for SampleKernel {
+    type Sketch = ExemplarSample;
+
+    fn empty(&self) -> ExemplarSample {
+        ExemplarSample::new(self.capacity)
+    }
+
+    fn update_rows(
+        &self,
+        groups: &mut [ExemplarSample],
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+    ) -> Result<()> {
+        let arr = values[0].as_string::<i32>();
+        for (row, &group) in group_indices.iter().enumerate() {
+            if arr.is_null(row) || filtered(opt_filter, row) {
+                continue;
+            }
+            groups[group].insert(arr.value(row));
+        }
+        Ok(())
+    }
+
+    fn merge_blob(sketch: &mut ExemplarSample, blob: &[u8]) -> Result<()> {
+        *sketch = sketch.merge(&ExemplarSample::from_bytes(blob).map_err(to_df_err)?);
+        Ok(())
+    }
+
+    fn to_bytes(sketch: &ExemplarSample) -> Vec<u8> {
+        sketch.to_bytes()
+    }
+
+    fn mem_size(sketch: &ExemplarSample) -> usize {
+        std::mem::size_of::<ExemplarSample>() + sketch.len() * 32
+    }
+}
+
+#[derive(Debug)]
+struct CentroidKernel;
+
+impl SketchKernel for CentroidKernel {
+    type Sketch = Centroid;
+
+    fn empty(&self) -> Centroid {
+        Centroid::new()
+    }
+
+    fn update_rows(
+        &self,
+        groups: &mut [Centroid],
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+    ) -> Result<()> {
+        let Some(lists) = values[0].as_list_opt::<i32>() else {
+            return exec_err!(
+                "cubism_centroid_sketch expects a list-of-float column, got {}",
+                values[0].data_type()
+            );
+        };
+        let Some(floats) = lists
+            .values()
+            .as_primitive_opt::<datafusion::arrow::datatypes::Float64Type>()
+        else {
+            return exec_err!(
+                "cubism_centroid_sketch expects DOUBLE elements, got {}",
+                lists.values().data_type()
+            );
+        };
+        let offsets = lists.value_offsets();
+        let dense = floats.null_count() == 0;
+        let flat = floats.values();
+        for (row, &group) in group_indices.iter().enumerate() {
+            if lists.is_null(row) || filtered(opt_filter, row) {
+                continue;
+            }
+            let (start, end) = (offsets[row] as usize, offsets[row + 1] as usize);
+            if dense {
+                groups[group].add(&flat[start..end]).map_err(to_df_err)?;
+            } else {
+                let vector: Vec<f64> = (start..end)
+                    .map(|j| if floats.is_null(j) { 0.0 } else { floats.value(j) })
+                    .collect();
+                groups[group].add(&vector).map_err(to_df_err)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn merge_blob(sketch: &mut Centroid, blob: &[u8]) -> Result<()> {
+        *sketch = sketch.merge(&Centroid::from_bytes(blob).map_err(to_df_err)?).map_err(to_df_err)?;
+        Ok(())
+    }
+
+    fn to_bytes(sketch: &Centroid) -> Vec<u8> {
+        sketch.to_bytes()
+    }
+
+    fn mem_size(sketch: &Centroid) -> usize {
+        std::mem::size_of::<Centroid>() + sketch.dim() * 8
     }
 }
 

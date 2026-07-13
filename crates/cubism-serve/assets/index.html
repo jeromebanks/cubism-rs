@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cubism</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='1' width='6' height='6' fill='%235ec8f2'/><rect x='9' y='1' width='6' height='6' fill='%23f2a65e'/><rect x='1' y='9' width='6' height='6' fill='%23f2a65e'/><rect x='9' y='9' width='6' height='6' fill='%235ec8f2'/></svg>">
+<style>
+  :root {
+    --bg: #101418; --panel: #1a2027; --line: #2a323c;
+    --text: #e6ebf0; --muted: #8b98a5; --accent: #5ec8f2; --accent2: #f2a65e;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif;
+    padding: 20px; max-width: 1100px; margin: 0 auto;
+  }
+  h1 { font-size: 18px; font-weight: 600; }
+  h1 small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+       color: var(--muted); margin-bottom: 10px; }
+  header { display: flex; align-items: baseline; justify-content: space-between;
+           margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+          padding: 10px 14px; min-width: 120px; }
+  .stat .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .l { color: var(--muted); font-size: 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+           padding: 16px; margin-bottom: 16px; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  select, input {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 8px; font: inherit; max-width: 260px;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+  svg text { fill: var(--text); font-size: 12px; }
+  svg .muted { fill: var(--muted); }
+  rect.bar { fill: var(--accent); cursor: pointer; }
+  rect.bar:hover { fill: var(--accent2); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td, th { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: left; }
+  td:last-child, th:last-child { text-align: right; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { background: var(--bg); border: 1px solid var(--line); border-radius: 99px;
+          padding: 2px 10px; font-size: 12px; color: var(--muted); }
+  .ops { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+  .err { color: #f26d6d; }
+  code { color: var(--accent); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cubism<small id="source"></small></h1>
+  <span id="cellcount" style="color:var(--muted)"></span>
+</header>
+
+<div class="stats" id="overview"></div>
+
+<div class="panel">
+  <h2>Slice</h2>
+  <div class="controls">
+    <select id="sliceDim"></select>
+    <select id="sliceDepth"><option value="1">level 1</option><option value="2">level 2</option></select>
+    <select id="sliceMeasure"></select>
+  </div>
+  <div id="sliceChart"></div>
+</div>
+
+<div class="grid2">
+  <div class="panel">
+    <h2>Set operations <span style="text-transform:none;letter-spacing:0">— query-time, from stored sketches</span></h2>
+    <div class="controls">
+      <select id="opsA"></select>
+      <select id="opsB"></select>
+      <select id="opsMeasure"></select>
+    </div>
+    <div id="opsOut"></div>
+  </div>
+  <div class="panel">
+    <h2>Cell inspector</h2>
+    <div class="controls">
+      <input id="inspectX" placeholder="/G" style="flex:1;max-width:none">
+    </div>
+    <div id="inspectOut" style="color:var(--muted)">Click a bar, or type an xunit.</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let META, NUMERIC = [];
+
+async function api(path) {
+  const r = await fetch(path);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+const fmt = v => {
+  if (v == null || typeof v !== "number") return "–";
+  if (Number.isInteger(v)) return v.toLocaleString();
+  if (Math.abs(v) >= 1000) return Math.round(v).toLocaleString();
+  return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+};
+
+function options(sel, items, value) {
+  sel.innerHTML = "";
+  for (const it of items) {
+    const o = document.createElement("option");
+    o.value = it.value ?? it; o.textContent = it.label ?? it;
+    sel.appendChild(o);
+  }
+  if (value !== undefined) sel.value = value;
+}
+
+function barChart(el, items, onclick) {
+  const W = el.clientWidth || 700, rowH = 24, labelW = 190;
+  const max = Math.max(...items.map(i => i.value), 1e-9);
+  const H = items.length * rowH + 4;
+  let s = `<svg width="${W}" height="${H}" role="img">`;
+  items.forEach((it, i) => {
+    const y = i * rowH, w = Math.max(2, (W - labelW - 90) * it.value / max);
+    s += `<text x="${labelW - 8}" y="${y + 16}" text-anchor="end">${esc(it.label).slice(0, 28)}</text>`
+      + `<rect class="bar" data-x="${esc(it.xunit)}" x="${labelW}" y="${y + 4}" width="${w}" height="${rowH - 8}" rx="3"></rect>`
+      + `<text class="muted" x="${labelW + w + 6}" y="${y + 16}">${fmt(it.value)}</text>`;
+  });
+  el.innerHTML = s + "</svg>";
+  el.querySelectorAll("rect.bar").forEach(r =>
+    r.addEventListener("click", () => onclick(r.dataset.x)));
+}
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function drawOverview() {
+  if (!META.has_global) return;
+  const g = await api("/api/cell?xunit=/G");
+  NUMERIC = META.measures.filter(m => typeof g.measures[m] === "number");
+  $("overview").innerHTML = NUMERIC.map(m =>
+    `<div class="stat"><div class="v">${fmt(g.measures[m])}</div><div class="l">${esc(m)} · /G</div></div>`
+  ).join("");
+}
+
+async function drawSlice() {
+  const dim = $("sliceDim").value, depth = $("sliceDepth").value, m = $("sliceMeasure").value;
+  try {
+    const r = await api(`/api/cells?dim=${enc(dim)}&depth=${depth}&sort=${enc(m)}&limit=15`);
+    const items = r.cells.map(c => ({ label: c.label, xunit: c.xunit, value: c.measures[m] }));
+    items.length
+      ? barChart($("sliceChart"), items, inspect)
+      : $("sliceChart").innerHTML = `<span style="color:var(--muted)">no level-${depth} cells for ${esc(dim)}</span>`;
+  } catch (e) { $("sliceChart").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+async function populateOps(byDim) {
+  const kmv = META.sketches.filter(s => s.kind === "kmv").map(s => s.measure);
+  options($("opsMeasure"), kmv);
+  const cells = META.dimensions.flatMap(d =>
+    byDim[d].map(c => ({ value: c.xunit, label: c.xunit })));
+  options($("opsA"), cells);
+  // default B to another dimension's first cell so the initial ∩ is a real cross
+  const otherDim = META.dimensions.find(d => byDim[d].length && !cells[0]?.value.startsWith(`/${d}/`));
+  options($("opsB"), cells, otherDim ? byDim[otherDim][0].xunit : cells[1]?.value);
+  if (kmv.length && cells.length > 1) drawOps();
+}
+
+async function drawOps() {
+  try {
+    const r = await api(`/api/setops?a=${enc($("opsA").value)}&b=${enc($("opsB").value)}&measure=${enc($("opsMeasure").value)}`);
+    const card = (l, v) =>
+      `<div class="stat"><div class="v">${v}</div><div class="l">${esc(l)}</div></div>`;
+    $("opsOut").innerHTML = `<div class="ops">`
+      + card("A", fmt(r.a.estimate)) + card("B", fmt(r.b.estimate))
+      + card("A ∩ B", fmt(r.intersection)) + card("A ∪ B", fmt(r.union))
+      + card("Jaccard", r.jaccard.toFixed(3))
+      + (r.lift != null ? card("lift", r.lift.toFixed(2)) : "")
+      + `</div><p style="margin-top:10px;color:var(--muted)">distinct <b>${esc(r.measure)}</b> —
+         computed now from two stored sketches; this pair was never pre-aggregated.</p>`;
+  } catch (e) { $("opsOut").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+async function inspect(xunit) {
+  $("inspectX").value = xunit;
+  try {
+    const c = await api(`/api/cell?xunit=${enc(xunit)}`);
+    let h = `<table>` + META.measures
+      .filter(m => typeof c.measures[m] === "number")
+      .map(m => `<tr><td>${esc(m)}</td><td>${fmt(c.measures[m])}</td></tr>`).join("") + `</table>`;
+    for (const [name, s] of Object.entries(c.sketches)) {
+      if (!s) continue;
+      if (s.kind === "kmv")
+        h += `<p style="margin-top:10px"><b>${esc(name)}</b>: ≈ ${fmt(s.estimate)} distinct <span style="color:var(--muted)">(k=${s.k})</span></p>`;
+      if (s.kind === "top_k" && s.items.length)
+        h += `<p style="margin-top:10px"><b>${esc(name)}</b></p><table>` + s.items.slice(0, 8)
+          .map(([k, v]) => `<tr><td><code>${esc(k)}</code></td><td>${fmt(v)}</td></tr>`).join("") + `</table>`;
+      if (s.kind === "sample" && s.values.length)
+        h += `<p style="margin-top:10px"><b>${esc(name)}</b></p><div class="chips">`
+          + s.values.slice(0, 12).map(v => `<span class="chip">${esc(v)}</span>`).join("") + `</div>`;
+      if (s.kind === "centroid" && s.mean)
+        h += `<p style="margin-top:10px"><b>${esc(name)}</b>: ${s.dim}-dim centroid</p>`;
+    }
+    $("inspectOut").innerHTML = h;
+  } catch (e) { $("inspectOut").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+
+const enc = encodeURIComponent;
+
+async function init() {
+  META = await api("/api/meta");
+  $("source").textContent = META.source.split("/").pop();
+  $("cellcount").textContent = `${META.cells.toLocaleString()} cells`;
+  await drawOverview();
+  if (!NUMERIC.length) NUMERIC = META.measures;
+  const byDim = {};
+  for (const dim of META.dimensions)
+    byDim[dim] = (await api(`/api/cells?dim=${enc(dim)}&depth=1&limit=100`)).cells;
+  // default the slice to the dimension with the most to show
+  const best = META.dimensions.reduce((a, b) => byDim[b].length > byDim[a].length ? b : a);
+  options($("sliceDim"), META.dimensions, best);
+  options($("sliceMeasure"), NUMERIC);
+  await drawSlice();
+  await populateOps(byDim);
+  if (META.has_global) inspect("/G");
+  for (const id of ["sliceDim", "sliceDepth", "sliceMeasure"]) $(id).addEventListener("change", drawSlice);
+  for (const id of ["opsA", "opsB", "opsMeasure"]) $(id).addEventListener("change", drawOps);
+  $("inspectX").addEventListener("change", () => inspect($("inspectX").value));
+}
+init().catch(e => document.body.insertAdjacentHTML("beforeend", `<p class="err">${esc(e.message)}</p>`));
+</script>
+</body>
+</html>

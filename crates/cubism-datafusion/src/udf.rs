@@ -34,6 +34,9 @@ struct ExplodeShape {
     dims: Vec<(String, Vec<String>)>,
     filter_rules: Vec<FilterRule>,
     include_global: bool,
+    /// From the spec's `maxDictionaryEntries`: fail fast when a
+    /// high-cardinality dimension floods the dictionary.
+    max_dictionary_entries: usize,
 }
 
 impl ExplodeShape {
@@ -49,6 +52,7 @@ impl ExplodeShape {
             dims,
             filter_rules: spec.filter_rules.clone(),
             include_global: spec.include_global,
+            max_dictionary_entries: spec.max_dictionary_entries,
         }
     }
 
@@ -69,6 +73,13 @@ impl ExplodeShape {
 /// misses back under one short lock at batch end.
 type MemoBucket = Vec<(Vec<Option<String>>, Arc<Vec<Vec<u8>>>)>;
 type KeyMemo = Arc<Mutex<Arc<HashMap<u64, MemoBucket>>>>;
+
+/// Stop growing the memo past this many hash buckets. The memo only pays
+/// for itself when tuples repeat; with a high-cardinality input (every row
+/// distinct) an unbounded memo is pure memory growth, and the batch-end
+/// merge — which clones the shared map — would go quadratic. Past the cap,
+/// rows just take the compute path; results stay identical.
+const MEMO_MAX_BUCKETS: usize = 1 << 18;
 
 fn tuple_matches(stored: &[Option<String>], cols: &[&datafusion::arrow::array::StringArray], row: usize) -> bool {
     stored.iter().zip(cols).all(|(s, col)| match s {
@@ -105,12 +116,14 @@ impl std::hash::Hash for XUnitKeysUdf {
 impl XUnitKeysUdf {
     /// The slow path: rebuild per-dimension hierarchy YPaths from the
     /// flattened, truncate-at-first-null level values, generate the pruned
-    /// lattice, and encode each cell key.
+    /// lattice, and encode each cell key. The caller holds the dictionary
+    /// lock (once per batch, not per row).
     fn compute_row_keys(
         &self,
+        dict: &mut XUnitDictionary,
         cols: &[&datafusion::arrow::array::StringArray],
         row: usize,
-    ) -> Vec<Vec<u8>> {
+    ) -> Result<Vec<Vec<u8>>> {
         let mut per_dimension = Vec::with_capacity(self.shape.dims.len());
         let mut col_idx = 0;
         for (dim, levels) in &self.shape.dims {
@@ -132,8 +145,19 @@ impl XUnitKeysUdf {
 
         let xunits =
             generate_xunits(&per_dimension, &self.shape.filter_rules, self.shape.include_global);
-        let mut dict = self.dict.lock().expect("dictionary poisoned");
-        xunits.iter().map(|x| encode_xunit(x, &mut dict)).collect()
+        let keys = xunits.iter().map(|x| encode_xunit(x, dict)).collect();
+        if dict.len() > self.shape.max_dictionary_entries {
+            return exec_err!(
+                "cube dictionary exceeded maxDictionaryEntries ({}) — a dimension is \
+                 likely high-cardinality (a UUID, raw timestamp, or free-form text). \
+                 Bucket it with a level `expr` (date_trunc, CASE, substr), or model \
+                 identity as a measure (count_distinct / top_k / reservoir_sample) \
+                 instead of a dimension. See docs/high-cardinality.md; raise \
+                 maxDictionaryEntries in the spec only if the cardinality is intended",
+                self.shape.max_dictionary_entries
+            );
+        }
+        Ok(keys)
     }
 }
 
@@ -168,6 +192,11 @@ impl ScalarUDFImpl for XUnitKeysUdf {
 
         let snapshot = Arc::clone(&*self.memo.lock().expect("memo poisoned"));
         let mut batch_misses: HashMap<u64, MemoBucket> = HashMap::new();
+        let memo_full = snapshot.len() >= MEMO_MAX_BUCKETS;
+        // Lock the dictionary once for all of this batch's misses, not per
+        // row: all-miss workloads (first batches, high-cardinality tuples)
+        // would otherwise serialize the partitions on the lock.
+        let mut dict_guard: Option<std::sync::MutexGuard<'_, XUnitDictionary>> = None;
 
         for row in 0..num_rows {
             // Hash the row's level-value tuple (null-aware) for memo lookup.
@@ -194,12 +223,16 @@ impl ScalarUDFImpl for XUnitKeysUdf {
             let keys = match cached {
                 Some(keys) => keys,
                 None => {
-                    let tuple: Vec<Option<String>> = cols
-                        .iter()
-                        .map(|c| (!c.is_null(row)).then(|| c.value(row).to_string()))
-                        .collect();
-                    let keys = Arc::new(self.compute_row_keys(&cols, row));
-                    batch_misses.entry(memo_key).or_default().push((tuple, Arc::clone(&keys)));
+                    let dict = dict_guard
+                        .get_or_insert_with(|| self.dict.lock().expect("dictionary poisoned"));
+                    let keys = Arc::new(self.compute_row_keys(dict, &cols, row)?);
+                    if !memo_full {
+                        let tuple: Vec<Option<String>> = cols
+                            .iter()
+                            .map(|c| (!c.is_null(row)).then(|| c.value(row).to_string()))
+                            .collect();
+                        batch_misses.entry(memo_key).or_default().push((tuple, Arc::clone(&keys)));
+                    }
                     keys
                 }
             };
@@ -210,18 +243,22 @@ impl ScalarUDFImpl for XUnitKeysUdf {
             builder.append(true);
         }
 
+        drop(dict_guard);
+
         if !batch_misses.is_empty() {
             let mut shared = self.memo.lock().expect("memo poisoned");
-            let mut merged = (**shared).clone();
-            for (hash, bucket) in batch_misses {
-                let target = merged.entry(hash).or_default();
-                for (tuple, keys) in bucket {
-                    if !target.iter().any(|(t, _)| *t == tuple) {
-                        target.push((tuple, keys));
+            if shared.len() < MEMO_MAX_BUCKETS {
+                let mut merged = (**shared).clone();
+                for (hash, bucket) in batch_misses {
+                    let target = merged.entry(hash).or_default();
+                    for (tuple, keys) in bucket {
+                        if !target.iter().any(|(t, _)| *t == tuple) {
+                            target.push((tuple, keys));
+                        }
                     }
                 }
+                *shared = Arc::new(merged);
             }
-            *shared = Arc::new(merged);
         }
 
         Ok(ColumnarValue::Array(Arc::new(builder.finish())))

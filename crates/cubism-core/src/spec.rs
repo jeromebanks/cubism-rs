@@ -51,6 +51,16 @@ pub struct CubeSpec {
     pub measures: Vec<MeasureSpec>,
     #[serde(default)]
     pub include_global: bool,
+    /// Guardrail against high-cardinality dimensions (UUIDs, raw
+    /// timestamps): the build fails fast once its string dictionary holds
+    /// more than this many distinct interned strings, instead of letting
+    /// the cell count explode. See `docs/high-cardinality.md`.
+    #[serde(default = "default_max_dictionary_entries")]
+    pub max_dictionary_entries: usize,
+}
+
+fn default_max_dictionary_entries() -> usize {
+    1_000_000
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -214,6 +224,10 @@ impl CubeSpec {
                 "apiVersion '{}' is not supported (expected '{API_VERSION_V1}')",
                 self.api_version
             ));
+        }
+
+        if self.max_dictionary_entries == 0 {
+            errors.push("maxDictionaryEntries must be at least 1".to_string());
         }
         if self.name.is_empty() {
             errors.push("cube 'name' must not be empty".into());

@@ -1,0 +1,48 @@
+# Org-scale agent-trace cube. Input: org_events.parquet
+# from examples/synth_org_traces.py
+apiVersion: v1
+name: agent_org
+dimensions:
+  # note: no per-user level — 500 users × every pair would add ~34k cells
+  # this demo never reads; the `users` count_distinct covers user analytics
+  - name: segment
+  - name: repo
+  - name: task
+    levels: [task_type]
+  - name: tool
+  - name: outcome
+    levels: [outcome, error_class]
+  - name: time
+    levels: [week, day]
+filterRules:
+  - type: max_dimensions
+    n: 2
+  # nobody asks for repo-by-week cells; keep the lattice honest
+  - type: not_together
+    dims: [repo, time]
+measures:
+  - name: cost
+    agg: sum
+    input: cost_usd
+  - name: tokens
+    agg: sum
+    input: tokens
+  - name: calls
+    agg: count
+  - name: sessions
+    agg: count_distinct
+    input: session_id
+  - name: users
+    agg: count_distinct
+    input: user
+  - name: costliest_sessions
+    agg: top_k
+    input: session_id
+    by: cost_usd
+  - name: exemplar_sessions
+    agg: reservoir_sample
+    input: session_id
+  - name: semantics
+    agg: centroid
+    input: embedding
+includeGlobal: true

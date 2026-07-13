@@ -13,4 +13,5 @@ path = "src/main.rs"
 [dependencies]
 cubism-core = { path = "../cubism-core" }
 cubism-datafusion = { path = "../cubism-datafusion" }
+cubism-serve = { path = "../cubism-serve" }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }

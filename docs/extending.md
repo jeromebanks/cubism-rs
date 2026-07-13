@@ -185,6 +185,34 @@ DataFusion 54 API gotchas (learned the hard way):
   fix). Snapshot shared state once per batch; merge changes back once at
   batch end (`udf.rs` shows the pattern).
 
+### Also implement `GroupsAccumulator`
+
+A plain `Accumulator` still works under GROUP BY, but DataFusion then wraps
+it in `GroupsAccumulatorAdapter`, which re-partitions and gathers every
+batch's input arrays once per touched group per aggregate. With thousands
+of cube cells that adapter tax dwarfs the sketch work itself. The fix is a
+vectorized `GroupsAccumulator` that holds `Vec<Sketch>` and walks each batch
+once, updating `sketches[group_indices[row]]`:
+
+- implement the small `SketchKernel` trait in `udaf.rs` (empty sketch,
+  per-batch row walk, blob merge, serialize) and reuse the generic
+  `SketchGroupsAccumulator<K>`;
+- add `groups_accumulator_supported() -> true` and
+  `create_groups_accumulator()` to the UDAF impl;
+- `state == evaluate == the blob` for every sketch kind, so `state()` is
+  one line;
+- respect `opt_filter` — rows it excludes must not reach the sketch.
+
+Two more perf lessons encoded in this repo:
+- **Amortize pruning.** A bounded structure that prunes back only to its
+  overflow threshold evicts one entry per insert once full, degenerating
+  every add into a re-sort (a one-line `TopK::prune` bug that took a 5M-row
+  build from ~4s to ~40x slower). Prune back to `capacity` so re-sorts
+  amortize over the headroom.
+- **Parquet row groups are the scan-parallelism unit.** A single-row-group
+  input file serializes the whole plan; write test/demo data with
+  `row_group_size` around 128k rows.
+
 ## 4. Row-level scalar UDFs
 
 `udf.rs` holds the two structural ones — `cubism_xunit_keys` (the lattice

@@ -125,6 +125,11 @@ est = sketch(cells, "/tool/tool=Bash").estimate()   # expect ~3% at k=1024
 
 ## Worked example
 
-`examples/agent_trace_demo.py` runs the full story on synthetic agent
-traces: spend by tool, costliest sessions, Bash∩error overlap, the
-tool-overlap Jaccard matrix, and an estimate-vs-exact check.
+The two-act demo runs the full story:
+
+- `examples/01_your_claude_sessions.py` — your real local Claude Code
+  sessions (via `examples/claude_trace_import.py`): spend by project,
+  friction tools, costliest sessions, cache economics.
+- `examples/02_org_scale.py` — 5M synthetic org events: Bash∩error set ops
+  with an estimate-vs-exact check, segment×tool lift, per-cell top-k and
+  exemplars, and nearest-semantic-cell retrieval over embedding centroids.
