@@ -130,9 +130,10 @@ pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
                     .push(format!("cubism_centroid_sketch({alias}) AS \"{name}__sketch\""));
                 final_cols.push(sketch_finals("cubism_centroid_mean"));
             }
-            AggKind::Quantile => {
+            AggKind::Quantile | AggKind::Variance => {
                 return plan_err!(
-                    "measure '{name}': quantile is not implemented in the engine yet"
+                    "measure '{name}': {:?} is not implemented in the static engine yet",
+                    measure.agg
                 );
             }
         }
