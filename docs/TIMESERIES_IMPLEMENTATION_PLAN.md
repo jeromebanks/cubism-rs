@@ -198,7 +198,14 @@ code and its DataFusion version are unaffected.
 
 ## Phase 0B — Representative local Rust-versus-Spark benchmark
 
-Status: not started.
+Status: harness slice 1 complete; measured Rust/Spark decision pending.
+
+The initial reproducible harness lives in `crates/cubism-timeseries-bench`.
+It generates deterministic sparse/dense Parquet sources, runs bucketed
+Rust/DataFusion sum/count/KMV aggregation, writes the four candidate layouts,
+and rejects a run unless every layout reads back to the same semantic digest.
+See `TIMESERIES_PHASE_0B_HARNESS.md`. This is a correctness foundation, not a
+layout or execution-boundary decision.
 
 Depends on: Phase 0A local go decision and Phase 1's frozen minimal temporal and
 aggregate-state reference for sum/count and KMV.

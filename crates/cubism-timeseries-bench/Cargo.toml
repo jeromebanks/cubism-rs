@@ -1,0 +1,23 @@
+[package]
+name = "cubism-timeseries-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+cubism-core = { path = "../cubism-core" }
+cubism-datafusion = { path = "../cubism-datafusion" }
+futures = "0.3"
+parquet = "58"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"

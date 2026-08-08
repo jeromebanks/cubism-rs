@@ -4,6 +4,7 @@ members = [
     "crates/cubism-core",
     "crates/cubism-datafusion",
     "crates/cubism-iceberg-spike",
+    "crates/cubism-timeseries-bench",
     "crates/cubism-serve",
     "crates/cubism-cli",
     "bindings/cubism-py",
