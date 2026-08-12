@@ -445,10 +445,18 @@ KMV contract, and the adapter does not use it (see
    picking the actual value per row count is deliberately left open for
    item 4, not defaulted here.
 4. Measure both occupancy shapes at the actual 10-100 million row target on
-   this 16 GB host (only 1M and 10M sparse are measured so far; see "Memory
-   scaling" above), then retain only viable configurations. **Gated on user
-   go-ahead past 50M rows** — step up gradually under the matrix runner's
-   RSS watchdog rather than jumping to 100M.
+   this 16 GB host, then retain only viable configurations. **In progress**
+   (2026-08-12): sparse now measured for **both engines** at 10M (5
+   measured runs each, cross-engine digest MATCH) and 25M (Rust: 5 measured
+   runs, cached from the notebook session; Spark: 2 successful runs, digest
+   MATCH both times — a third run (`run_02`) was attempted twice and
+   killed both times by an unexplained shutdown-hook signal, root cause
+   not established; accepted n=2 for this config rather than continuing to
+   retry, see `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 12). Dense
+   occupancy not yet measured at any scale past the 25k smoke test.
+   **Gated on user go-ahead past 50M rows** — step up gradually under the
+   matrix runner's RSS watchdog (Rust) / direct `spark-submit` invocations
+   (Spark, see Entry 12 for why) rather than jumping to 100M.
 5. ~~Pin Parquet compression, row-group/file targets, and sort order in the
    results~~ **Done** (2026-08-09): see "Pinned semantics" above —
    compression pinned to `UNCOMPRESSED` (unevaluated for disk footprint at

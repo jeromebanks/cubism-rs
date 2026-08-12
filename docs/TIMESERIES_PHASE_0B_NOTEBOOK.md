@@ -834,6 +834,100 @@ row group vs. one bucket per many row groups) exercise genuinely different
 code paths, and this crate's own 1M-vs-10M cell-density figures were
 already the documented warning sign.
 
+## Entry 12 -- Item 4: 25M-row Spark runs repeatedly killed under
+matrix_runner.py; diagnosed and worked around, real data obtained (Task #6)
+
+**What happened:** launched the 25M rust+spark combo under `matrix_runner.py`
+(rust reused its 5 cached runs from the notebook session instantly; spark
+started fresh). While the Spark warmup ran, did the range-read bugfix work
+(Entry 11) concurrently -- the Spark run was killed/stopped shortly after,
+its own log showing a real Java exception:
+`NullPointerException: ... SparkContext.dagScheduler() is null` inside
+`Dataset.count()` (`SparkAggregate.scala:162`) -- the textbook symptom of
+`SparkContext.stop()` (Spark's JVM shutdown hook) racing an in-flight job,
+meaning *something* sent the JVM a catchable signal (SIGTERM/SIGINT), not
+a hard SIGKILL. Checked `log show` for the window: no jetsam/OOM kill
+targeting `java`, system memory healthy (64-69% free) throughout -- ruled
+out both failure modes from Entries 5 and 9. Relaunched Spark-only, doing
+*nothing* else concurrently this time -- killed again, same signature,
+within a few minutes of starting.
+
+**First hypothesis (poll-interval/subprocess-churn from the watchdog's
+`ps`-based RSS sampling) was wrong -- checked and discarded, not just
+assumed:** the prior 10M combo run (`brl7psse7`) had run under the exact
+same `matrix_runner.py`, same `--poll-interval-ms 200`, **with** concurrent
+cargo build/test/clippy work, for ~1500s of cumulative Spark wall time
+across 5 measured runs (~7500 `ps` subprocess spawns) -- and it succeeded
+cleanly. That contradicts subprocess-churn or concurrent-foreground-work as
+the cause; a hypothesis that's contradicted by your own prior successful
+run under the same conditions isn't worth pursuing further, and
+`matrix_runner.py` was **not** modified as a result.
+
+**Real discriminator investigated**: user asked to try foreground execution.
+Foreground can't work at all for a 25M Spark run -- the Bash tool hard-caps
+foreground commands at 10 minutes, confirmed directly (a single foreground
+`spark-submit` invocation hit the timeout with zero further log output
+after "Initialized BlockManager", no crash, just not done yet). Relaunched
+backgrounded and used `jstack <pid>` on the live JVM (found via
+`pgrep -fl SparkSubmit`, since `ps aux | grep` gave false negatives here
+same as Entry 9) to check real progress instead of guessing: the main
+thread was legitimately parked inside
+`AdaptiveSparkPlanExec.withFinalPlanUpdate` -> `LinkedBlockingQueue.take()`,
+waiting on Spark's own background stage-execution threads to materialize
+the cached aggregated DataFrame -- normal, expected AQE blocking, not a
+deadlock or hang. Let that run continue undisturbed; it completed
+successfully ~21.5 minutes later, digest matching Rust's own 25M figure
+exactly.
+
+**Initially looked like `spark-submit` being the directly-tracked
+background process (vs. a child of `matrix_runner.py`) was the
+discriminator between kills and successes -- disproven by a second data
+point, not assumed to hold:** the jstack-diagnosed run and a first
+measured `run_01` (also direct `spark-submit`) both succeeded, matching
+that pattern. But a subsequent `run_02` attempt, same exact direct-
+`spark-submit` shape, was killed with the identical `SparkContext.stop()`
+shutdown-hook signature -- and a retry of `run_02` failed the same way
+again. **Net across this entry: 4 direct `spark-submit` attempts at 25M,
+2 succeeded (warmup, run_01) and 2 failed (both `run_02` attempts)** --
+genuinely intermittent, not explained by invocation shape, matrix_runner
+wrapping, concurrent foreground work, memory pressure (checked each time
+via `memory_pressure -Q`, always 60%+ free), or disk (`/Volumes/YOTUO`
+stayed at 700+ Gi avail throughout). **Root cause not established.**
+Whatever periodically sends these long-running Spark JVMs a catchable
+shutdown signal on this host remains unknown; flagged for a future
+session with more diagnostic room, not solved here.
+
+**Real 25M results obtained** (2 successful runs, direct `spark-submit`,
+`--driver-memory 8192m`; no watchdog RSS data for these since they
+bypassed `matrix_runner.py`'s poller -- aggregated by hand from each run's
+own `run.json` rather than fabricating sidecar RSS numbers that were never
+actually measured):
+
+| Run | total_ms | aggregate_ms | digest_ms | cell_count | digest matches Rust |
+| --- | --- | --- | --- | --- | --- |
+| warmup | 1,290,946 (21.5 min) | 1,026,135 | 262,387 | 28,846,459 | yes (`f58b9b65...`) |
+| run_01 | 1,397,527 (23.3 min) | 1,146,793 | 245,646 | 28,846,459 | yes (`f58b9b65...`) |
+
+Rust's own 25M figures (notebook session, cached, reused instantly this
+session): `aggregate_ms` (aggregate+write, all 4 layouts, streamed)
+238-240s ballpark per run, `verification_ms` ~200s, `total_ms` ~442-602s
+across the 5 measured runs (see Entry 6/`matrix_results.json`).
+**Raw total_ms comparison, not yet a fair one**: ~450-600s Rust vs
+~1291-1398s Spark, roughly a 2.3-2.9x gap -- but per `SparkAggregate.scala`'s
+own `comparability_caveat` field, Spark's number excludes writing any of
+the 4 candidate layouts (out of scope for the adapter) while Rust's
+includes all four, so this raw ratio is not the number item 6 should
+report without reconciling that asymmetry first.
+
+**Cross-engine digest MATCH at 25M, twice** (`f58b9b65eec78e1cc6b5d50378b7bf2eef20749b69aa26ac9d9da54963aaf6ef`,
+`cell_count=28,846,459` -- matches Rust's own pinned figures for this row
+count exactly, in both successful runs). Second and third real-scale
+correctness confirmations, after 10M.
+
+**User decision, given the run_02 failures**: accept n=2 (warmup + run_01)
+for this config rather than continuing to retry a demonstrated ~50%
+failure rate. Item 6 should record this as n=2, not n=5, and note why.
+
 ## Entries to follow
 
 Each subsequent task (50M scale-up gate) gets its own entry here with a
