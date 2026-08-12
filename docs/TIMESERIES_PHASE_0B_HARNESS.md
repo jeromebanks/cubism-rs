@@ -400,8 +400,24 @@ KMV contract, and the adapter does not use it (see
    `docs/TIMESERIES_PHASE_0B_HANDOFF.md` for the full writeup and caveats
    (correctness-verified at 25k rows only; performance at scale still
    unmeasured).
-2. Add aligned and non-aligned short/long range-read cases for every retained
-   layout, including files and bytes scanned.
+2. ~~Add aligned and non-aligned short/long range-read cases for every
+   retained layout, including files and bytes scanned~~ **Done** (2026-08-11,
+   this session) -- new `range-read --run-dir DIR [--short-buckets N]
+   [--long-buckets N]` CLI subcommand (`crates/cubism-timeseries-bench/src/lib.rs`
+   `run_range_reads` + `main.rs`). "Aligned"/"non-aligned" is discovered
+   empirically per layout file from its own Parquet row-group `bucket_start`
+   statistics, not assumed from row counts -- see
+   `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 8 for the full design
+   rationale and why that matters (row-group boundaries don't track bucket
+   boundaries 1:1, and which regime applies is scale-dependent). Produces 16
+   cases per run dir (4 layouts x 2 lengths x 2 alignments), each with
+   `row_groups_scanned`/`row_groups_total`, `bytes_scanned`/`file_bytes_total`,
+   and `rows_scanned`/`rows_matched`. Verified with a new test that
+   cross-checks every case's matched-row count against an independent full
+   file scan and directly asserts the alignment property, not just that the
+   tool runs without crashing. Run so far only against 25k/200k-row fixtures;
+   running it against the real 1M/10M/25M/50M+ run dirs from item 4 is cheap
+   (read-only) and still open, see item 6.
 3. ~~Add a process-level matrix runner that records warm-up plus at least
    five measured runs~~ **Done for Rust** (notebook session, 2026-08-09/11)
    **and for Spark** (2026-08-11, this session) --

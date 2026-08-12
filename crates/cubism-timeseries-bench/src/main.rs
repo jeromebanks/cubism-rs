@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use cubism_timeseries_bench::{
-    DEFAULT_DATAFUSION_MEMORY_LIMIT_BYTES, GenerateConfig, Occupancy, RustRunConfig,
-    generate_source, run_rust,
+    DEFAULT_DATAFUSION_MEMORY_LIMIT_BYTES, GenerateConfig, Occupancy, RangeReadConfig,
+    RustRunConfig, generate_source, run_range_reads, run_rust,
 };
 use std::path::PathBuf;
 
@@ -9,6 +9,7 @@ const USAGE: &str = "\
 usage:
   cubism-timeseries-bench generate --output FILE [--rows N] [--occupancy sparse|dense] [--seed N] [--batch-rows N]
   cubism-timeseries-bench rust --input FILE --output-dir DIR [--partitions N] [--memory-limit-mb N]
+  cubism-timeseries-bench range-read --run-dir DIR [--short-buckets N] [--long-buckets N]
   cubism-timeseries-bench smoke --work-dir DIR [--rows N] [--partitions N] [--memory-limit-mb N]
   cubism-timeseries-bench preflight";
 
@@ -119,6 +120,16 @@ async fn main() -> Result<()> {
             };
             let metrics = run_rust(&config).await?;
             println!("{}", serde_json::to_string_pretty(&metrics)?);
+        }
+        "range-read" => {
+            ensure_known_flags(flags, &["--run-dir", "--short-buckets", "--long-buckets"])?;
+            let config = RangeReadConfig {
+                run_dir: required_path(flags, "--run-dir")?,
+                short_buckets: parsed(flags, "--short-buckets", 4_u64)?,
+                long_buckets: parsed(flags, "--long-buckets", 48_u64)?,
+            };
+            let report = run_range_reads(&config)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "smoke" => {
             ensure_known_flags(

@@ -23,6 +23,7 @@ use cubism_datafusion::udaf::sketch_udfs;
 use cubism_datafusion::udf::cube_udfs;
 use futures::StreamExt;
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
@@ -214,6 +215,85 @@ pub struct RustRunMetrics {
     pub layouts: Vec<LayoutMetrics>,
     pub verification_ms: u128,
     pub total_ms: u128,
+}
+
+/// Phase 0B remaining-work item 2: aligned/non-aligned short/long
+/// bucket-range reads over an already-written `rust` run's four layouts.
+///
+/// "Aligned" / "non-aligned" is defined against each layout's *own* Parquet
+/// row-group boundaries, discovered from that file's row-group statistics on
+/// the `bucket_start` column -- not assumed from row counts, since which
+/// regime applies (many buckets per row group at small scale, vs. one bucket
+/// spanning many row groups at large scale, per
+/// `docs/TIMESERIES_PHASE_0B_HARNESS.md` "Memory scaling") depends on actual
+/// per-bucket cell density versus `LAYOUT_ROW_GROUP_ROWS`, which is data- and
+/// scale-dependent. A range start is "aligned" iff it exactly equals some row
+/// group's minimum `bucket_start` (no row group has to be scanned partly for
+/// rows outside the requested range); "non-aligned" iff the start falls
+/// inside a row group whose own minimum is an earlier bucket, so that group's
+/// leading rows are scanned but not matched.
+#[derive(Debug, Clone)]
+pub struct RangeReadConfig {
+    pub run_dir: PathBuf,
+    pub short_buckets: u64,
+    pub long_buckets: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeLength {
+    Short,
+    Long,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeAlignment {
+    Aligned,
+    NonAligned,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RangeReadCaseMetrics {
+    pub layout: &'static str,
+    pub length: RangeLength,
+    pub alignment: RangeAlignment,
+    pub bucket_count: u64,
+    pub start_bucket_us: i64,
+    pub end_bucket_us: i64,
+    pub row_groups_total: usize,
+    pub row_groups_scanned: usize,
+    pub file_bytes_total: u64,
+    pub bytes_scanned: u64,
+    pub rows_scanned: usize,
+    pub rows_matched: usize,
+    pub read_ms: u128,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RangeReadSkipped {
+    pub layout: &'static str,
+    pub length: RangeLength,
+    pub alignment: RangeAlignment,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RangeReadReport {
+    pub run_dir: String,
+    pub short_buckets: u64,
+    pub long_buckets: u64,
+    pub cases: Vec<RangeReadCaseMetrics>,
+    pub skipped: Vec<RangeReadSkipped>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct RowGroupBucketRange {
+    index: usize,
+    min_us: i64,
+    max_us: i64,
+    num_rows: i64,
+    total_byte_size: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1189,6 +1269,255 @@ fn file_len(path: &Path) -> Result<u64> {
         .len())
 }
 
+/// Layouts (by written filename) that carry a `bucket_start` column and are
+/// therefore range-readable. `xunit_registry.parquet` (the second file
+/// belonging to the `xunit_registry` layout) has no `bucket_start` column
+/// and is never touched by a bucket-range scan -- its absence here *is* the
+/// record of that, not an oversight.
+const RANGE_READ_LAYOUTS: &[(&str, &str)] = &[
+    ("per_measure", "per_measure.parquet"),
+    ("wide", "wide.parquet"),
+    ("tagged_struct", "tagged_struct.parquet"),
+    ("xunit_registry", "registry_states.parquet"),
+];
+
+pub fn run_range_reads(config: &RangeReadConfig) -> Result<RangeReadReport> {
+    ensure!(
+        config.short_buckets > 0,
+        "short_buckets must be greater than zero"
+    );
+    ensure!(
+        config.long_buckets > 0,
+        "long_buckets must be greater than zero"
+    );
+    ensure!(
+        config.run_dir.is_dir(),
+        "run dir does not exist: {}",
+        config.run_dir.display()
+    );
+
+    let mut cases = Vec::new();
+    let mut skipped = Vec::new();
+
+    for (layout_name, file_name) in RANGE_READ_LAYOUTS {
+        let path = config.run_dir.join(file_name);
+        ensure!(
+            path.is_file(),
+            "expected layout file not found: {}",
+            path.display()
+        );
+        let row_groups = read_bucket_row_groups(&path)?;
+        let file_bytes_total = file_len(&path)?;
+
+        for length in [RangeLength::Short, RangeLength::Long] {
+            let bucket_count = match length {
+                RangeLength::Short => config.short_buckets,
+                RangeLength::Long => config.long_buckets,
+            };
+            for alignment in [RangeAlignment::Aligned, RangeAlignment::NonAligned] {
+                match pick_range_start(&row_groups, bucket_count, alignment) {
+                    Some(start_us) => {
+                        let end_us = start_us + (bucket_count as i64 - 1) * HOUR_US;
+                        let case = read_range_case(
+                            layout_name,
+                            &path,
+                            &row_groups,
+                            file_bytes_total,
+                            length,
+                            alignment,
+                            bucket_count,
+                            start_us,
+                            end_us,
+                        )?;
+                        cases.push(case);
+                    }
+                    None => skipped.push(RangeReadSkipped {
+                        layout: layout_name,
+                        length,
+                        alignment,
+                        reason: format!(
+                            "no {} start candidate with room for {bucket_count} buckets found among {} row groups",
+                            match alignment {
+                                RangeAlignment::Aligned => "aligned",
+                                RangeAlignment::NonAligned => "non-aligned",
+                            },
+                            row_groups.len()
+                        ),
+                    }),
+                }
+            }
+        }
+    }
+
+    Ok(RangeReadReport {
+        run_dir: config.run_dir.display().to_string(),
+        short_buckets: config.short_buckets,
+        long_buckets: config.long_buckets,
+        cases,
+        skipped,
+    })
+}
+
+/// Reads every row group's (min, max) `bucket_start` statistics (column 0 in
+/// every range-readable layout schema, see `bucket_field()`) without
+/// deserializing any row data.
+fn read_bucket_row_groups(path: &Path) -> Result<Vec<RowGroupBucketRange>> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let metadata = reader.metadata();
+    let mut out = Vec::with_capacity(metadata.num_row_groups());
+    for (index, row_group) in metadata.row_groups().iter().enumerate() {
+        let column = row_group.column(0);
+        let stats = column.statistics().with_context(|| {
+            format!(
+                "row group {index} of {} has no statistics on column 0 (bucket_start) -- \
+                 range reads need per-row-group min/max",
+                path.display()
+            )
+        })?;
+        let (min_us, max_us) = match stats {
+            parquet::file::statistics::Statistics::Int64(value_stats) => (
+                *value_stats
+                    .min_opt()
+                    .with_context(|| format!("row group {index} bucket_start min missing"))?,
+                *value_stats
+                    .max_opt()
+                    .with_context(|| format!("row group {index} bucket_start max missing"))?,
+            ),
+            other => bail!(
+                "row group {index} of {}: bucket_start statistics are {:?}, expected Int64 \
+                 (Arrow Timestamp(Microsecond) is stored as physical INT64 in Parquet)",
+                path.display(),
+                other
+            ),
+        };
+        out.push(RowGroupBucketRange {
+            index,
+            min_us,
+            max_us,
+            num_rows: row_group.num_rows(),
+            total_byte_size: row_group.total_byte_size(),
+        });
+    }
+    Ok(out)
+}
+
+/// Picks a bucket-range start with room for `bucket_count` buckets before
+/// the file ends, or `None` if no such start exists for the requested
+/// alignment. See `RangeReadConfig`'s doc comment for what "aligned" means.
+fn pick_range_start(
+    row_groups: &[RowGroupBucketRange],
+    bucket_count: u64,
+    alignment: RangeAlignment,
+) -> Option<i64> {
+    if row_groups.is_empty() {
+        return None;
+    }
+    let width_us = (bucket_count as i64 - 1) * HOUR_US;
+    let file_end_us = row_groups.last()?.max_us;
+    let boundaries: std::collections::HashSet<i64> =
+        row_groups.iter().map(|rg| rg.min_us).collect();
+
+    // Prefer a candidate roughly a quarter of the way into the file rather
+    // than the very first/last row group, so the case isn't a degenerate
+    // file-edge read -- fall back to the rest of the row-group list if that
+    // preferred region has no match with room for the requested width.
+    let preferred_start = row_groups.len() / 4;
+    let ordered_indices = (preferred_start..row_groups.len()).chain(0..preferred_start);
+
+    match alignment {
+        RangeAlignment::Aligned => ordered_indices
+            .map(|i| row_groups[i].min_us)
+            .find(|&start_us| start_us + width_us <= file_end_us),
+        RangeAlignment::NonAligned => ordered_indices
+            .filter(|&i| row_groups[i].max_us > row_groups[i].min_us)
+            .find_map(|i| {
+                let candidate = row_groups[i].min_us + HOUR_US;
+                let has_room = candidate + width_us <= file_end_us;
+                let is_non_aligned = !boundaries.contains(&candidate);
+                (has_room && is_non_aligned).then_some(candidate)
+            }),
+    }
+}
+
+/// Determines which row groups a real pruning reader would touch for
+/// `[start_us, end_us]`, reads exactly those (projecting only `bucket_start`
+/// to count matched vs. scanned rows cheaply -- `bytes_scanned` below comes
+/// from row-group metadata instead of this projected read, since a real
+/// query over a chosen layout would read whichever columns it actually
+/// needs, not just `bucket_start`; row-group-level bytes is the right unit
+/// for measuring pruning effectiveness independent of column projection).
+#[allow(clippy::too_many_arguments)]
+fn read_range_case(
+    layout_name: &'static str,
+    path: &Path,
+    row_groups: &[RowGroupBucketRange],
+    file_bytes_total: u64,
+    length: RangeLength,
+    alignment: RangeAlignment,
+    bucket_count: u64,
+    start_us: i64,
+    end_us: i64,
+) -> Result<RangeReadCaseMetrics> {
+    let started = Instant::now();
+    let scanned: Vec<&RowGroupBucketRange> = row_groups
+        .iter()
+        .filter(|rg| rg.max_us >= start_us && rg.min_us <= end_us)
+        .collect();
+    ensure!(
+        !scanned.is_empty(),
+        "{}: no row group overlaps [{start_us}, {end_us}] -- picked start candidate is \
+         inconsistent with its own file's row groups",
+        path.display()
+    );
+    let row_groups_scanned = scanned.len();
+    let bytes_scanned: u64 = scanned
+        .iter()
+        .map(|rg| rg.total_byte_size.max(0) as u64)
+        .sum();
+    let scanned_indices: Vec<usize> = scanned.iter().map(|rg| rg.index).collect();
+
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let projection = ProjectionMask::leaves(builder.parquet_schema(), [0]);
+    let reader = builder
+        .with_row_groups(scanned_indices)
+        .with_projection(projection)
+        .with_batch_size(65_536)
+        .build()?;
+
+    let mut rows_scanned = 0_usize;
+    let mut rows_matched = 0_usize;
+    for batch in reader {
+        let batch = batch?;
+        let buckets = typed_column::<TimestampMicrosecondArray>(&batch, "bucket_start")?;
+        rows_scanned += batch.num_rows();
+        for row in 0..batch.num_rows() {
+            let value = buckets.value(row);
+            if value >= start_us && value <= end_us {
+                rows_matched += 1;
+            }
+        }
+    }
+    let read_ms = started.elapsed().as_millis();
+
+    Ok(RangeReadCaseMetrics {
+        layout: layout_name,
+        length,
+        alignment,
+        bucket_count,
+        start_bucket_us: start_us,
+        end_bucket_us: end_us,
+        row_groups_total: row_groups.len(),
+        row_groups_scanned,
+        file_bytes_total,
+        bytes_scanned,
+        rows_scanned,
+        rows_matched,
+        read_ms,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1341,5 +1670,99 @@ mod tests {
         assert!(metrics.cell_count > 0);
         assert_eq!(metrics.layouts.len(), 4);
         assert_eq!(metrics.semantic_digest_blake3.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn range_reads_are_correct_against_an_independent_full_scan() {
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("source.parquet");
+        generate_source(&GenerateConfig {
+            output: input.clone(),
+            rows: 200_000,
+            occupancy: Occupancy::Sparse,
+            seed: 3,
+            batch_rows: 8_192,
+        })
+        .unwrap();
+        let run_dir = temp.path().join("rust");
+        run_rust(&RustRunConfig {
+            input,
+            output_dir: run_dir.clone(),
+            target_partitions: 2,
+            memory_limit_bytes: DEFAULT_DATAFUSION_MEMORY_LIMIT_BYTES,
+        })
+        .await
+        .unwrap();
+
+        let report = run_range_reads(&RangeReadConfig {
+            run_dir: run_dir.clone(),
+            short_buckets: 4,
+            long_buckets: 48,
+        })
+        .unwrap();
+
+        // Every (layout, length, alignment) combination is accounted for
+        // either as a case or an explicit skip -- never silently dropped.
+        assert_eq!(report.cases.len() + report.skipped.len(), 16);
+        for (layout, _) in RANGE_READ_LAYOUTS {
+            let accounted = report.cases.iter().any(|c| c.layout == *layout)
+                || report.skipped.iter().any(|s| s.layout == *layout);
+            assert!(
+                accounted,
+                "layout {layout} missing from the report entirely"
+            );
+        }
+
+        for case in &report.cases {
+            let (_, file_name) = RANGE_READ_LAYOUTS
+                .iter()
+                .find(|(name, _)| *name == case.layout)
+                .expect("case layout must be one of RANGE_READ_LAYOUTS");
+            let path = run_dir.join(file_name);
+
+            // Cross-check rows_matched against an independent full,
+            // unfiltered scan -- not by reusing the row-group-pruning code
+            // path under test.
+            let batches = read_batches(&path).unwrap();
+            let mut expected_matched = 0_usize;
+            for batch in &batches {
+                let buckets =
+                    typed_column::<TimestampMicrosecondArray>(batch, "bucket_start").unwrap();
+                for row in 0..batch.num_rows() {
+                    let value = buckets.value(row);
+                    if value >= case.start_bucket_us && value <= case.end_bucket_us {
+                        expected_matched += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                case.rows_matched, expected_matched,
+                "{} {:?}/{:?}: rows_matched drifted from an independent full-file scan",
+                case.layout, case.length, case.alignment
+            );
+            assert!(case.rows_matched <= case.rows_scanned);
+            assert!(case.row_groups_scanned <= case.row_groups_total);
+            assert!(case.bytes_scanned <= case.file_bytes_total);
+
+            // The alignment property itself: an aligned start must exactly
+            // equal some row group's own minimum bucket_start; a
+            // non-aligned start must not.
+            let row_groups = read_bucket_row_groups(&path).unwrap();
+            let is_boundary = row_groups
+                .iter()
+                .any(|rg| rg.min_us == case.start_bucket_us);
+            match case.alignment {
+                RangeAlignment::Aligned => assert!(
+                    is_boundary,
+                    "{}: aligned case's start isn't a row-group boundary",
+                    case.layout
+                ),
+                RangeAlignment::NonAligned => assert!(
+                    !is_boundary,
+                    "{}: non-aligned case's start IS a row-group boundary",
+                    case.layout
+                ),
+            }
+        }
     }
 }

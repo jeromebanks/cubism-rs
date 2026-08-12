@@ -567,9 +567,156 @@ unknown discovered hours into a 10M+ run.
 **After:** no memory/disk problems; scratch dirs removed. Ready for item 4
 (the actual scale-up) once `spark-driver-memory-mb` is chosen per config.
 
+## Entry 8 -- Item 2: range-read benchmark cases (Task #8)
+
+Built while item 4's 10M rust+spark matrix run was in the background (see
+Entry 9 for what went wrong operationally with that background run, found
+during this entry's work) -- item 2 itself is self-contained and doesn't
+touch the aggregation/write path Entry 4-7 hardened.
+
+**Design, since the harness doc only specified this in one sentence
+("add aligned and non-aligned short/long range-read cases for every
+retained layout, including files and bytes scanned")**: each of the four
+candidate layouts (`per_measure.parquet`, `wide.parquet`,
+`tagged_struct.parquet`, `registry_states.parquet` -- `xunit_registry.parquet`
+has no `bucket_start` column and is deliberately never touched by a
+bucket-range scan) is written as ArrowWriter row groups whose boundaries
+are cut by cumulative row count (`LAYOUT_ROW_GROUP_ROWS = 65,536`), not by
+bucket boundary -- confirmed from the write path, not assumed. Whether a
+row group spans many buckets or a single bucket spans many row groups
+depends on per-bucket cell density versus that constant, which is scale-
+and occupancy-dependent (`TIMESERIES_PHASE_0B_HARNESS.md` "Memory
+scaling"'s 11,527-vs-90,102 cells/bucket figures at 1M vs 10M rows). So
+"aligned" vs "non-aligned" is defined empirically per file, from each row
+group's own min/max `bucket_start` statistics (read via `parquet-rs`'s
+`ParquetMetaData`, no DataFusion involved) -- **aligned** means the range
+start exactly equals some row group's minimum `bucket_start` (no row group
+is scanned partly for out-of-range rows at the front); **non-aligned**
+means the start falls inside a row group whose own minimum is an earlier
+bucket, so that group has real leading waste. "Short" (default 4 buckets)
+and "long" (default 48 buckets, both CLI-configurable) are picked
+independently per alignment, so 4 layouts x 2 lengths x 2 alignments = 16
+cases per `range-read --run-dir <rust-run-dir>` invocation. `bytes_scanned`
+is the sum of scanned row groups' full compressed byte size from metadata
+(equal to uncompressed size under the pinned `UNCOMPRESSED` codec) --
+deliberately not a column-projected byte count, since a real query over a
+chosen layout would read whichever columns it actually needs, and
+row-group-level bytes is the right unit for measuring pruning effectiveness
+independent of that choice. `rows_scanned` vs. `rows_matched` (from an
+actual filtered read, projecting only `bucket_start` to keep it cheap)
+quantifies row-level overscan even within the correctly-pruned row-group
+set.
+
+**Implementation**: `RangeReadConfig`/`RangeReadReport`/`RangeReadCaseMetrics`
+(+ a `skipped` list, so a layout with no viable candidate at some scale is
+recorded explicitly rather than silently dropped) in `lib.rs`, a new
+`range-read --run-dir DIR [--short-buckets N] [--long-buckets N]` CLI
+subcommand in `main.rs`, no changes to the aggregation/write path or
+`run.json` schema.
+
+**Verified, not assumed**: new `#[tokio::test]`
+`range_reads_are_correct_against_an_independent_full_scan` generates a
+200k-row fixture, runs it through `run_rust`, then `run_range_reads`, and
+for every case (a) recomputes `rows_matched` via a completely separate
+full, unfiltered scan of the same file (not by reusing the row-group-
+pruning code path under test) and asserts exact equality, (b) asserts the
+alignment property itself directly -- an aligned case's start must equal
+some row group's own minimum, a non-aligned case's must not -- rather than
+trusting the selection logic that produced it. `cargo test -p
+cubism-timeseries-bench`: 6 passed (was 5), 1 ignored, unchanged.
+`cargo clippy --all-targets --no-deps -- -D warnings`: clean (the
+pre-existing unrelated `cubism-datafusion` doc-lint failure, noted in
+Entry 2, still blocks the whole-workspace clippy run, so `--no-deps`
+isolates this crate same as before). `rustfmt --edition 2024 --check`:
+clean. Manually ran `range-read` against a real 1M-row Rust run dir
+(`/Volumes/YOTUO/phase0b/matrix/sparse-1000000rows-p4-mem2048mb/run_01`):
+16/16 cases produced, no skips, numbers sane (e.g. `wide` layout short-
+non-aligned touched 1 row group / 65,536 rows scanned for 46,260 matched
+-- real overscan, not a degenerate 1:1); also ran against the tiny 25k-row
+fixture to check the skip path doesn't false-positive at small scale (it
+didn't -- 16/16 cases even there, since even a single row group spanning
+the whole file still yields valid aligned/non-aligned starts).
+
+**Not done / open**: only run against Rust output so far -- the harness
+doc's item 2 doesn't specify whether Spark's output needs equivalent
+range-read cases, and the Spark adapter (deliberately, per its own scope
+note) writes none of the 4 layouts, so there is nothing on the Spark side
+to range-read; this is a Rust-layout-selection tool, not a cross-engine
+one. Not yet run at 10M/25M/50M+ scale -- only 25k and 200k so far; running
+it against the existing 1M/10M/25M run dirs once item 4 has produced them
+is cheap (read-only, no new aggregation) and worth doing before item 6's
+results writeup.
+
+## Entry 9 -- Operational incident during item 4: a self-inflicted duplicate
+background run caused a real host memory-pressure crisis (Task #6, retro)
+
+**What happened**: launched item 4's 10M rust+spark matrix run via `nohup
+... &` backgrounded through the Bash tool's own `run_in_background`. The
+outer bash-tool call returned near-instantly (backgrounding via `&` means
+the launcher script exits right after forking, before the real work
+finishes) and was misread as "the whole matrix run finished." A `ps aux`
+check immediately after found no matching process -- but that check was
+run in a race window before the real work had (re)appeared, not after it
+had actually died. Concluded (wrongly) that `nohup`'s detachment had let
+the harness's own process-group cleanup kill the real work, and relaunched
+a **second, independent** invocation against the same
+`--output-root`/configs, this time via `run_in_background` alone (no
+`nohup`/`&`). Continued other foreground work (a `cargo build --release` +
+`cargo test` + `cargo clippy` cycle for item 2, see Entry 8) while both
+believed-sequential runs were, in fact, running **concurrently** --two
+`matrix_runner.py` processes and two `-Xmx6144m` Spark JVMs, both racing
+writes into the identical
+`spark-sparse-10000000rows-p4-drivermem6144mb/warmup` directory.
+
+**Root cause, confirmed via `log show`, not assumed**: `memorystatus:
+killing_idle_process` kernel log entries from ~22:09 to ~22:14 show a
+sustained jetsam kill spree (dozens of idle daemons: `cfprefsd`,
+`routined`, `photoanalysisd`, several `mdworker` Spotlight-indexing
+processes killed by `SIGKILL`), consistent with severe host-wide memory
+pressure -- explained by two 6GB-heap JVMs plus this session's own
+concurrent release-mode `cargo build`/`clippy` (rustc/LLVM codegen is
+memory-hungry) plus (per `ps aux`) **four** other live `claude` sessions on
+the same 16GB host, none of it visible to the matrix runner's own RSS
+watchdog, which only ever watched its own child's RSS against
+`--rss-limit-mb`, not total system memory. Checked and ruled out the
+USB-disconnect failure mode from Entry 5 specifically (`diskutil info
+/Volumes/YOTUO` showed a stable, still-mounted volume throughout; `log
+show` found no `Mounted: No`/remount events in the failure window) --
+this was purely a memory-pressure incident, a different failure mode than
+Entry 5's, on the same class of "host isn't quiet" risk this notebook has
+flagged since Entry 1.
+
+**Fix, this session**: identified both process trees via `ps aux` (matched
+on the literal `matrix_runner.py`/`SparkSubmit` command lines, confirming
+PID identity before acting), asked the user for explicit go-ahead before
+`kill`ing anything (the auto-mode permission classifier itself blocked
+the first unprompted attempt), terminated all four PIDs cleanly
+(`SIGTERM`, both matrix_runner.py orchestrators and both Spark JVMs),
+confirmed `memory_pressure -Q` recovered to 75% free system-wide, removed
+the one stale artifact left behind (`warmup.log` with no `run_dir` and no
+watchdog sidecar -- the runner's own reuse-check already handles this
+state correctly as "not yet attempted," so no other cleanup was needed),
+and relaunched a single clean invocation without doing any other
+concurrent foreground work this time.
+
+**Not done / open, flagged as a real gap in the tooling, not just this
+session's mistake**: `matrix_runner.py` has no guard against a second
+invocation targeting the same `--output-root`/config concurrently -- a
+lock file or PID-based guard in `run_config`'s `config_dir` would have
+caught this immediately and cheaply, instead of relying on the operator
+(here, this session) to correctly track whether a background process is
+still alive. Worth adding before further item-4 scale-up sessions,
+especially multi-session ones. Also worth internalizing procedurally: do
+not run heavy concurrent foreground work (release builds, clippy, other
+compute) while a memory-sized background benchmark run is in flight on
+this host, and verify a background process's actual liveness via `ps
+aux | grep <exact command line>` rather than inferring it from a Bash
+tool completion notification, which reports on the *launcher* returning,
+not on backgrounded work finishing.
+
 ## Entries to follow
 
-Each subsequent task (range-read cases, 50M scale-up gate) gets its own
-entry here with a before-snapshot, what was run, and an after-snapshot
-noting any problems (spill triggered, RSS approaching threshold, load
-average from other processes, disk fill on the output volume, etc.).
+Each subsequent task (50M scale-up gate) gets its own entry here with a
+before-snapshot, what was run, and an after-snapshot noting any problems
+(spill triggered, RSS approaching threshold, load average from other
+processes, disk fill on the output volume, etc.).
