@@ -1,0 +1,46 @@
+apiVersion: v1
+name: northstar_web_analytics
+dimensions:
+  - name: time
+    levels: [week, day]
+  - name: event
+    levels:
+      - name: name
+        expr: event_name
+  - name: page
+    levels:
+      - name: section
+        expr: page_section
+      - name: path
+        expr: page_path
+  - name: acquisition
+    levels: [source, campaign]
+  - name: device
+    levels:
+      - name: type
+        expr: device_type
+  - name: geo
+    levels: [country]
+  - name: plan
+filterRules:
+  - type: max_dimensions
+    n: 3
+  - type: not_together
+    dims: [time, geo]
+measures:
+  - name: events
+    agg: count
+  - name: users
+    agg: count_distinct
+    input: user_id
+  - name: sessions
+    agg: count_distinct
+    input: session_id
+  - name: revenue
+    agg: sum
+    input: revenue
+  - name: top_pages
+    agg: top_k
+    input: page_path
+    by: revenue
+includeGlobal: true

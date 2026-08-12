@@ -37,6 +37,15 @@ Slice charts, a cell inspector, and an interactive set-operations panel
 that intersects any two cells' sketches at request time
 ([`docs/serving.md`](docs/serving.md)).
 
+## Web analytics demo
+
+The [`examples/web_analytics_demo`](examples/web_analytics_demo) directory is
+a second end-to-end use case: a small Northstar product site, deterministic
+web-event generator, Google Analytics-style cube spec, and instructions for
+serving the resulting dashboard. It demonstrates acquisition slices,
+distinct users and sessions, revenue, top pages, and query-time overlap of
+audiences such as pricing visitors and completed signups.
+
 That's **Act I** (`examples/01_your_claude_sessions.py`). **Act II**
 (`examples/02_org_scale.py`, [rendered notebook](examples/02_org_scale.ipynb))
 replays the same idea at org scale — 5M synthetic tool calls, 500 engineers,
