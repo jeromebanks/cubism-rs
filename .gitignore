@@ -3,3 +3,4 @@
 .DS_Store
 proptest-regressions/
 *.swp
+__pycache__/

@@ -419,6 +419,129 @@ single-machine, monolithic aggregation.
 **After:** system healthy throughout (no kills, no drive issues on this
 round), `/Volumes/YOTUO` 715Gi avail after cleanup.
 
+## Entry 7 -- Item 3: Spark-aware matrix runner (Task #7)
+
+**Before:** picked up a fresh session per `docs/TIMESERIES_PHASE_0B_HANDOFF.md`
+(2026-08-11 version). First reviewed and committed the prior notebook
+session's uncommitted work (write-path pin + matrix runner +
+re-baseline evidence as one commit `57825b7`; the unrelated web analytics
+demo as a separate commit `354240d`, source files only -- generated
+`events.csv`/`web_analytics_cube.parquet` deliberately left out, matching
+this repo's existing convention for the other `examples/` demos).
+`cargo test -p cubism-timeseries-bench` (5 passed, 1 ignored) reconfirmed
+clean before touching anything further.
+
+**Action:** extended `crates/cubism-timeseries-bench/scripts/matrix_runner.py`
+in place (not a parallel driver -- the RSS-watchdog/retry/mount-check/env-
+snapshot machinery is engine-agnostic and was worth sharing, not
+duplicating) rather than writing a separate Spark driver:
+
+- `--config` gained an optional `engine=rust|spark` key (defaults to
+  `rust`, so every existing recorded invocation in
+  `TIMESERIES_PHASE_0B_HARNESS.md`/`HANDOFF.md` still parses and runs
+  unchanged). `engine=spark` configs require `spark-driver-memory-mb`
+  instead of `memory-limit-mb` -- **deliberately not auto-derived from
+  Rust's `--memory-limit-mb`**: DataFusion's `GreedyMemoryPool` bounds
+  execution memory inside a process that measured 5.4GB RSS at 10M rows;
+  `--driver-memory` bounds the *whole JVM heap* in `local[N]` mode (no
+  separate executor process to also size). Copying the Rust number across
+  risks reading as "Spark is slow/OOMs" for a sizing artifact that has
+  nothing to do with either engine -- this needs a deliberate per-config
+  choice when item 4 actually runs at scale, not a default in this script.
+- New `build_spark_cmd()` shells out to `spark-submit --class
+  cubism.bench.SparkAggregate --master local[N] --driver-memory {N}m
+  [--conf spark.local.dir=...] [--jars ...] <adapter-jar> --input ...
+  --output-dir ... --partitions N --memory-limit-mb {N}` (the last flag is
+  informational-only in the adapter itself, per `SparkAggregate.scala`,
+  but passed through so `run.json`'s `memory_limit_note` records the same
+  number that was actually enforced via `--driver-memory`, not an unset
+  gap).
+- New `--spark-local-dir` (+ a disk-free check on it, mirroring the
+  existing `output_root` check) -- Spark's shuffle spill defaults to
+  `/tmp` on the boot volume otherwise, the same failure mode that dropped
+  `/` from 96Gi to 48Gi in Entry 4, just on Spark's side this time instead
+  of the Rust harness's uncompressed layout writes.
+- New `--java-home`, overlaid onto a copy of `os.environ` (not a bare
+  override dict) for the `spark-submit` subprocess only -- Claude Code's
+  own non-interactive Bash tool doesn't source `~/.zshrc`, so `JAVA_HOME`
+  being exported there (per HANDOFF.md) doesn't reach this script's
+  subprocesses without this.
+- Rust's own `config_label` format (`{occupancy}-{rows}rows-p{partitions}-
+  mem{mb}mb`) is byte-identical to before this change specifically so the
+  existing 1M/10M/25M run directories under `/Volumes/YOTUO/phase0b/matrix`
+  are still reused via the watchdog-sidecar mechanism, not silently
+  re-run. Spark configs get a `spark-...-drivermem{mb}mb` label instead --
+  deliberately not the same shape as Rust's `mem{mb}mb` suffix, so the
+  label itself doesn't imply the two memory knobs are equivalent.
+- **Cross-engine digest check, new and not asked for by item 3's text but
+  cheap given everything else being built**: when one invocation runs both
+  engines at the same `(rows, occupancy)`, `main()` now compares their
+  `semantic_digest_blake3` values from `run.json` and reports MATCH/
+  MISMATCH (exit code 3 on mismatch). This is the same golden-digest
+  discipline the harness already applies to itself
+  (`docs/TIMESERIES_PHASE_0B_HARNESS.md` "Correctness validation
+  performed"), now automated across engines instead of only checked once
+  by hand at 25k rows during the Spark adapter's own build session. Issue
+  #1 finding 3 named "no independent oracle for the aggregate values
+  themselves" as a real gap; this closes it at whatever scale a given
+  matrix invocation covers, for free, without adding a separate
+  verification pass.
+
+**Validated, not assumed** (per this notebook's own convention of
+cross-checking a new tool against an independent measurement before
+trusting it):
+1. Ran a real `engine=spark` 25k-row config through the extended runner
+   (existing `/Volumes/YOTUO/phase0b/sources/sparse-25000-seed1.parquet`,
+   already-built `spark-adapter/target/scala-2.13/cubism-spark-adapter_2.13-0.1.0.jar`
+   from commit `87380bf`, this host's Coursier-cached hash4j/blake3 jars).
+   3 runs (1 warmup + 2 measured) all succeeded, `peak_rss` 808-879MB.
+   `run.json`'s `semantic_digest_blake3` reproduced the pinned golden value
+   (`59f8fdfd...cda021a8`, `cell_count=51473`) exactly -- the runner's
+   plumbing (arg construction, env overlay, watchdog, sidecar) produces a
+   real, correct result, not just an exit-0 process.
+2. **Confirmed the watchdog actually observes the JVM, not a wrapper
+   shell** (the one real risk in reusing `sample_rss_kb(proc.pid)`
+   unchanged for a `spark-submit` invocation): re-ran the identical
+   `spark-submit` command directly under `/usr/bin/time -l`, bypassing the
+   Python watchdog entirely. Result: 860,307,456 bytes (~820MB) maximum
+   resident set size -- matches the watchdog's own 808-879MB band closely.
+   Confirms `spark-submit` execs into `java` (PID preserved, no
+   fork-and-wait wrapper hiding the real process from `ps -o rss=`), same
+   conclusion as Entry 3 reached for the Rust binary via the same
+   cross-check technique.
+3. Ran a mixed `engine=rust` + `engine=spark` invocation, both at 25k
+   rows/sparse, in one matrix. Cross-engine digest check printed `rows=25000
+   occupancy=sparse: MATCH -- {'rust': '59f8fdfd...', 'spark':
+   '59f8fdfd...'}` with identical digests, `matrix_results.json`'s final
+   shape correctly nested under `cross_engine_digest_checks`. Exit code 0.
+4. `python3 -m py_compile` clean; `--help` output sane.
+
+Scratch output (`/tmp/phase0b-spark-smoke`, `/tmp/phase0b-cross-smoke`,
+`/tmp/phase0b-spark-smoke-timecheck`) cleaned up after validation -- none
+of this touched `/Volumes/YOTUO/phase0b/matrix`'s existing 1M/10M/25M
+results.
+
+**Not done / open, flagged for item 4:**
+- The actual `spark-driver-memory-mb` value to use at 10M/25M/50M+ scale
+  is still an open choice -- this session deliberately did not pick one
+  (see above). Item 4 should size it from Rust's own measured peak RSS at
+  each row count (`TIMESERIES_PHASE_0B_HARNESS.md` "Memory scaling"/issue
+  #2 finding 3 tables), not guess.
+- `run.json` schema asymmetry between engines is unchanged by this
+  session and still real: Rust's `aggregate_ms` spans aggregate-and-write
+  across all 4 layouts plus a separate `verification_ms`; Spark's
+  `aggregate_ms`/`digest_ms` cover neither layout writes (out of scope,
+  per the adapter's own design) nor verification. The adapter's own
+  `comparability_caveat` field already says as much; item 6's results
+  writeup needs to reconstruct a genuinely comparable time slice (e.g.
+  source-read-through-digest on both sides) rather than diffing
+  `aggregate_ms` raw.
+- Did not run Spark past 25k rows this session -- 10M/25M/50M+ under this
+  tooling is item 4, separately gated past 50M rows.
+
+**After:** no memory/disk problems; scratch dirs removed. Ready for item 4
+(the actual scale-up) once `spark-driver-memory-mb` is chosen per config.
+
 ## Entries to follow
 
 Each subsequent task (range-read cases, 50M scale-up gate) gets its own

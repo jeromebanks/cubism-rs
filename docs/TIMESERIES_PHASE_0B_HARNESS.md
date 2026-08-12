@@ -3,10 +3,16 @@
 Date: 2026-08-08
 
 Status: correctness harness slice complete; memory ceiling fixed and
-measured at 1M/10M rows; write-path settings (compression/row-group/sort)
-pinned and recorded (2026-08-09); matrix runner, range-read cases, 25-50M
-scale-up, 100M-row measurement, and Spark validation still pending;
-benchmark decision pending
+re-baselined at 1M/10M/25M rows (2026-08-09/11, see
+`docs/TIMESERIES_PHASE_0B_NOTEBOOK.md`); write-path settings
+(compression/row-group/sort) pinned and recorded (2026-08-09); Spark
+adapter implemented and correctness-verified at 25k rows (2026-08-11,
+commit `87380bf`); process-level matrix runner done for both engines,
+including a cross-engine digest check (2026-08-11, this session); range-read
+cases, the actual 10-100M-row measurement for both engines, and the
+resulting layout/boundary decision still pending -- see
+`docs/TIMESERIES_PHASE_0B_HANDOFF.md` for the authoritative current-state
+summary, this file's own "Status" line lags it.
 
 Implementation:
 [`crates/cubism-timeseries-bench`](../crates/cubism-timeseries-bench)
@@ -363,28 +369,52 @@ alongside this one, not an inference from single-node numbers.
 The harness was validated on a 10-core Apple M4 Mac mini with 16 GB memory,
 macOS 15.7.7, Rust 1.96.1, and DataFusion 54.0.0.
 
-`spark-submit` and the `pyspark` Python package were not present. Therefore:
+**Superseded 2026-08-11**: `openjdk@21`, `apache-spark` 4.2.0, and `sbt`
+are now installed on this host (see
+`docs/TIMESERIES_PHASE_0B_HANDOFF.md` "Environment now in place") and a
+Scala Spark adapter has run successfully, correctness-verified against the
+pinned golden digest at 25,000 rows. What remains true:
 
-- no Spark run has been performed;
+- Spark has **not** been run at benchmark scale (10-100M rows) — only the
+  25k correctness check and the matrix-runner validation at the same size
+  (`TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 7);
 - no Rust/Spark boundary has been selected;
 - no layout has been selected;
 - Phase 0B is not complete.
 
 Spark must consume the same generated source files and emit states that
-normalize to the same semantic digest. Spark's built-in approximate distinct
-count is not an acceptable replacement for the Phase 1 KMV contract.
+normalize to the same semantic digest — enforced today by the matrix
+runner's cross-engine digest check (item 3, below), not just checked once
+by hand. Spark's built-in approximate distinct count is not an acceptable
+replacement for the Phase 1 KMV contract, and the adapter does not use it
+(see `spark-adapter/src/main/scala/cubism/bench/KmvAggregator.scala`).
 
 ## Remaining Phase 0B work
 
-1. Implement the local Spark adapter with byte-compatible KMV state.
-   **Gated on user go-ahead** — this host has no JVM/Spark/PySpark
-   installed; bringing them in is a multi-GB, machine-state-changing
-   install (see `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md`).
+1. ~~Implement the local Spark adapter with byte-compatible KMV state~~
+   **Done** (2026-08-11, commit `87380bf`) — see
+   `docs/TIMESERIES_PHASE_0B_HANDOFF.md` for the full writeup and caveats
+   (correctness-verified at 25k rows only; performance at scale still
+   unmeasured).
 2. Add aligned and non-aligned short/long range-read cases for every retained
    layout, including files and bytes scanned.
-3. Add a process-level matrix runner that records warm-up plus at least five
-   measured runs, release builds, cache state, concurrency, peak RSS, CPU,
-   spill/shuffle, startup, and commit/write latency.
+3. ~~Add a process-level matrix runner that records warm-up plus at least
+   five measured runs~~ **Done for Rust** (notebook session, 2026-08-09/11)
+   **and for Spark** (2026-08-11, this session) --
+   `crates/cubism-timeseries-bench/scripts/matrix_runner.py` now takes an
+   `engine=rust|spark` config key and drives `spark-submit` with the same
+   RSS-watchdog/retry/mount-check rigor as the Rust `rust` subcommand, plus
+   a cross-engine `semantic_digest_blake3` check when both engines run at
+   the same row count/occupancy in one invocation. See
+   `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 7 for validation (a real
+   25k-row Spark run through the tool reproduced the pinned golden digest;
+   the watchdog's RSS reading was independently cross-checked against
+   `/usr/bin/time -l`). Spark's own memory bound
+   (`spark-driver-memory-mb`) is a required, separate config key, not
+   derived from Rust's `--memory-limit-mb` -- the two knobs bound different
+   things (DataFusion's execution-memory pool vs. a whole JVM heap) and
+   picking the actual value per row count is deliberately left open for
+   item 4, not defaulted here.
 4. Measure both occupancy shapes at the actual 10-100 million row target on
    this 16 GB host (only 1M and 10M sparse are measured so far; see "Memory
    scaling" above), then retain only viable configurations. **Gated on user

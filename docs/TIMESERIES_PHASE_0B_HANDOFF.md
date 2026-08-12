@@ -1,15 +1,20 @@
 # Time-Series Phase 0B Handoff
 
-Date: 2026-08-11 (supersedes the 2026-08-08 version of this file)
+Date: 2026-08-11, updated same day (supersedes the earlier 2026-08-11
+version of this file, which itself superseded 2026-08-08)
 
 Branch: `feature/timeseries-phase-0a`
 
 Status: harness correctness slice complete; memory re-baselined at
 1M/10M/25M rows on this host (still nothing at the 50-100M target); Spark
 adapter (remaining-work item 1) implemented and correctness-verified at
-25,000 rows; Spark has **not** been run at benchmark scale, so the actual
-Rust-vs-Spark performance question Phase 0B exists to answer is still
-open. Phase 0B is not complete.
+25,000 rows (commit `87380bf`); the process-level matrix runner now drives
+both engines with the same RSS-watchdog/retry/mount-check rigor plus a
+cross-engine semantic-digest check (remaining-work item 3, this session).
+Spark has **still not been run at benchmark scale** (10-100M rows) — only
+the 25k correctness check and a 25k matrix-runner validation exist — so the
+actual Rust-vs-Spark performance question Phase 0B exists to answer is
+still open. Phase 0B is not complete.
 
 ## Executive handoff — the chain of sessions so far
 
@@ -33,11 +38,51 @@ open. Phase 0B is not complete.
    [issue #2](https://github.com/jeromebanks/cubism-rs/issues/2). Confirmed
    the mergeable-aggregator scatter/gather pattern the architecture was
    designed around has never been exercised by any benchmark run.
-3. **2026-08-11 (this session)**: implemented remaining-work item 1 — see
-   below. This is the only change this handoff documents in detail;
-   items 1-3 above are prior work, cited for continuity.
+3. **2026-08-11 (Spark adapter session)**: implemented remaining-work
+   item 1 — see below. Superseded as "this session" by item 4.
+4. **2026-08-11 (this session)**: committed the prior session's pending
+   uncommitted work (see "Worktree state and ownership" below), then
+   implemented remaining-work item 3 — extended
+   `crates/cubism-timeseries-bench/scripts/matrix_runner.py` with Spark
+   awareness. See `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 7 for full
+   detail; summarized in "What changed this session" below.
 
-## What changed this session: the Spark adapter (item 1)
+## What changed this session: Spark-aware matrix runner (item 3)
+
+`matrix_runner.py` gained an `engine=rust|spark` config key so a single
+invocation can drive `spark-submit` with the same RSS-watchdog, retry,
+mount-check, and disk-free rigor already built for the Rust `rust`
+subcommand — previously it only knew how to invoke the Rust binary.
+Spark's memory bound (`spark-driver-memory-mb`) is a required, separate
+config key, **not** derived from Rust's `--memory-limit-mb`: the two knobs
+bound different things (DataFusion's execution-memory pool vs. a whole JVM
+heap in `local[N]` mode), and defaulting one from the other risked
+producing a misleading "Spark is slow/OOMs" result for a sizing reason
+unrelated to either engine. Picking the actual value per row count is
+deliberately left open for item 4. Also added a cross-engine
+`semantic_digest_blake3` check (not asked for by item 3's text, but cheap
+given everything else being built) — when one invocation runs both engines
+at the same row count/occupancy, the runner now automatically confirms
+their aggregate output normalizes to the same digest, closing part of
+issue #1 finding 3's "no independent oracle" gap.
+
+**Validated with real runs, not just unit-level**: a 25k-row `engine=spark`
+config through the new code path reproduced the pinned golden digest
+(`59f8fdfd...cda021a8`, `cell_count=51473`) exactly. The one real risk in
+reusing the existing PID-based RSS watchdog for a `spark-submit`
+invocation — whether `spark-submit` execs into `java` (PID preserved) or
+forks-and-waits (watchdog would watch the wrong process) — was checked
+directly: the same command run under `/usr/bin/time -l` independently read
+~820MB peak RSS, matching the watchdog's own 808-879MB band. A mixed
+rust+spark invocation at 25k rows exercised the new cross-engine digest
+check end to end and printed `MATCH`.
+
+See `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 7 for the full session
+log, including what's still open (the `spark-driver-memory-mb` value to
+use at scale, and the `run.json` schema asymmetry between engines that
+item 6 will need to account for).
+
+## What changed the prior session: the Spark adapter (item 1)
 
 New Scala/sbt project at `spark-adapter/` (sibling to `crates/`, not part
 of the Cargo workspace), plus an updated `.claude/skills/spark-setup/`
@@ -144,23 +189,23 @@ exist yet and isn't implied by anything built so far.
 `docs/TIMESERIES_PHASE_0B_HARNESS.md`'s original list)
 
 1. ~~Implement the local Spark adapter with byte-compatible KMV state~~
-   **DONE** (this session, commit `87380bf`) — correctness-verified at
-   25k rows only, see caveats above.
+   **DONE** (Spark adapter session, commit `87380bf`) — correctness-verified
+   at 25k rows only, see caveats above.
 2. Add aligned/non-aligned short/long range-read cases per layout. **Not
    started.**
-3. Process-level matrix runner with RSS watchdog. **Done for Rust**
-   (`crates/cubism-timeseries-bench/scripts/matrix_runner.py`, built in
-   the notebook session) — **has zero Spark awareness.** It only knows
-   how to invoke the compiled Rust binary's `rust` subcommand as a
-   subprocess; extending it (or writing a parallel driver) to invoke
-   `spark-submit` with the same RSS-watchdog/retry/mount-check pattern is
-   new, unstarted work, needed before item 4 can measure Spark at scale
-   under the same rigor as Rust.
+3. ~~Process-level matrix runner with RSS watchdog~~ **DONE for both
+   engines** (Rust: notebook session; Spark: this session). See "What
+   changed this session" above and
+   `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 7. `matrix_runner.py`'s
+   `engine=spark` configs still need a `spark-driver-memory-mb` value
+   chosen deliberately per row count before item 4 runs — not defaulted,
+   see above for why.
 4. Measure the actual 10-100M row target (axis 1 only, per above), for
-   **both** engines. Rust has 1M/10M/25M (notebook session, real numbers
-   in `TIMESERIES_PHASE_0B_HARNESS.md`'s "Memory scaling" section); Spark
-   has nothing past the 25k correctness check. **Gated on user go-ahead
-   past 50M rows**, same as before.
+   **both** engines, now that both have matrix-runner support. Rust has
+   1M/10M/25M (notebook session, real numbers in
+   `TIMESERIES_PHASE_0B_HARNESS.md`'s "Memory scaling" section); Spark has
+   nothing past the 25k correctness/matrix-runner check. **Gated on user
+   go-ahead past 50M rows**, same as before.
 5. ~~Pin Parquet compression, row-group/file targets, and sort order~~
    **Done** (notebook session, 2026-08-09).
 6. Write `TIMESERIES_PHASE_0B_RESULTS.md` with raw commands/artifacts.
@@ -200,38 +245,47 @@ exist yet and isn't implied by anything built so far.
 
 ## Worktree state and ownership
 
-This session's commit (`87380bf`) owns: `spark-adapter/` (all files),
-`.claude/skills/spark-setup/` (both files, rewritten from a PySpark-era
-version).
+All prior sessions' work is now committed (as of this session):
+- `87380bf` — Spark adapter session: `spark-adapter/` (all files),
+  `.claude/skills/spark-setup/` (both files).
+- `57825b7` — this session, committed first as a housekeeping step before
+  building further: the notebook session's write-path pin
+  (`crates/cubism-timeseries-bench/src/lib.rs`, `docs/TIMESERIES_FEASIBILITY.md`,
+  `docs/TIMESERIES_PHASE_0B_HARNESS.md`, `docs/TIMESERIES_PHASE_0B_HANDOFF.md`),
+  the pre-Spark-awareness `matrix_runner.py`, and
+  `crates/cubism-timeseries-bench/examples/explain_aggregate.rs`.
+- `354240d` — this session: the unrelated web analytics demo
+  (`examples/web_analytics_demo/`, `README.md`), source files only —
+  generated `events.csv`/`web_analytics_cube.parquet` deliberately left
+  out, matching the repo's convention for its other `examples/` demos.
+- This session's own item-3 work (Spark-aware `matrix_runner.py`, this
+  handoff, `TIMESERIES_PHASE_0B_HARNESS.md`, and
+  `TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 7) — commit pending as of this
+  writing, see git log for the actual hash once made.
 
-Pre-existing/unrelated work in the tree, **not touched or committed by
-this session** (deliberately left for separate review, consistent with
-prior sessions' handoff convention):
-
-- `README.md`, `crates/cubism-timeseries-bench/src/lib.rs`,
-  `docs/TIMESERIES_FEASIBILITY.md`, `docs/TIMESERIES_PHASE_0B_HARNESS.md`
-  (all modified, uncommitted — from the notebook session, 2026-08-09/11);
-- `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md`,
-  `crates/cubism-timeseries-bench/examples/`,
-  `crates/cubism-timeseries-bench/scripts/`,
-  `examples/web_analytics_demo/` (untracked — also notebook session);
-- `.serena/` (local tooling state, never committed by any session).
+Remaining uncommitted/untracked, **deliberately left alone**:
+`.serena/` (local tooling state, never committed by any session, and not
+covered by `.gitignore` on purpose per prior-session convention —
+generated `examples/web_analytics_demo/events.csv` and Spark/Cargo build
+output are excluded via `.gitignore` instead).
 
 ## Recommended next session
 
 1. Read this handoff, `docs/TIMESERIES_PHASE_0B_HARNESS.md`,
-   `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md`, and issues
+   `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` (especially Entry 7), and issues
    [#1](https://github.com/jeromebanks/cubism-rs/issues/1) and
    [#2](https://github.com/jeromebanks/cubism-rs/issues/2).
-2. Decide whether to review/commit the notebook session's pending
-   uncommitted changes (listed above) before building further on top of
-   them — they've been sitting uncommitted across two sessions now.
-3. Extend `matrix_runner.py` (or write a parallel Spark-aware driver) so
-   Spark gets the same RSS-watchdog/retry rigor as Rust before item 4's
-   real scale-up (item 3 above).
-4. Only then run item 4 — the actual axis-1 (local, same-host) 10-100M row
-   comparison for both engines, gated past 50M rows same as before.
-5. If axis 2 or 3 (distributed, either engine) ever become the actual
+2. Choose a `spark-driver-memory-mb` value per row-count config, informed
+   by Rust's own measured peak RSS at that scale (`TIMESERIES_PHASE_0B_HARNESS.md`
+   "Memory scaling" / issue #2 finding 3) — not copied from Rust's
+   `--memory-limit-mb`, see item 3's writeup above for why.
+3. Run item 4 — the actual axis-1 (local, same-host) 10-100M row
+   comparison for both engines under `matrix_runner.py`, gated past 50M
+   rows same as before. The runner's cross-engine digest check will flag
+   automatically if the two engines' aggregate output ever disagrees at
+   scale — treat a MISMATCH as a correctness bug blocking further scale-up,
+   not a performance data point.
+4. If axis 2 or 3 (distributed, either engine) ever become the actual
    question, that needs a new benchmark design from scratch — nothing
    built so far implies or prepares for it, per the scoping table above.
 
