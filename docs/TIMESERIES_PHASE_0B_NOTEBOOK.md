@@ -709,10 +709,69 @@ still alive. Worth adding before further item-4 scale-up sessions,
 especially multi-session ones. Also worth internalizing procedurally: do
 not run heavy concurrent foreground work (release builds, clippy, other
 compute) while a memory-sized background benchmark run is in flight on
-this host, and verify a background process's actual liveness via `ps
-aux | grep <exact command line>` rather than inferring it from a Bash
-tool completion notification, which reports on the *launcher* returning,
-not on backgrounded work finishing.
+this host.
+
+**Correction, same session, found immediately after writing the above**:
+after relaunching the single clean run, `ps aux | grep <exact command
+line>` reported it as gone within ~1-3 minutes -- which, applying this
+entry's own "verify liveness" advice literally, looked like a *third*
+crash with the identical signature (dies right after Spark's
+`BlockManager` initializes, before touching the source file). Chased it
+seriously: checked for JVM native-crash artifacts (`hs_err_pid*.log`,
+`~/Library/Logs/DiagnosticReports`) -- none found; checked `log show` for
+a jetsam kill targeting `java`/`SparkSubmit` specifically -- none found,
+and system-wide free memory was a healthy 66% at the time, ruling out the
+memory-pressure explanation that fit the real incident above. Before
+concluding a second, different bug existed, checked with `lsof` on the
+run's own `warmup.log` instead of `ps aux` -- and found both the
+`python3` and `java` processes very much alive, holding the file open for
+writing. **`ps aux` output from this sandboxed environment's Bash tool
+gave a false negative for a real, still-running background process** --
+twice in this session, including the one that triggered the original
+duplicate-launch mistake in the first place. The lesson isn't "verify
+liveness via `ps aux`" as originally written above; it's **prefer the
+harness's own background-task completion notification, or `lsof` on a
+file the process demonstrably still writes to, over `ps aux` snapshots
+from a fresh tool invocation** -- and don't take further action (retrying,
+killing, relaunching) on a `ps`-based "it's gone" read alone.
+
+## Entry 10 -- Item 4: first real 10M-row rust+spark result (Task #6)
+
+**First real axis-1 performance evidence Phase 0B exists to produce**, from
+the clean relaunch in Entry 9 (rust config reused its 5 already-measured
+runs from the notebook session; spark config ran fresh, 5/5 measured, no
+failures, no retries needed):
+
+| Engine | Peak RSS median | Peak RSS max | Wall median | Driver/pool bound |
+| --- | --- | --- | --- | --- |
+| Rust (DataFusion) | 5420 MB | 5688 MB | 91.5s | `--memory-limit-mb 2048` |
+| Spark (Scala adapter) | 6351 MB | 6646 MB | 305.3s | `--driver-memory 6144m` |
+
+**Cross-engine digest check: MATCH.** Both engines produced the identical
+semantic digest (`71fbd214aafef8bfa43e1bd58a3b4b3ee6aa9a6db6e5259a22f1cf2d0bb1bf62`)
+over the same 10M-row source -- the first correctness confirmation at
+real benchmark scale, not just the 25k/1M fixtures. Aggregation
+correctness (sum/count/KMV, XXH3 hashing, unsigned KMV ordering) holds at
+10M rows on both engines simultaneously.
+
+**Read with the schema-asymmetry caveat already recorded in
+`SparkAggregate.scala`'s own `comparability_caveat` field**: Rust's wall
+time includes writing all 4 candidate Parquet layouts (`aggregate_ms`
+spans aggregate-and-write); Spark's wall time is aggregate-plus-digest
+only, writing no layouts (out of scope for the adapter by design). The
+3.3x wall-time gap and ~17% higher peak RSS are therefore **not** a clean
+apples-to-apples "Spark is slower/heavier" reading yet -- item 6 needs to
+either reconstruct a matched time slice (e.g. Rust's `aggregate_ms` minus
+its own layout-write portion) or explicitly caveat the comparison as-is.
+Recorded here as raw evidence, not yet a conclusion.
+
+**No problems**: no RSS-limit kills, no retries, no disk issues (Spark's
+own output is tiny -- ~120KB total for 6 `run.json` files, since it
+writes no layouts; `/Volumes/YOTUO` at 715Gi avail, `/` untouched by this
+config since `spark.local.dir` was redirected there).
+
+Proceeding to 25M next (pre-authorized per the standing convention; the
+gate is past 50M rows, not 10M/25M).
 
 ## Entries to follow
 
