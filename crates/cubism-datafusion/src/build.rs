@@ -55,8 +55,13 @@ pub async fn build_cube(
     Ok((df, dict))
 }
 
-/// Generate the cube-build SQL for a spec (exposed for inspection/tests).
-pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
+/// Per-dimension-level `SELECT` projections (`CAST(<expr> AS VARCHAR) AS
+/// __lN`) and their aliases, in canonical (name-sorted) dimension order.
+/// Shared by the static and temporal build paths so both explode rows into
+/// XUnits via the identical column shape — `cubism_xunit_keys` sees the same
+/// input regardless of which path produced it, preventing semantic drift
+/// between them.
+pub(crate) fn level_columns(spec: &CubeSpec) -> (Vec<String>, Vec<String>) {
     let mut level_selects = Vec::new();
     let mut level_args = Vec::new();
     for dim in spec.sorted_dimensions() {
@@ -66,6 +71,12 @@ pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
             level_args.push(alias);
         }
     }
+    (level_selects, level_args)
+}
+
+/// Generate the cube-build SQL for a spec (exposed for inspection/tests).
+pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
+    let (level_selects, level_args) = level_columns(spec);
 
     // Each measure contributes: projections of its input expression(s) into
     // aliased columns (which the explode stage passes through), one aggregate

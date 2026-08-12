@@ -960,8 +960,10 @@ dependencies = [
 name = "cubism-datafusion"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "cubism-core",
  "datafusion 54.0.0",
+ "proptest",
  "serde_json",
  "tokio",
 ]

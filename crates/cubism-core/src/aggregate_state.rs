@@ -452,6 +452,10 @@ impl QuantileState {
         self.bin_width
     }
 
+    pub fn bin_count(&self) -> usize {
+        self.bins.len()
+    }
+
     /// Returns the midpoint of the selected bin. Absolute error from
     /// discretization is at most `bin_width / 2`.
     pub fn quantile(&self, probability: f64) -> Result<Option<f64>, CubismError> {
