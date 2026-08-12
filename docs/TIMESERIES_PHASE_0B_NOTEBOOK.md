@@ -521,12 +521,37 @@ Scratch output (`/tmp/phase0b-spark-smoke`, `/tmp/phase0b-cross-smoke`,
 of this touched `/Volumes/YOTUO/phase0b/matrix`'s existing 1M/10M/25M
 results.
 
+**Addendum -- 1M-row Spark probe, run before handing off:** advisor review
+flagged a real untested risk in everything validated above: every Spark
+run so far (the adapter session's 25k golden check, and this session's
+three validations) used the 25k source, whose 168-bucket/51,473-cell
+aggregate is tiny next to `SparkAggregate.scala`'s `toLocalIterator()`
+digest fold, which pulls one Spark partition to the driver at a time --
+untested at a cell count actually approaching driver-memory pressure, and
+a partition-level OOM there would show up as a bare `exit != 0`, not a
+digest mismatch, so the cross-engine check alone couldn't have caught it.
+Ran `engine=spark,rows=1000000,occupancy=sparse,partitions=4,
+spark-driver-memory-mb=4096` against the existing
+`/Volumes/YOTUO/phase0b/sources/sparse-1000000-seed1.parquet` source (2
+runs, ~13-16s each, peak RSS 2840-3223MB, comfortably under both the
+4096m driver-memory bound and the 12000MB watchdog limit). `run.json`'s
+`semantic_digest_blake3` reproduced Rust's own pinned 1M-row golden value
+(`8d5e66a9fd6e892b63ac144f1456b0d76017c36377e1be608bfd935c6c0e9620`,
+`cell_count=1936575`, from issue #1) exactly -- the shuffle -> AQE ->
+`orderBy` -> `toLocalIterator` path holds up correctly at 1.94M cells /
+4 partitions, not just at the 25k/51k-cell scale every prior Spark run
+exercised. This meaningfully de-risks item 4's scale-up: the first real
+exercise of that code path is now a real (if small) success, not an
+unknown discovered hours into a 10M+ run.
+
 **Not done / open, flagged for item 4:**
 - The actual `spark-driver-memory-mb` value to use at 10M/25M/50M+ scale
   is still an open choice -- this session deliberately did not pick one
   (see above). Item 4 should size it from Rust's own measured peak RSS at
   each row count (`TIMESERIES_PHASE_0B_HARNESS.md` "Memory scaling"/issue
-  #2 finding 3 tables), not guess.
+  #2 finding 3 tables), not guess. The 1M probe's own 2840-3223MB reading
+  (against a 4096m bound) is one more data point for that sizing, on top
+  of Rust's own 1M/10M/25M peak-RSS table.
 - `run.json` schema asymmetry between engines is unchanged by this
   session and still real: Rust's `aggregate_ms` spans aggregate-and-write
   across all 4 layouts plus a separate `verification_ms`; Spark's

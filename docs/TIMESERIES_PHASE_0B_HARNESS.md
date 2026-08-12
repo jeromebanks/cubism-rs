@@ -383,11 +383,15 @@ pinned golden digest at 25,000 rows. What remains true:
 - Phase 0B is not complete.
 
 Spark must consume the same generated source files and emit states that
-normalize to the same semantic digest — enforced today by the matrix
-runner's cross-engine digest check (item 3, below), not just checked once
-by hand. Spark's built-in approximate distinct count is not an acceptable
-replacement for the Phase 1 KMV contract, and the adapter does not use it
-(see `spark-adapter/src/main/scala/cubism/bench/KmvAggregator.scala`).
+normalize to the same semantic digest. The matrix runner can check this
+automatically now (item 3, below) — but only when a single invocation
+actually runs both engines at the same rows/occupancy; a Spark-only
+invocation still prints "(no rows/occupancy pair ran both engines)" and
+exits 0, so this is a check available on request, not a standing
+enforcement that guards every Spark run by construction. Spark's built-in
+approximate distinct count is not an acceptable replacement for the Phase 1
+KMV contract, and the adapter does not use it (see
+`spark-adapter/src/main/scala/cubism/bench/KmvAggregator.scala`).
 
 ## Remaining Phase 0B work
 
