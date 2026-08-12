@@ -588,7 +588,7 @@ the spec and state versions necessary to interpret old files.
 |---|---|---|---|
 | Startup/scheduling | Low process and planning overhead | JVM and Spark scheduling overhead | Rust advantage for frequent small jobs |
 | Single-node vectorized execution | Arrow-native, strong fit | Mature codegen/vectorization, heavier runtime | Benchmark; Rust likely competitive |
-| Memory control | Explicit limits and spill, compact native runtime | Mature executor memory model and spill | Benchmark high-cardinality cases |
+| Memory control | Explicit limits and spill, compact native runtime | Mature executor memory model and spill | Partially benchmarked 2026-08-09, single-node only — see below |
 | Multicore scaling | Strong within one process | Strong within executor and cluster | Both viable |
 | Very large distributed shuffle | Requires a chosen distributed layer and more engineering | Mature built-in distributed shuffle/retries | Spark advantage |
 | Iceberg reads | Current/static providers, pruning to verify | Mature, broad integration | Spark advantage today |
@@ -613,6 +613,33 @@ The hybrid should share one table schema and aggregate-state specification.
 Using Spark for maintenance must not require Spark to understand or recompute an
 opaque sketch; file rewrites should preserve bytes, while any cross-engine state
 merge needs a tested compatible implementation.
+
+### Phase 0B single-node findings so far (2026-08-09, no Spark run yet)
+
+`docs/TIMESERIES_PHASE_0B_HARNESS.md`'s "Known design chokepoints" section
+has the full evidence; summary here since it bears directly on the row
+above. This does **not** answer Rust-vs-Spark — no Spark comparison has run
+on this host — but it does sharpen what "Benchmark high-cardinality cases"
+found: (1) `EXPLAIN` confirms `AGGREGATE_SQL`'s `GROUP BY` is a full
+two-phase hash aggregate over the whole input, not a bucket-streaming one —
+the sort that makes the harness's own per-bucket write buffering safe
+happens *after* aggregation, not during it; (2) only the sort operator's
+disk-spill under the pinned memory pool has been empirically verified
+(a 256MB/512MB probe), not the aggregate operator's, including for the
+custom KMV/TopK/Centroid accumulators — whether the "Memory control" row's
+Rust-side "explicit limits and spill" claim actually covers aggregation
+memory, not just sorting, is still open; (3) measured real peak RSS
+exceeds the pinned pool by an amount that scales consistently with
+distinct cell count (~190-234 bytes/cell at 10M and 25M rows) rather than
+staying flat, which is more consistent with per-group aggregation state
+than with the previously-blamed non-pooled harness buffers (those are
+capped near-constant, not scale-proportional). None of this touches the
+"Very large distributed shuffle: Spark advantage" row's premise — every
+Phase 0B run so far is single-process, single-machine; the
+mergeable-aggregator design's own scatter/gather path (shard, build partial
+cubes, merge via KMV/sum's documented mergeability) has never actually been
+exercised in a benchmark, so "modest scatter/gather" above is still an
+architectural claim, not a measured one.
 
 ## Benchmark and proof of concept
 
@@ -698,7 +725,7 @@ after the remaining environments and Phase 0B demonstrate all of the following:
 | Exact arbitrary boundaries | False precision | Raw boundary scan or explicit approximation |
 | Manifest/table two-step publication | Orphan data or split-brain readers | Recoverable CAS protocol and reconciliation |
 | Small files from frequent buckets | Slow planning and high metadata cost | Buffered target-size writes and compaction SLO |
-| High-cardinality group-by | Memory/shuffle pressure | Spill and scale benchmarks |
+| High-cardinality group-by | Memory/shuffle pressure | Spill and scale benchmarks — **partially done 2026-08-09**: sort-spill verified, aggregate-spill and custom-accumulator spill NOT verified (see `TIMESERIES_PHASE_0B_HARNESS.md` "Known design chokepoints" #2) |
 | Wide versus per-measure schema | Scan/row amplification tradeoff | Phase 0B schema benchmark |
 | Calendar/DST buckets | Ambiguous boundaries | Defer until semantics and tests are specified |
 | Legacy implementation unavailable | Comparison blind spots | Reproduce equivalent Spark reference workload |

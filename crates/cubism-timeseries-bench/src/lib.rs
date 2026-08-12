@@ -24,6 +24,7 @@ use cubism_datafusion::udf::cube_udfs;
 use futures::StreamExt;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -36,9 +37,26 @@ use std::time::{Duration, Instant};
 const SOURCE_SCHEMA_VERSION: u16 = 1;
 // v2: aggregate_ms now spans the whole streaming aggregate+write loop
 // (it used to measure aggregation only, before the four layouts were
-// written); run.json files across versions are not comparable.
-const HARNESS_SCHEMA_VERSION: u16 = 2;
+// written); v3: run.json gained explicit compression/row-group fields
+// (see PINNED_COMPRESSION / LAYOUT_ROW_GROUP_ROWS below) -- no behavior
+// changed, but older run.json files won't have these keys.
+const HARNESS_SCHEMA_VERSION: u16 = 3;
 const STATE_VERSION: u16 = 1;
+// Phase 0B pinned write-path settings, applied identically to the source
+// file and all four layouts. UNCOMPRESSED matches this crate's prior
+// (implicit, parquet-rs default) behavior -- pinning it here makes it a
+// recorded benchmark decision instead of an accident of the library
+// default, per remaining-work item 5. It has NOT been evaluated for its
+// effect on disk footprint at the 10-100M row target; four uncompressed
+// layouts at that scale may consume much more disk than a compressed
+// codec would. Revisit before trusting file-size comparisons at scale.
+const PINNED_COMPRESSION: Compression = Compression::UNCOMPRESSED;
+const PINNED_COMPRESSION_LABEL: &str = "uncompressed";
+// Row-group target for the four output layouts (not the source file,
+// which uses its own --batch-rows). Matches the value already in use;
+// pinned as one named constant instead of two independent magic numbers
+// so it can't silently drift between OpenLayout and write_single_batch.
+const LAYOUT_ROW_GROUP_ROWS: usize = 65_536;
 const BASE_BUCKET_START_US: i64 = 1_767_225_600_000_000; // 2026-01-01T00:00:00Z
 const HOUR_US: i64 = 3_600_000_000;
 const BUCKETS: u64 = 24 * 7;
@@ -164,6 +182,7 @@ pub struct GenerationMetrics {
     pub occupancy: Occupancy,
     pub seed: u64,
     pub batch_rows: usize,
+    pub compression: &'static str,
     pub bytes: u64,
     pub elapsed_ms: u128,
 }
@@ -187,6 +206,8 @@ pub struct RustRunMetrics {
     pub output_dir: String,
     pub target_partitions: usize,
     pub memory_limit_bytes: usize,
+    pub layout_compression: &'static str,
+    pub layout_row_group_rows: usize,
     pub aggregate_ms: u128,
     pub cell_count: usize,
     pub semantic_digest_blake3: String,
@@ -227,6 +248,7 @@ pub fn generate_source(config: &GenerateConfig) -> Result<GenerationMetrics> {
     let schema = source_schema();
     let properties = WriterProperties::builder()
         .set_max_row_group_row_count(Some(config.batch_rows))
+        .set_compression(PINNED_COMPRESSION)
         .build();
     let file = File::create(&config.output)
         .with_context(|| format!("create {}", config.output.display()))?;
@@ -253,6 +275,7 @@ pub fn generate_source(config: &GenerateConfig) -> Result<GenerationMetrics> {
         occupancy: config.occupancy,
         seed: config.seed,
         batch_rows: config.batch_rows,
+        compression: PINNED_COMPRESSION_LABEL,
         bytes: file_len(&config.output)?,
         elapsed_ms: started.elapsed().as_millis(),
     })
@@ -369,6 +392,8 @@ pub async fn run_rust(config: &RustRunConfig) -> Result<RustRunMetrics> {
         output_dir: config.output_dir.display().to_string(),
         target_partitions: config.target_partitions,
         memory_limit_bytes: config.memory_limit_bytes,
+        layout_compression: PINNED_COMPRESSION_LABEL,
+        layout_row_group_rows: LAYOUT_ROW_GROUP_ROWS,
         aggregate_ms,
         cell_count,
         semantic_digest_blake3: digest,
@@ -576,7 +601,8 @@ struct OpenLayout {
 impl OpenLayout {
     fn create(path: PathBuf, schema: Arc<Schema>) -> Result<Self> {
         let properties = WriterProperties::builder()
-            .set_max_row_group_row_count(Some(65_536))
+            .set_max_row_group_row_count(Some(LAYOUT_ROW_GROUP_ROWS))
+            .set_compression(PINNED_COMPRESSION)
             .build();
         let file = File::create(&path).with_context(|| format!("create {}", path.display()))?;
         let writer = ArrowWriter::try_new(file, schema, Some(properties))?;
@@ -822,7 +848,8 @@ fn timestamp_array(values: Vec<i64>) -> ArrayRef {
 
 fn write_single_batch(path: &Path, schema: Arc<Schema>, batch: &RecordBatch) -> Result<()> {
     let properties = WriterProperties::builder()
-        .set_max_row_group_row_count(Some(65_536))
+        .set_max_row_group_row_count(Some(LAYOUT_ROW_GROUP_ROWS))
+        .set_compression(PINNED_COMPRESSION)
         .build();
     let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
     let mut writer = ArrowWriter::try_new(file, schema, Some(properties))?;

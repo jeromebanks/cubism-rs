@@ -1,0 +1,427 @@
+# Time-Series Phase 0B Working Notebook
+
+Date started: 2026-08-09
+
+Purpose: running log of Phase 0B session work, one entry per task, each
+opening with a resource snapshot taken *before* the task starts. This is a
+working log, not a polished deliverable -- see
+[`TIMESERIES_PHASE_0B_RESULTS.md`](TIMESERIES_PHASE_0B_RESULTS.md) (to be
+written per remaining-work item 6) for the final measured results, and
+[`TIMESERIES_PHASE_0B_HANDOFF.md`](TIMESERIES_PHASE_0B_HANDOFF.md) /
+[`TIMESERIES_PHASE_0B_HARNESS.md`](TIMESERIES_PHASE_0B_HARNESS.md) for the
+standing contract this work operates under.
+
+Context for why this notebook exists: the prior session found the harness's
+pre-fix memory use could exceed this host's 16GB RAM (commit `64a2b58`,
+issue #1). The fix landed, but the actual 10-100M row target has still
+never been run on this box, so every scale-up step here is treated as a
+possible repeat of that incident until measured otherwise.
+
+## Snapshot command (run identically every time)
+
+```bash
+memory_pressure -Q
+vm_stat
+sysctl vm.swapusage
+uptime
+df -h / /Volumes/YOTUO
+ps aux | sort -rk4 | head -6
+ps aux | grep -i claude | grep -v grep   # call out other live sessions explicitly
+```
+
+Threshold: if any candidate run's DataFusion `--memory-limit-mb` plus
+observed harness-side RSS would plausibly exceed **~12GB** (leaving ~4GB
+headroom on the 16GB host for OS + other apps), stop and ask before
+proceeding rather than extrapolating through it.
+
+---
+
+## Entry 1 -- Baseline + preflight (Task #1)
+
+**Before:**
+- `memory_pressure -Q`: 78% system-wide free
+- `vm_stat`: free 19,823 pages / speculative 34,538 / purgeable 18,363
+  (page size 16384) -> ~1.1GB immediately free+speculative+purgeable;
+  active 387,184 (~6.2GB), inactive 352,133 (~5.6GB), wired 118,025 (~1.9GB)
+- `vm.swapusage`: 0 used
+- `uptime`: load averages 1.20 3.73 8.11 (15-min figure still elevated from
+  earlier in the session; 1-min figure is low and trending down)
+- disk: `/` 101Gi avail; `/Volumes/YOTUO` (external, where the repo's
+  `target` symlink points) 850Gi avail
+- other live sessions: **two other `claude` processes running**
+  (pid 17890 `claude --resume`, pid 22336 `claude`) alongside this one --
+  the box is not quiet. Also Ghostty, Chrome, OrbStack helper, Claude
+  desktop app running.
+
+**Action:** ran
+`CARGO_TARGET_DIR=/tmp/cubism-target-phase0b cargo run -p cubism-timeseries-bench -- preflight`
+(debug build, ~90s compile).
+
+**Result:** fails cleanly as documented --
+`Error: spark-submit: not found; Phase 0B cannot select a Rust/Spark boundary yet`.
+No Java runtime, no `pyspark` installed either. Confirms remaining-work
+item 1 (Spark adapter) needs a JVM + Spark + PySpark install before it can
+even start -- a multi-GB, machine-state-changing install. **Gated for
+explicit user go-ahead (Task #6), not started.**
+
+**After:** no measurable change (preflight does no data generation or
+aggregation).
+
+---
+
+## Entry 2 -- Item 5: pin compression/row-group/sort order (Task #2)
+
+**Before:**
+- `memory_pressure -Q`: 76% free
+- `uptime`: load averages 2.28 3.10 6.51
+- disk: `/` 97Gi avail, `/Volumes/YOTUO` 850Gi avail
+- no other new processes started since Entry 1
+
+**Action:** in `crates/cubism-timeseries-bench/src/lib.rs`:
+- Added `PINNED_COMPRESSION = Compression::UNCOMPRESSED` (matches prior
+  implicit parquet-rs default -- **not changed, just made explicit**) and
+  applied it to all three `WriterProperties` builders (source file, the two
+  per-layout writers).
+- Added `LAYOUT_ROW_GROUP_ROWS = 65_536` as one named constant replacing two
+  independent magic numbers (`OpenLayout::create`, `write_single_batch`).
+- Recorded both as new `run.json` fields: `GenerationMetrics.compression`,
+  `RustRunMetrics.layout_compression` / `layout_row_group_rows`.
+- Documented explicitly (code comment + `TIMESERIES_PHASE_0B_HARNESS.md`)
+  that the aggregate-stream sort (`bucket_start` only, load-bearing for
+  bounded memory) and the written/verified `(bucket, content ID)` order are
+  two different, both-pinned sorts -- adding `xunit` to `AGGREGATE_SQL`'s
+  `ORDER BY` would reintroduce the pre-fix unbounded-memory bug.
+- Bumped `harness_schema_version` 2 -> 3 (additive fields only).
+
+**Verification performed** (per the doc's own rule: confirm the golden
+digest still reproduces before trusting any write-path touch):
+- `cargo test -p cubism-timeseries-bench` (debug): 5 passed, 1 ignored --
+  including `generator_is_byte_deterministic` and both 25k golden digests.
+- `cargo test --release -p cubism-timeseries-bench -- --ignored`: the 1M-row
+  golden digest still reproduces byte-for-byte (12.89s).
+- `cargo clippy -p cubism-timeseries-bench --all-targets -- -D warnings`:
+  clean for this crate. (One pre-existing, unrelated clippy failure in
+  `cubism-datafusion/src/udf.rs` -- a doc-comment indentation lint -- was
+  not introduced by this change and was left alone as out of scope.)
+- `rustfmt --edition 2024 --check` on the touched file: clean.
+
+**Flagged, not fixed:** compression is pinned to UNCOMPRESSED but its
+effect on disk footprint at 10-100M rows x 4 layouts has not been
+evaluated. Check free disk on the output volume before scaling up (see
+Item 4 gate).
+
+**After:**
+- `memory_pressure -Q`: 68% free (down from 76%)
+- `uptime`: load averages 5.31 7.19 7.57 (1-min jumped from 2.28) --
+  attributable to the release build's parallel compilation (`cargo build
+  --release`, ~3m49s, uses all cores), not a leak; expected to settle.
+  Noting it anyway per the "note resource usage" instruction rather than
+  silently discounting it.
+- disk: `/` 96Gi avail (small drop from build artifacts in
+  `/tmp/cubism-target-phase0b`, on the boot volume -- worth watching as
+  more scale runs land there; consider moving `CARGO_TARGET_DIR` output
+  data, not the build cache, to `/Volumes/YOTUO` for later steps if `/tmp`
+  fills up)
+
+No problems. Ready for Task #3 (matrix runner + RSS watchdog).
+
+## Entry 3 -- Item 3: process-level matrix runner + RSS watchdog (Task #3)
+
+**Before:** 68% free, load 2.44/5.00/6.56, `/` 96Gi avail. Same two other
+live `claude` sessions as Entry 1/2, plus this session's own release
+builds.
+
+**Action:** wrote `crates/cubism-timeseries-bench/scripts/matrix_runner.py`
+(stdlib-only Python, no new deps). Per config: generates/reuses a shared
+source file, runs 1 warm-up + N measured `rust` subcommand invocations as
+real OS subprocesses, polls each child's RSS via `ps -o rss=` on an
+interval, kills and records if RSS exceeds `--rss-limit-mb` (default
+12000, i.e. ~4GB headroom on this 16GB host), aborts remaining runs in a
+config on a kill rather than continuing, checks free disk before each
+run/generation via `--min-free-gb` (default 10), and captures the same
+`memory_pressure -Q` / `vm_stat` / `vm.swapusage` / loadavg / `df`
+environment snapshot this notebook uses, before and after each config, into
+`matrix_results.json`.
+
+**Validation performed:**
+1. 25k-row sparse smoke config (2 measured runs): mechanics worked
+   end-to-end, but wall time was 0.5s -- too fast for the 500ms poller to
+   catch a real peak (`peak_rss=4MB` is a startup-sample artifact, not a
+   real reading). **Known limitation: the watchdog's polling approach is
+   only meaningful for runs lasting several seconds or more** -- fine for
+   the 1M+ configs Phase 0B actually cares about, not for sub-second smoke
+   runs.
+2. 1M-row sparse config (3 measured runs, `--poll-interval-ms 200`):
+   mechanics worked correctly, `peak_rss` 1649-1802MB across the 3 measured
+   runs.
+
+**Finding -- current RSS readings run well above the doc's recorded 1M
+baseline, and this host is not quiet:**
+
+`docs/TIMESERIES_PHASE_0B_HARNESS.md` "Memory scaling" records **1.09GB**
+peak RSS / 771MB footprint for 1M sparse rows (measured 2026-08-08). This
+session's tool reads **1.65-1.8GB** for the identical config. Cross-checked
+independently with `/usr/bin/time -l` on the same binary/input/flags
+(bypassing the Python watchdog entirely, to rule out a polling bug):
+
+```
+1,702,510,592  maximum resident set size   (1623.6 MB)
+  672,205,560  peak memory footprint        (641.1 MB)
+```
+
+The `/usr/bin/time -l` "maximum resident set size" (1.62GB) matches the
+watchdog's own reading closely -- so **the watchdog is measuring
+correctly**; the discrepancy is between *today's* number and the number
+recorded in the doc two days ago, not a bug in this new tool. Notably,
+"peak memory footprint" (641MB) came in *lower* than the doc's 771MB while
+"maximum resident set size" came in *higher* than the doc's 1.09GB -- an
+inconsistent shift, not a uniform scaling factor, which argues against a
+simple "the box is just busier so everything reads higher" explanation.
+
+Not resolved in this session. Plausible contributors, none confirmed:
+- This host was demonstrably **not quiet** during every run in this
+  notebook: two other live `claude` CLI sessions (pids 17890, 22336 as of
+  Entry 1) plus Chrome/OrbStack/Ghostty running throughout, vs. whatever
+  state the box was in for the original Aug 8 measurement.
+- Possible run-to-run allocator/heap-growth variance in the DataFusion
+  GROUP BY / sort path, independent of system load.
+- The Item 5 write-path pin (Entry 2, same session) changed compression
+  settings but not the aggregation path this measurement exercises, and
+  the golden digest still reproduces byte-for-byte -- unlikely to be the
+  cause, but not formally ruled out by anything other than reading the
+  diff.
+
+**Why this matters:** the whole point of the watchdog is to stop a run
+before it repeats the original memory incident. If real-world RSS at a
+given row count now runs ~50% higher than the last documented number, the
+growth curve toward 10M/25M/50M needs to be re-established from fresh
+measurements, not assumed to follow the old curve. **Recommending to the
+user: re-baseline both 1M and 10M under this tool before trusting any
+comparison at 25M/50M**, and ideally do that re-baseline with the other
+`claude` sessions/apps quiesced so the numbers reflect the harness alone.
+
+**After:** 68% free, load settled to 2.50/4.27/6.07, `/` 91Gi avail (down
+~5Gi from source generation + 4 run output dirs across the two validation
+configs, all on the boot volume via `/tmp`). No kills triggered in
+validation (expected -- both configs were well inside the 12000MB default
+limit). No disk or memory problems, but see the finding above before
+proceeding to Task #5.
+
+## Entry 4 -- Item 4: 1M + 10M sparse re-baseline (Task #5, part 1)
+
+User decision: re-baseline now, as-is, on the box in its current (not
+fully quiet) state rather than waiting to quiesce other sessions first.
+
+**Before:** 69% free, load 2.77/2.96/4.76, `/` 91Gi avail, 14
+Claude-related processes running (two other live sessions).
+
+**Fixed a real bug in the matrix runner first:** the initial 1M validation
+run's summary undercounted `measured_run_count` (reported "2" instead of
+5) because reused/skipped run directories weren't contributing their
+`peak_rss_mb` to the aggregate stats -- that number was never persisted
+anywhere except the watchdog's in-memory state for the process that
+produced it. Fixed by writing a `{label}.watchdog.json` sidecar per run
+and loading it back when a run directory is reused, instead of silently
+excluding it from stats. Wiped the two smoke-test dirs
+(`matrix-smoketest*`) rather than splice pre-fix and post-fix data, and
+reran cleanly into `/tmp/phase0b/matrix` (later moved, see below).
+
+**Action:** `matrix_runner.py` with both configs in one invocation, 5
+measured runs each, `--rss-limit-mb 12000 --poll-interval-ms 200
+--min-free-gb 10`:
+
+| Config | Measured runs | Peak RSS median | Peak RSS max | Wall median | Cell count |
+| --- | --- | --- | --- | --- | --- |
+| 1M sparse | 5/5, none killed | 1690 MB | 1763 MB | 11.1s | 1,936,575 |
+| 10M sparse | 5/5, none killed | 5420 MB | 5688 MB | 91.5s | 15,137,276 |
+
+Cell counts match the doc's recorded values for both row counts exactly
+-- generation is confirmed deterministic, so the RSS shift versus the doc
+is a host/measurement-condition effect, not a data or logic change.
+
+**This corroborates, not resolves, the Entry 3 finding:** both 1M and 10M
+now read **~55-65% higher** than the doc's Aug 8 numbers (1M: 1.09GB ->
+1.69GB median, +55%; 10M: 3.42GB -> 5.42GB median, +58%). Two points at a
+consistent proportional offset is stronger evidence for a systemic effect
+(host load, allocator/OS behavior under contention) than a scale-dependent
+one -- but still not proven, and not chased further this session per the
+user's "proceed as-is" call. **Treat 5.42GB as the real current 10M
+baseline for extrapolation purposes, not 3.42GB.**
+
+**Second problem found live, fixed immediately:** `/` (boot volume) dropped
+from 96Gi to 48Gi available from just these two configs (12 run directories
+x 4 uncompressed layouts) -- confirms the Item 5 disk-footprint caveat
+(UNCOMPRESSED at scale is expensive) and matches advisor guidance from the
+start of this session to keep large I/O off the boot volume. **Moved
+`/tmp/phase0b` (47GB) to `/Volumes/YOTUO/phase0b`** (803Gi avail after the
+move, vs. `/`'s 95Gi). All Task #5 remaining steps (25M, 50M) use
+`--source-dir /Volumes/YOTUO/phase0b/sources --output-root
+/Volumes/YOTUO/phase0b/matrix` from here on. Do not point future large runs
+back at `/tmp` without a explicit reason.
+
+**After:** 66% free, load settled to 1.66/2.24/3.39, `/` 95Gi avail
+(post-move), `/Volumes/YOTUO` 803Gi avail. No kills, no correctness
+problems. Proceeding to 25M sparse next.
+
+## Entry 5 -- 25M sparse crashed: external drive disconnect, not a memory kill (Task #5)
+
+**What happened:** launched 25M sparse (5 measured runs) against
+`/Volumes/YOTUO`. Warmup + run_01/02/03 succeeded (peak RSS 7.0-7.5GB,
+well under the 12GB watchdog limit, ~440s each). `run_04` died with an
+unhandled `FileNotFoundError` while the watchdog tried to write its sidecar
+-- not a watchdog kill (those print `KILLED` and set `result.killed`; this
+was a raw crash with a Python traceback, exit code 1).
+
+**Root cause, confirmed not assumed:** checked `diskutil info /Volumes/YOTUO`
+before and after -- the device node changed from `disk7s1` (session start)
+to `disk5s1` (post-crash). macOS only reassigns a device node like that on
+an actual disconnect+reconnect, not a transient hiccup that stays mounted.
+`log show` around the failure time (16:02:38) confirms it independently:
+`storagekitd` and `appstoreagent` logged the container as `Mounted: No`
+then `"Volume did appear"` for the same APFS UUID at that exact timestamp.
+The user's own framing matches: this is a USB HDD, and "we might have these
+issues" -- external USB drives dropping under sustained multi-minute heavy
+write load (4 runs x ~440s x ~15GB of uncompressed layout writes each) is a
+real, expected failure mode for this hardware, not a bug to root-cause away.
+Cleaned up the orphaned ~14.9GB of partial `run_04` output (no `run.json`,
+so it was mid-write when the process died).
+
+**What was NOT the cause, to close the loop on the earlier "is our explode
+too big" question:** separately confirmed the memory-growth pattern
+(1M/10M/25M all reading well above the Aug 8 doc's numbers, see Entry 3/4)
+is consistent with normal cube-lattice explode behavior (4x fan-out for
+this 2-dim+global spec, confirmed in code: 8 devices x 50,000 regions x
+1M/10M row cell counts match the doc exactly) plus known-and-documented
+non-pooled harness buffers -- not a code defect, and not related to this
+crash. The crash is purely a storage-layer reliability problem.
+
+**Fix -- user asked for resilience, not root-causing the hardware:**
+rewrote `matrix_runner.py`'s failure handling. Before, any exception
+(including a transient I/O error) propagated all the way up and killed the
+whole multi-config matrix run, discarding results already collected in
+memory for the current config (though `matrix_results.json` itself was
+safe -- written after each completed config). Changes:
+- **`mount_ready()`**: writes/reads/deletes a sentinel file to verify a
+  volume actually accepts I/O right now, with retry + backoff. Called
+  before source generation and before each run, and again if a run's own
+  attempt fails, so retries wait for the drive to actually be back instead
+  of immediately re-hammering a still-recovering mount.
+- **`run_one_with_retries()`**: each `rust` subcommand invocation is a
+  clean, deterministic function of its input file, so a from-scratch retry
+  is always safe -- wipes the partial `run_dir` and log, re-checks the
+  mount, retries up to `--max-retries` (default 2) with backoff scaled by
+  attempt number. An RSS-limit kill is explicitly NOT retried (that's the
+  watchdog doing its job correctly, not a transient fault) -- returned to
+  the caller immediately, same abort-remaining-runs behavior as before.
+  A run that exhausts retries is recorded `failed=True` with a reason
+  instead of raising -- the config's remaining runs are then intentionally
+  aborted too (if the drive is still unreachable, further runs in the same
+  config will likely fail the same way), but the matrix run itself
+  continues to whatever config comes next.
+- **`main()`**: the per-config loop now catches failures from `run_config`
+  itself (e.g. source generation never recovering) and records a
+  `config_error` entry rather than crashing the whole matrix; later configs
+  still run.
+- **`--inter-run-pause-s`** (default 3s): a deliberate pause between
+  measured runs, since 4 back-to-back ~440s runs of sustained multi-GB
+  writes with zero breathing room is exactly the load pattern that preceded
+  the disconnect. Cheap mitigation, not a proven fix -- noted as such.
+- Watchdog sidecars now persist `failed`/`fail_reason`/`attempts` too, so
+  a failed run is correctly excluded from `measured_run_count` and the
+  RSS/wall stats on reuse (this reuses the same sidecar mechanism added in
+  Entry 4 for the undercounting bug).
+
+**Verified before trusting it:** two isolated unit tests against the actual
+`run_one_with_retries` function (not a rewrite-and-hope) using a fake
+`bench-bin` shell script: (1) fails twice then succeeds on attempt 3 ->
+confirmed `attempts=3`, `failed=False`, correct `run_json` recovered,
+partial output from the two failed attempts correctly wiped between tries;
+(2) always fails -> confirmed it gives up after `max_retries` (3 total
+attempts), returns `failed=True` with a reason, and critically does
+**not** raise -- the calling process stays alive. Also reran the existing
+1M happy-path config end-to-end through the full CLI (not just the unit
+tests) to confirm the resilience changes didn't disturb the normal
+zero-failure path: 2/2 measured runs, `attempts=1` each, RSS in the same
+1.67-1.75GB band as Entry 3/4.
+
+**Not done / open:** did not add write-level retry logic inside the Rust
+harness itself (deliberately -- a partial retry mid-stream inside the
+correctness-critical streaming aggregation loop risks producing subtly
+wrong output after a remount, since an open `File`/`ArrowWriter` handle
+across a volume disconnect can't be safely resumed; failing fast and
+letting the *outer* orchestrator retry the whole deterministic run is the
+safer place for this). Did not verify whether `--inter-run-pause-s 3`
+actually prevents another disconnect -- that's an untested hypothesis, not
+a confirmed fix; if 25M or 50M drops again, the retry logic should now
+survive it cleanly rather than crashing, but the underlying drive
+flakiness itself has not been eliminated. Did not investigate the USB
+enclosure/cable/power situation physically (out of scope for a code
+change).
+
+**Next:** retry 25M sparse under the hardened script.
+
+## Entry 6 -- 25M retry succeeded; investigated scalability chokepoints (Task #5 + #7)
+
+**25M retry, hardened script:** 5/5 measured runs completed. `run_04`'s
+first attempt failed transiently (exit=1, no `run.json`) -- the retry logic
+handled it automatically, succeeded on attempt 2, matrix continued to
+`run_05` without operator intervention. Real validation of Entry 5's fix,
+not just the unit tests. Results: peak RSS median 7286MB, max 7517MB
+(all comfortably under the 12GB watchdog limit), wall median 448.8s.
+Cell count 28,846,459.
+
+**User asked a direct question mid-run:** worried the Rust/DataFusion
+design may not be as scalable as the original Spark implementation, asked
+me to document any design problems/chokepoints found. This became a real
+investigation, not just answering from what was already known:
+
+- Built `crates/cubism-timeseries-bench/examples/explain_aggregate.rs` (kept
+  in the repo as a reusable diagnostic) and ran `EXPLAIN VERBOSE` against
+  `AGGREGATE_SQL` in an isolated build (`/Volumes/YOTUO/phase0b/explain-target`,
+  cleaned up after) so it wouldn't touch the running 25M job's binary.
+  Confirmed: `SortExec` sits *above* a two-phase `AggregateExec`
+  (Partial -> FinalPartitioned) in the physical plan -- the GROUP BY is
+  NOT bucket-streaming despite the code comment describing bucket-ordered
+  output; the aggregation must process the whole run before sorting starts.
+- Checked `crates/cubism-datafusion/src/udaf.rs`: the custom sketch
+  `GroupsAccumulator`s do implement `size()` (5 impls found), so per-group
+  memory reporting exists in principle -- but whether DataFusion's
+  aggregate operator actually spills on this pinned pool, for these custom
+  accumulators, in this version, is unverified (only the *sort* operator's
+  spill was ever tested, per the existing "Memory scaling" section).
+- Ran a cheap 1M-row `--partitions 1` vs `--partitions 4` comparison (1501MB
+  vs 1690MB median) specifically to test whether parallelism multiplies
+  hash-table memory -- it doesn't meaningfully (~13%, not ~4x). Negative
+  result, recorded so it isn't re-investigated later.
+- Computed excess-RSS-over-pinned-pool per cell at 10M and 25M (~234 and
+  ~190 bytes/cell respectively) -- consistent across a 2.5x scale change,
+  which argues the excess tracks aggregation state rather than the
+  previously-blamed non-pooled harness buffers (those are capped
+  near-constant, so can't explain a gap that grows with scale).
+
+Full writeup with the plan text, the table, and the "what this does/doesn't
+say about Spark" framing is in
+`docs/TIMESERIES_PHASE_0B_HARNESS.md`'s new "Known design chokepoints"
+section, cross-linked from `docs/TIMESERIES_FEASIBILITY.md`'s Rust-vs-Spark
+table and risk list. Filed as
+[github.com/jeromebanks/cubism-rs#2](https://github.com/jeromebanks/cubism-rs/issues/2)
+per the user's request, matching the format of issue #1. **Bottom line given to the user:** no Spark comparison
+has run yet, so the original worry is still empirically open either way --
+but the investigation found a real, previously-undocumented gap between
+"the harness's write-side memory is bounded" (true, that's what commit
+`64a2b52` fixed) and "the pipeline's overall peak memory is bounded" (not
+established -- DataFusion's own aggregate-side memory has an unverified
+spill story), plus confirmed the mergeable-aggregator scatter/gather
+pattern that the architecture was designed around has never actually been
+exercised by any benchmark run so far -- every run to date is single-process,
+single-machine, monolithic aggregation.
+
+**After:** system healthy throughout (no kills, no drive issues on this
+round), `/Volumes/YOTUO` 715Gi avail after cleanup.
+
+## Entries to follow
+
+Each subsequent task (range-read cases, 50M scale-up gate) gets its own
+entry here with a before-snapshot, what was run, and an after-snapshot
+noting any problems (spill triggered, RSS approaching threshold, load
+average from other processes, disk fill on the output volume, etc.).

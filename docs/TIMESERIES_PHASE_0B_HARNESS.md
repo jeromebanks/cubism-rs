@@ -3,7 +3,9 @@
 Date: 2026-08-08
 
 Status: correctness harness slice complete; memory ceiling fixed and
-measured at 1M/10M rows; 100M-row and Spark validation still pending;
+measured at 1M/10M rows; write-path settings (compression/row-group/sort)
+pinned and recorded (2026-08-09); matrix runner, range-read cases, 25-50M
+scale-up, 100M-row measurement, and Spark validation still pending;
 benchmark decision pending
 
 Implementation:
@@ -203,10 +205,158 @@ evidence-backed at the required scale.
 - The DataFusion execution memory pool (`--memory-limit-mb`, default 2048)
   is pinned benchmark configuration, recorded as `memory_limit_bytes` in
   every `run.json`, not an incidental implementation detail.
-- `harness_schema_version` is `2`: `aggregate_ms` now spans the whole
-  streaming aggregate-and-write loop (aggregation and the four layout writes
-  are interleaved per bucket), not aggregation alone as under schema
-  version 1. `run.json` files across schema versions are not comparable.
+- **Parquet compression is pinned to `UNCOMPRESSED`** (`PINNED_COMPRESSION`
+  in `lib.rs`), applied identically to the source file and all four
+  layouts, recorded as `compression`/`layout_compression` in `run.json`.
+  This matches the crate's prior behavior (parquet-rs's own default), now
+  made explicit rather than implicit. It has **not** been evaluated for its
+  effect on disk footprint at the 10-100M row target — four uncompressed
+  layouts at that scale may use substantially more disk than a compressed
+  codec would; check available space on the output volume before scaling
+  up, and treat this as an open question if disk becomes a constraint.
+- **Layout row-group size is pinned to 65,536 rows** (`LAYOUT_ROW_GROUP_ROWS`),
+  recorded as `layout_row_group_rows` in `run.json`. The source file's row
+  group size remains controlled separately by `--batch-rows`
+  (`GenerationMetrics.batch_rows`).
+- **Two different sorts are both pinned and must not be conflated.** The
+  DataFusion aggregate stream (`AGGREGATE_SQL`) sorts only by
+  `bucket_start` — this single-key sort is load-bearing for the bounded-
+  memory fix (it's what guarantees one bucket's rows are contiguous so only
+  one bucket's cells are ever buffered; see "Memory scaling" above).
+  Within a bucket, `run_rust`'s `BucketCells` (keyed by XUnit content ID)
+  re-sorts to the canonical `(bucket, content ID)` order that the semantic
+  digest and every layout's on-disk row order use. Adding `xunit` to
+  `AGGREGATE_SQL`'s `ORDER BY` would either reintroduce the pre-fix
+  unbounded-memory bug or desync from the written/verified order — it is
+  not a pinning knob to touch.
+- `harness_schema_version` is `3`: `run.json` gained the `compression` /
+  `layout_compression` / `layout_row_group_rows` fields above (no run
+  behavior changed by the bump itself). Schema `2` added `aggregate_ms`
+  spanning the whole streaming aggregate-and-write loop, not aggregation
+  alone as under schema version 1. `run.json` files across schema versions
+  are not comparable.
+
+## Known design chokepoints (found via EXPLAIN + empirical measurement, 2026-08-09)
+
+Filed as [github.com/jeromebanks/cubism-rs#2](https://github.com/jeromebanks/cubism-rs/issues/2).
+
+The user asked directly whether the Rust/DataFusion design is less scalable
+than the original Spark implementation. This benchmark hasn't run Spark yet
+(see "Current environment gate" below), so that comparison itself is still
+unanswered — but investigating the memory-growth pattern surfaced four
+concrete, evidence-backed findings about *this* design that bear on it
+directly, independent of any Spark comparison.
+
+### 1. `AGGREGATE_SQL`'s GROUP BY is a full two-phase hash aggregate, not a bucket-streaming one
+
+Checked with `EXPLAIN VERBOSE` against a real registered source (see
+`crates/cubism-timeseries-bench/examples/explain_aggregate.rs`, a throwaway
+diagnostic — SQL/spec text duplicated from `lib.rs` rather than than
+changing that file's visibility). The physical plan is:
+
+```
+SortExec: expr=[bucket_start ASC]
+  AggregateExec: mode=FinalPartitioned, gby=[bucket_start, xunit_key]
+    AggregateExec: mode=Partial, gby=[bucket_start, xunit_key]
+```
+
+This is DataFusion's standard unordered hash aggregate (Partial → repartition
+by group key → FinalPartitioned), and **the sort happens after aggregation
+completes**, not before. The code comment in `lib.rs` above `AGGREGATE_SQL`
+("a single-key sort guarantees all rows for one bucket are contiguous in
+the output stream") is correct about the *output stream* the Rust code
+consumes — and that's what makes `BucketCells`' one-bucket-at-a-time
+buffering valid — but it does **not** mean DataFusion's own aggregation
+is bucket-scoped internally. The `AggregateExec` operators must hold (or
+spill) state for every distinct `(bucket, xunit_key)` group across the
+**entire input**, not one bucket at a time, before the `SortExec` can even
+start. For this benchmark's fixed 168-bucket, one-week window that's a
+bounded (if large) number; for a real deployment with continuous ingestion
+over months or years, a from-scratch full-reprocessing aggregation pass
+would face a *growing* global distinct-cell state, not a per-bucket-bounded
+one. (`ts_eval.md`'s own requirements list "Incremental aggregation" as a
+goal — this benchmark, by construction, only exercises full reprocessing,
+so it says nothing about how an incremental/appendable pipeline would
+behave, which is a separate design that hasn't been built or tested yet.)
+
+### 2. Only the SORT operator's spill has been verified — the GROUP BY's has not
+
+The existing "Memory scaling" section above cites the 256MB-vs-512MB
+experiment as proof the pinned memory pool causes real spilling — but that
+experiment's own error message names the operator: `Resources exhausted`
+from a spilling `ExternalSorterMerge`. That's the **sort** operator. Whether
+`AggregateExec` (Partial or FinalPartitioned) spills under pressure in this
+DataFusion version, and specifically whether it does so correctly for the
+*custom* KMV/TopK/Centroid `GroupsAccumulator`s (which do implement
+`size()`, checked in `crates/cubism-datafusion/src/udaf.rs`, so per-group
+memory reporting exists), has not been isolated or tested the same way. If
+it doesn't spill — or spills but the custom accumulators' reported `size()`
+undercounts their true heap cost — the pinned `--memory-limit-mb` would only
+really be bounding the sort phase while aggregation memory grows
+unconstrained by it. This is the single highest-value follow-up experiment:
+repeat the low-memory-limit probe but construct it (e.g. via a query that
+forces many buckets' worth of distinct groups to coexist, or by watching
+DataFusion's own metrics/`EXPLAIN ANALYZE` spill counters) to isolate
+`AggregateExec` specifically, not `SortExec`.
+
+### 3. Real peak RSS scales with distinct cell count, well beyond the nominal pool bound — and the harness's own non-pooled buffers are too small to be the main cause
+
+Measured, same host, same day:
+
+| Rows | Cell count | Peak RSS (median) | Excess over 2048MB pool | Excess per cell |
+|---|---|---|---|---|
+| 1M | 1,936,575 | 1690 MB (p4) / 1501 MB (p1) | *under* budget | n/a |
+| 10M | 15,137,276 | 5420 MB | 3372 MB | ~234 bytes/cell |
+| 25M | 28,846,459 | 7286 MB | 5238 MB | ~190 bytes/cell |
+
+The excess-per-cell figure is roughly consistent (190-234 bytes) across a
+2.5x change in scale — that consistency is the useful signal. It rules out
+the two non-pooled harness structures previously blamed for "buffers the
+pool doesn't see" (`docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 3/4): the
+`xunit_registry` is capped near the fixed ~450,009-XUnit dictionary
+regardless of row count, and `BucketCells` is capped per-bucket at the same
+ceiling — neither grows enough between 10M and 25M rows to explain a
+*proportionally growing* multi-GB gap. A roughly-constant per-cell excess
+instead points at the aggregation's own per-group state (the two
+`AggregateExec` stages' hash-table entries plus each group's in-flight
+`GroupsAccumulator` state, most plausibly the KMV sketch, before it's
+finalized to a compact blob) as the leading candidate — consistent with
+finding 1/2 above, but **not confirmed by heap profiling** (no
+`heaptrack`/`massif`-equivalent run has been done); flagged as inference
+from a consistent ratio, not a proven mechanism.
+
+### 4. `--partitions` is not the multiplier it might look like (checked, and ruled out)
+
+Worth recording as a negative result so it isn't re-investigated later:
+compared `--partitions 1` vs `--partitions 4` at 1M rows (1501 MB vs 1690
+MB median peak RSS) — only a ~13% difference, not the ~4x a naive
+"N partitions → N concurrent full-size hash tables" model would predict.
+DataFusion's partitioning here doesn't multiply the group-cardinality
+footprint the way it might for a less key-balanced workload. Parallelism
+is not the primary scaling risk in this design; findings 1-3 are.
+
+### What this does and doesn't say about Spark
+
+None of this says Rust/DataFusion is *less* scalable than the legacy Spark
+implementation — no Spark run has happened yet on this host (see below),
+so there is still no head-to-head evidence either way, and `ts_eval.md`'s
+own instructions require an apples-to-apples comparison (matched hardware,
+semantics, and critically **single-node Spark**, since Spark's real
+scaling story is horizontal/cluster-distributed — comparing single-node
+DataFusion against multi-node Spark would be a fundamentally unfair
+comparison in Spark's favor, not a wash). What findings 1-3 *do* establish:
+this benchmark, and the current `cube_udfs`/`AGGREGATE_SQL` design, only
+ever exercises **monolithic single-process aggregation** over the whole
+input in one `SessionContext`. The mergeable-aggregator design (KMV, sum,
+count are explicitly associative/commutative/mergeable per
+`docs/scaling.md`) was built specifically so that a scatter/gather
+pattern — shard the input, build partial cubes independently (possibly in
+parallel processes or on separate machines), merge the mergeable states —
+is *possible*. But Phase 0B as currently scoped has never exercised that
+path even once; every run so far is a single `SessionContext` processing
+one file end to end. If horizontal scale-out is the real answer to "how
+does this compete with a Spark cluster," it needs its own benchmark
+alongside this one, not an inference from single-node numbers.
 
 ## Current environment gate
 
@@ -227,6 +377,9 @@ count is not an acceptable replacement for the Phase 1 KMV contract.
 ## Remaining Phase 0B work
 
 1. Implement the local Spark adapter with byte-compatible KMV state.
+   **Gated on user go-ahead** — this host has no JVM/Spark/PySpark
+   installed; bringing them in is a multi-GB, machine-state-changing
+   install (see `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md`).
 2. Add aligned and non-aligned short/long range-read cases for every retained
    layout, including files and bytes scanned.
 3. Add a process-level matrix runner that records warm-up plus at least five
@@ -234,10 +387,18 @@ count is not an acceptable replacement for the Phase 1 KMV contract.
    spill/shuffle, startup, and commit/write latency.
 4. Measure both occupancy shapes at the actual 10-100 million row target on
    this 16 GB host (only 1M and 10M sparse are measured so far; see "Memory
-   scaling" above), then retain only viable configurations.
-5. Pin Parquet compression, row-group/file targets, and sort order in the
-   results (the DataFusion engine memory limit is already pinned and
-   recorded per run; see "Pinned semantics").
+   scaling" above), then retain only viable configurations. **Gated on user
+   go-ahead past 50M rows** — step up gradually under the matrix runner's
+   RSS watchdog rather than jumping to 100M.
+5. ~~Pin Parquet compression, row-group/file targets, and sort order in the
+   results~~ **Done** (2026-08-09): see "Pinned semantics" above —
+   compression pinned to `UNCOMPRESSED` (unevaluated for disk footprint at
+   scale), layout row-group pinned to 65,536 rows, the two distinct sorts
+   (aggregate-stream vs. written/verified order) documented explicitly so
+   they aren't conflated. `harness_schema_version` bumped 2→3. Re-verified
+   against the 1M-row golden digest (`cargo test --release -p
+   cubism-timeseries-bench -- --ignored`) and the full non-ignored suite —
+   both still pass byte-for-byte / value-for-value.
 6. Write `TIMESERIES_PHASE_0B_RESULTS.md` with raw commands and artifacts.
 7. Select the durable layout and local Rust/Spark boundary from that evidence.
 
