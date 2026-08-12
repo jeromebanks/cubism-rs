@@ -1415,8 +1415,6 @@ fn pick_range_start(
     }
     let width_us = (bucket_count as i64 - 1) * HOUR_US;
     let file_end_us = row_groups.last()?.max_us;
-    let boundaries: std::collections::HashSet<i64> =
-        row_groups.iter().map(|rg| rg.min_us).collect();
 
     // Prefer a candidate roughly a quarter of the way into the file rather
     // than the very first/last row group, so the case isn't a degenerate
@@ -1427,15 +1425,38 @@ fn pick_range_start(
 
     match alignment {
         RangeAlignment::Aligned => ordered_indices
+            // A candidate is only genuinely aligned if the *preceding* row
+            // group's own max doesn't also reach into it -- if
+            // row_groups[i-1].max_us == row_groups[i].min_us, that earlier
+            // group still contains at least one row at this exact bucket
+            // value (Parquet min/max are inclusive), so a real pruning
+            // reader has to scan it too, defeating "no leading waste" even
+            // though row_groups[i].min_us itself matches the start exactly.
+            .filter(|&i| i == 0 || row_groups[i - 1].max_us < row_groups[i].min_us)
             .map(|i| row_groups[i].min_us)
             .find(|&start_us| start_us + width_us <= file_end_us),
         RangeAlignment::NonAligned => ordered_indices
             .filter(|&i| row_groups[i].max_us > row_groups[i].min_us)
             .find_map(|i| {
+                // `row_groups[i]` spans past its own minimum, so any bucket
+                // strictly after `min_us` and no later than `max_us` falls
+                // inside it -- making `row_groups[i]` the first group a
+                // pruning reader touches for that start, with min_us < start,
+                // i.e. non-aligned by this module's definition. This holds
+                // regardless of whether that same bucket value also happens
+                // to be some *other*, later row group's own minimum
+                // elsewhere in the file -- alignment is a property of the
+                // first-touched group for this query, not a file-wide
+                // uniqueness check (an earlier version of this function
+                // wrongly rejected exactly this case, which -- at high
+                // enough row density that one bucket spans many row groups,
+                // e.g. 10M+ rows per docs/TIMESERIES_PHASE_0B_HARNESS.md's
+                // "Memory scaling" cell-density figures -- discarded every
+                // candidate and skipped every non-aligned case).
                 let candidate = row_groups[i].min_us + HOUR_US;
                 let has_room = candidate + width_us <= file_end_us;
-                let is_non_aligned = !boundaries.contains(&candidate);
-                (has_room && is_non_aligned).then_some(candidate)
+                let in_this_group = candidate <= row_groups[i].max_us;
+                (has_room && in_this_group).then_some(candidate)
             }),
     }
 }
@@ -1744,25 +1765,111 @@ mod tests {
             assert!(case.row_groups_scanned <= case.row_groups_total);
             assert!(case.bytes_scanned <= case.file_bytes_total);
 
-            // The alignment property itself: an aligned start must exactly
-            // equal some row group's own minimum bucket_start; a
-            // non-aligned start must not.
+            // The alignment property itself is about the row group a
+            // pruning reader would touch *first* for this start -- not
+            // whether the start value happens to equal some row group's
+            // minimum *anywhere* in the file (an earlier version of this
+            // test checked the latter, which is the wrong invariant and
+            // didn't catch a real bug: see
+            // `pick_range_start_finds_non_aligned_when_one_bucket_spans_many_row_groups`
+            // below for why the two differ).
             let row_groups = read_bucket_row_groups(&path).unwrap();
-            let is_boundary = row_groups
+            let first_scanned = row_groups
                 .iter()
-                .any(|rg| rg.min_us == case.start_bucket_us);
+                .find(|rg| rg.max_us >= case.start_bucket_us && rg.min_us <= case.start_bucket_us)
+                .expect("some row group must overlap the case's own start");
             match case.alignment {
-                RangeAlignment::Aligned => assert!(
-                    is_boundary,
-                    "{}: aligned case's start isn't a row-group boundary",
+                RangeAlignment::Aligned => assert_eq!(
+                    first_scanned.min_us, case.start_bucket_us,
+                    "{}: aligned case's start isn't the first-scanned row group's own minimum",
                     case.layout
                 ),
                 RangeAlignment::NonAligned => assert!(
-                    !is_boundary,
-                    "{}: non-aligned case's start IS a row-group boundary",
+                    first_scanned.min_us < case.start_bucket_us,
+                    "{}: non-aligned case's start equals the first-scanned row group's own minimum",
                     case.layout
                 ),
             }
         }
+    }
+
+    /// Regression test for a real bug found running `range-read` against a
+    /// genuine 10M-row run dir (docs/TIMESERIES_PHASE_0B_NOTEBOOK.md Entry
+    /// 11): at high enough row density that a single bucket's cells span
+    /// many row groups (per-bucket cell count > `LAYOUT_ROW_GROUP_ROWS`,
+    /// which happens well before 10M rows per
+    /// `TIMESERIES_PHASE_0B_HARNESS.md`'s "Memory scaling" cell-density
+    /// figures), every non-aligned case was silently skipped. The prior
+    /// implementation rejected a perfectly valid non-aligned candidate
+    /// merely because that same bucket value also happened to be some
+    /// *other*, later row group's own minimum elsewhere in the file --
+    /// alignment is a property of the first row group a query touches, not
+    /// a file-wide uniqueness check. Constructs the dense regime directly
+    /// (a "straddle" row group spanning exactly two buckets, surrounded by
+    /// single-bucket groups) rather than needing a slow multi-million-row
+    /// fixture to reach it naturally.
+    #[test]
+    fn pick_range_start_finds_non_aligned_when_one_bucket_spans_many_row_groups() {
+        let base = BASE_BUCKET_START_US;
+        let row_groups = vec![
+            RowGroupBucketRange {
+                index: 0,
+                min_us: base,
+                max_us: base,
+                num_rows: 65_536,
+                total_byte_size: 1_000_000,
+            },
+            RowGroupBucketRange {
+                index: 1,
+                min_us: base,
+                max_us: base,
+                num_rows: 65_536,
+                total_byte_size: 1_000_000,
+            },
+            // Straddle group: the last of bucket 0's rows, then the first
+            // of bucket 1's rows.
+            RowGroupBucketRange {
+                index: 2,
+                min_us: base,
+                max_us: base + HOUR_US,
+                num_rows: 65_536,
+                total_byte_size: 1_000_000,
+            },
+            RowGroupBucketRange {
+                index: 3,
+                min_us: base + HOUR_US,
+                max_us: base + HOUR_US,
+                num_rows: 65_536,
+                total_byte_size: 1_000_000,
+            },
+            RowGroupBucketRange {
+                index: 4,
+                min_us: base + HOUR_US,
+                max_us: base + HOUR_US,
+                num_rows: 65_536,
+                total_byte_size: 1_000_000,
+            },
+            RowGroupBucketRange {
+                index: 5,
+                min_us: base + 2 * HOUR_US,
+                max_us: base + 2 * HOUR_US,
+                num_rows: 65_536,
+                total_byte_size: 1_000_000,
+            },
+        ];
+
+        let start = pick_range_start(&row_groups, 1, RangeAlignment::NonAligned)
+            .expect("row group 2 straddles buckets 0 and 1, so a non-aligned start must exist");
+        assert_eq!(start, base + HOUR_US);
+
+        // The regression itself: `start` legitimately equals another row
+        // group's own minimum (index 3) elsewhere in the file. That must
+        // NOT have disqualified it above.
+        assert!(
+            row_groups
+                .iter()
+                .any(|rg| rg.index != 2 && rg.min_us == start),
+            "test fixture sanity check: index 3 should also have min_us == start"
+        );
     }
 }

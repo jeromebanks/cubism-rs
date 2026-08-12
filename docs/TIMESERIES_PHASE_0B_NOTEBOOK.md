@@ -773,6 +773,67 @@ config since `spark.local.dir` was redirected there).
 Proceeding to 25M next (pre-authorized per the standing convention; the
 gate is past 50M rows, not 10M/25M).
 
+## Entry 11 -- Item 2 follow-up: real bug found running range-read against the
+real 10M-row output, fixed and regression-tested (Task #8, continued)
+
+While item 4's 25M matrix run was in the background (read-only, low-memory
+work chosen deliberately per Entry 9's lesson), ran the just-shipped
+`range-read` tool against the real 10M-row Rust run dir for the first time
+(Entry 8 had only validated it against 25k/200k fixtures). Result: **all 8
+non-aligned cases were silently skipped** -- `cases: 8, skipped: 8`.
+
+**Root cause**: at 10M rows, per-bucket cell density (~90,102 cells/bucket,
+`TIMESERIES_PHASE_0B_HARNESS.md` "Memory scaling") exceeds
+`LAYOUT_ROW_GROUP_ROWS` (65,536), so a single bucket's cells now span
+*many* row groups -- the opposite regime from the 200k/1M fixtures the
+tool was validated against, where many buckets fit in *one* row group.
+`pick_range_start`'s non-aligned candidate (`straddle_group.min_us +
+HOUR_US`) was being rejected because that same bucket value is *also* the
+minimum of the very next row group in this dense regime (the first
+"clean" group for that bucket) -- the code checked "is this candidate a
+row-group boundary anywhere in the file," which is the wrong question.
+Alignment is a property of the *first row group a query actually touches*,
+not global uniqueness. Fixing this exposed a second, symmetric bug in the
+*aligned* branch via the corrected test: a candidate `row_groups[i].min_us`
+isn't really aligned if the *preceding* group's own max also reaches that
+same value (Parquet min/max are inclusive, so that earlier group still
+has a matching row and a real reader has to scan it too).
+
+**Fixed both** in `pick_range_start`: the non-aligned branch no longer
+checks a file-wide boundary set (removed entirely); the aligned branch now
+additionally requires `row_groups[i-1].max_us < row_groups[i].min_us` (a
+genuinely clean cut, not just a coincidentally-matching value).
+
+**Regression-tested properly, not just re-validated against real data**:
+the existing integration test's own alignment assertion was checking the
+same wrong invariant the code had (global "is `is_boundary`"), so it never
+would have caught this -- self-consistency between the code and its own
+test isn't correctness, same lesson issue #1 finding 2 already established
+for this crate. Rewrote that assertion to check the real property (the
+first row group whose range overlaps the case's start must have
+`min_us == start` for aligned, `min_us < start` for non-aligned). Added a
+focused new unit test,
+`pick_range_start_finds_non_aligned_when_one_bucket_spans_many_row_groups`,
+that constructs the dense regime directly (a hand-built `Vec<RowGroupBucketRange>`
+with a straddle group) instead of needing a slow multi-million-row fixture
+to reach it naturally -- fast, deterministic, and targets the exact bug.
+`cargo test -p cubism-timeseries-bench`: 7 passed (was 6), 1 ignored.
+`cargo clippy --all-targets --no-deps -- -D warnings`: clean. `rustfmt
+--check`: clean. Re-ran `range-read` against the real 10M run dir:
+16/16 cases, 0 skipped, numbers sane (e.g. `wide` short non-aligned scans
+7 row groups / 458,752 rows for 360,659 matched, vs. aligned's 6 row
+groups / 393,216 rows for 359,400 matched -- real, modest leading
+overscan, not a degenerate 1:1). Also re-checked 1M and 200k fixtures
+still produce 16/16 with no regressions.
+
+**Lesson for next time this tool is extended**: validate against a run dir
+at the actual target scale (or a synthetic fixture built directly in the
+dense regime, as the new unit test now does) before trusting it, not just
+against small smoke-scale fixtures -- the two regimes (many buckets per
+row group vs. one bucket per many row groups) exercise genuinely different
+code paths, and this crate's own 1M-vs-10M cell-density figures were
+already the documented warning sign.
+
 ## Entries to follow
 
 Each subsequent task (50M scale-up gate) gets its own entry here with a

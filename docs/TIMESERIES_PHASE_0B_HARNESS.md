@@ -412,12 +412,21 @@ KMV contract, and the adapter does not use it (see
    boundaries 1:1, and which regime applies is scale-dependent). Produces 16
    cases per run dir (4 layouts x 2 lengths x 2 alignments), each with
    `row_groups_scanned`/`row_groups_total`, `bytes_scanned`/`file_bytes_total`,
-   and `rows_scanned`/`rows_matched`. Verified with a new test that
+   and `rows_scanned`/`rows_matched`. Verified with a test that
    cross-checks every case's matched-row count against an independent full
    file scan and directly asserts the alignment property, not just that the
-   tool runs without crashing. Run so far only against 25k/200k-row fixtures;
-   running it against the real 1M/10M/25M/50M+ run dirs from item 4 is cheap
-   (read-only) and still open, see item 6.
+   tool runs without crashing. Running it against the real 10M run dir
+   (same session) found a real bug -- at 10M+ row density a single bucket
+   spans many row groups (the opposite regime from the 200k/1M fixtures
+   first validated against), and every non-aligned case was silently
+   skipped in that regime; a symmetric bug in the aligned branch surfaced
+   once the test's own assertion was corrected to check the right
+   invariant. Both fixed; see `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md`
+   Entry 11 for the root cause and a fast, deterministic regression test
+   that constructs the dense regime directly rather than needing a slow
+   multi-million-row fixture. Re-verified against 1M, 10M, and 200k/25k
+   fixtures: 16/16 cases, 0 skipped, in all of them. Still open: running
+   it against 25M/50M+ once item 4 produces those run dirs, see item 6.
 3. ~~Add a process-level matrix runner that records warm-up plus at least
    five measured runs~~ **Done for Rust** (notebook session, 2026-08-09/11)
    **and for Spark** (2026-08-11, this session) --
