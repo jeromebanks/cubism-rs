@@ -1,20 +1,25 @@
 # Time-Series Phase 0B Handoff
 
-Date: 2026-08-11, updated same day (supersedes the earlier 2026-08-11
-version of this file, which itself superseded 2026-08-08)
+Date: 2026-08-12, updated (supersedes the 2026-08-11 version of this file,
+which itself superseded 2026-08-08)
 
 Branch: `feature/timeseries-phase-0a`
 
-Status: harness correctness slice complete; memory re-baselined at
-1M/10M/25M rows on this host (still nothing at the 50-100M target); Spark
-adapter (remaining-work item 1) implemented and correctness-verified at
-25,000 rows (commit `87380bf`); the process-level matrix runner now drives
-both engines with the same RSS-watchdog/retry/mount-check rigor plus a
-cross-engine semantic-digest check (remaining-work item 3, this session).
-Spark has **still not been run at benchmark scale** (10-100M rows) — only
-the 25k correctness check and a 25k matrix-runner validation exist — so the
-actual Rust-vs-Spark performance question Phase 0B exists to answer is
-still open. Phase 0B is not complete.
+Status: **Phase 0B's core decision is made — see
+`docs/TIMESERIES_PHASE_0B_RESULTS.md`.** Select DataFusion/Rust as the
+axis-1 aggregation engine and `xunit_registry` as the durable physical
+layout (with `wide` as fallback). Correctness confirmed byte-identical
+between Rust and Spark at 25k/1M/10M/25M rows (5 independent digest
+matches); Rust wins decisively on performance (at least ~3x on raw
+totals, ~6x on the one fair-slice measurement not confounded by USB I/O
+variance) and reliability (100% vs. Spark's ~50% failure rate on
+25M-row jobs, root cause unresolved). Scale-up was deliberately stopped
+at 25M rows (user decision at the 50M gate) — **50-100M remains
+unmeasured** and dense occupancy has no performance data at any scale;
+neither blocks this decision but both remain open before trusting these
+numbers at the harness's originally stated 10-100M target. Phase 2/3 are
+now unblocked on this decision per the original gating instruction; see
+"Remaining Phase 0B work" for what's still genuinely open.
 
 ## Executive handoff — the chain of sessions so far
 
@@ -46,6 +51,15 @@ still open. Phase 0B is not complete.
    `crates/cubism-timeseries-bench/scripts/matrix_runner.py` with Spark
    awareness. See `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 7 for full
    detail; summarized in "What changed this session" below.
+5. **2026-08-11 to 2026-08-12 (this session, continued)**: implemented
+   remaining-work item 2 (range-read cases — found and fixed two real bugs
+   at 10M+ row density, see `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` Entries
+   8/11), ran item 4's actual scale-up for both engines at 1M/10M/25M rows
+   (stopped at the 50M gate per explicit user decision — see Entry 12 for
+   the unresolved Spark `run_02` reliability finding at 25M), wrote item
+   6's results document (`docs/TIMESERIES_PHASE_0B_RESULTS.md`), and made
+   item 7's decision (Rust/DataFusion + `xunit_registry`, see "Status"
+   above and the results doc's own "Decision" section).
 
 ## What changed this session: Spark-aware matrix runner (item 3)
 
@@ -191,8 +205,14 @@ exist yet and isn't implied by anything built so far.
 1. ~~Implement the local Spark adapter with byte-compatible KMV state~~
    **DONE** (Spark adapter session, commit `87380bf`) — correctness-verified
    at 25k rows only, see caveats above.
-2. Add aligned/non-aligned short/long range-read cases per layout. **Not
-   started.**
+2. ~~Add aligned/non-aligned short/long range-read cases per layout.~~
+   **DONE** (this session, commit `5b0fb91` + bugfix `e27e274`). Two real
+   bugs found and fixed against 10M+-row data (non-aligned cases were
+   silently skipped; the aligned branch had a symmetric edge-case bug) —
+   both fixes are regression-tested. Results in
+   `docs/TIMESERIES_PHASE_0B_RESULTS.md`'s "Range-read results". Only
+   swept against the 25M-row Rust output at the pinned row-group size
+   (65,536 rows) — not swept across row-group sizes or other row counts.
 3. ~~Process-level matrix runner with RSS watchdog~~ **DONE for both
    engines** (Rust: notebook session; Spark: this session). See "What
    changed this session" above and
@@ -200,18 +220,26 @@ exist yet and isn't implied by anything built so far.
    `engine=spark` configs still need a `spark-driver-memory-mb` value
    chosen deliberately per row count before item 4 runs — not defaulted,
    see above for why.
-4. Measure the actual 10-100M row target (axis 1 only, per above), for
-   **both** engines, now that both have matrix-runner support. Rust has
-   1M/10M/25M (notebook session, real numbers in
-   `TIMESERIES_PHASE_0B_HARNESS.md`'s "Memory scaling" section); Spark has
-   nothing past the 25k correctness/matrix-runner check. **Gated on user
-   go-ahead past 50M rows**, same as before.
+4. ~~Measure the actual 10-100M row target (axis 1 only, per above), for
+   both engines~~ **DONE through 25M, stopped there per explicit user
+   decision at the 50M gate.** Rust: 1M/10M/25M, 5 measured runs each, 100%
+   reliable. Spark: 10M (5 measured runs, 100% reliable), 25M (2 measured
+   runs; 2 of 4 attempts at a third run failed with an unresolved root
+   cause — see `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 12). **50-100M
+   remains genuinely unmeasured** and needs fresh user go-ahead plus (per
+   Entry 12) more diagnostic room for Spark's reliability issue before
+   it's trustworthy at that scale.
 5. ~~Pin Parquet compression, row-group/file targets, and sort order~~
    **Done** (notebook session, 2026-08-09).
-6. Write `TIMESERIES_PHASE_0B_RESULTS.md` with raw commands/artifacts.
-   **Not started.**
-7. Select the durable layout and local (axis 1) Rust/Spark boundary from
-   that evidence. **Blocked on item 4.**
+6. ~~Write `TIMESERIES_PHASE_0B_RESULTS.md` with raw commands/artifacts.~~
+   **DONE** (this session, commit `c9d0ac7`).
+7. ~~Select the durable layout and local (axis 1) Rust/Spark boundary from
+   that evidence.~~ **DONE** (this session) — Rust/DataFusion as the
+   engine, `xunit_registry` as the durable layout (`wide` as fallback).
+   See `docs/TIMESERIES_PHASE_0B_RESULTS.md`'s "Decision" section for the
+   full reasoning and caveats. **This satisfies the gate on starting
+   Phase 2/3** (temporal aggregation / production Iceberg persistence per
+   `docs/TIMESERIES_IMPLEMENTATION_PLAN.md`).
 
 ## Environment now in place (so the next session doesn't rediscover this)
 
@@ -258,10 +286,18 @@ All prior sessions' work is now committed (as of this session):
   (`examples/web_analytics_demo/`, `README.md`), source files only —
   generated `events.csv`/`web_analytics_cube.parquet` deliberately left
   out, matching the repo's convention for its other `examples/` demos.
-- This session's own item-3 work (Spark-aware `matrix_runner.py`, this
-  handoff, `TIMESERIES_PHASE_0B_HARNESS.md`, and
-  `TIMESERIES_PHASE_0B_NOTEBOOK.md` Entry 7) — commit pending as of this
-  writing, see git log for the actual hash once made.
+- `e27621b` — item 3: Spark-aware `matrix_runner.py`, this handoff,
+  `TIMESERIES_PHASE_0B_HARNESS.md`, `TIMESERIES_PHASE_0B_NOTEBOOK.md`
+  Entry 7.
+- `5b0fb91` — item 2: range-read subcommand and types
+  (`crates/cubism-timeseries-bench/src/lib.rs`, `src/main.rs`).
+- `e27e274` — range-read bugfix (non-aligned cases silently skipped at
+  10M+ row density) plus regression test.
+- `2fbc212`, `f62ab9f`, `0dbfa01` — notebook entries and harness-doc
+  updates recording the 1M/10M/25M real runs and the Spark reliability
+  investigation (item 4).
+- `c9d0ac7` — item 6/7: `docs/TIMESERIES_PHASE_0B_RESULTS.md` (the results
+  document and decision record).
 
 Remaining uncommitted/untracked, **deliberately left alone**:
 `.serena/` (local tooling state, never committed by any session, and not
@@ -271,26 +307,42 @@ output are excluded via `.gitignore` instead).
 
 ## Recommended next session
 
-1. Read this handoff, `docs/TIMESERIES_PHASE_0B_HARNESS.md`,
-   `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` (especially Entry 7), and issues
+Phase 0B's core decision is made (item 7, see "Status" above) — **Phase
+2/3 work can now start.** If instead the next session is continuing to
+harden Phase 0B's evidence before building on it, in rough priority order:
+
+1. Read this handoff, `docs/TIMESERIES_PHASE_0B_RESULTS.md` (the decision
+   and its caveats), `docs/TIMESERIES_PHASE_0B_NOTEBOOK.md` (especially
+   Entries 11/12), and issues
    [#1](https://github.com/jeromebanks/cubism-rs/issues/1) and
    [#2](https://github.com/jeromebanks/cubism-rs/issues/2).
-2. Choose a `spark-driver-memory-mb` value per row-count config, informed
-   by Rust's own measured peak RSS at that scale (`TIMESERIES_PHASE_0B_HARNESS.md`
-   "Memory scaling" / issue #2 finding 3) — not copied from Rust's
-   `--memory-limit-mb`, see item 3's writeup above for why.
-3. Run item 4 — the actual axis-1 (local, same-host) 10-100M row
-   comparison for both engines under `matrix_runner.py`, gated past 50M
-   rows same as before. The runner's cross-engine digest check will flag
-   automatically if the two engines' aggregate output ever disagrees at
-   scale — treat a MISMATCH as a correctness bug blocking further scale-up,
-   not a performance data point.
-4. If axis 2 or 3 (distributed, either engine) ever become the actual
+2. **Spark's `run_02` reliability root cause at 25M** (2 of 4 direct
+   `spark-submit` attempts killed by an unexplained
+   `SparkContext.stop()`-races-`Dataset.count()` NullPointerException,
+   memory/disk/wrapping/concurrency all ruled out) — needs a dedicated
+   host with no concurrent `claude` sessions and a Spark event-log/history
+   -server capture across several repeated attempts. Blocks trusting
+   Spark numbers at 50M+.
+3. **50-100M rows, both engines** — needs fresh user go-ahead (explicitly
+   deferred, not just gated, at this session's 50M checkpoint) and
+   benefits from item 2 above being resolved first so Spark's numbers at
+   that scale are trustworthy.
+4. **Dense occupancy** has zero performance data past the 25k smoke test
+   at any scale, for either engine — `docs/TIMESERIES_PHASE_0B_RESULTS.md`
+   "Remaining gates" item 3.
+5. **25M's fair-slice performance ratio is confounded** by USB-drive I/O
+   variance in the layout-write subtraction (`TIMESERIES_PHASE_0B_RESULTS.md`
+   "Reconciled performance comparison") — re-running on faster/local disk,
+   or timing aggregation independently of writes in the harness itself,
+   would resolve this without needing more rows.
+6. If axis 2 or 3 (distributed, either engine) ever become the actual
    question, that needs a new benchmark design from scratch — nothing
    built so far implies or prepares for it, per the scoping table above.
 
 ## Primary files
 
+- [`TIMESERIES_PHASE_0B_RESULTS.md`](TIMESERIES_PHASE_0B_RESULTS.md) (the
+  decision record — read this first)
 - [`TIMESERIES_PHASE_0B_HARNESS.md`](TIMESERIES_PHASE_0B_HARNESS.md)
 - [`TIMESERIES_PHASE_0B_NOTEBOOK.md`](TIMESERIES_PHASE_0B_NOTEBOOK.md)
 - [`TIMESERIES_IMPLEMENTATION_PLAN.md`](TIMESERIES_IMPLEMENTATION_PLAN.md)
