@@ -6,8 +6,8 @@ Branch: `feature/timeseries-phase-0a`
 
 Status: **Phase 2's sparse bucketed incremental aggregation is implemented,
 tested, and green** (`cargo test`/`clippy -D warnings` clean across the
-touched crates and the full workspace). Not yet committed — see "Worktree
-state" below.
+touched crates and the full workspace), **CLI-wired, and includes `Coverage`
+in build metadata.** Committed and pushed — see "Worktree state" below.
 
 ## What this session built
 
@@ -83,10 +83,6 @@ Two new modules in `cubism-datafusion`, per the plan
   idempotency/publication tracking, per the plan's "temporal build entry
   point taking a TimeRange/WindowId," but nothing in Phase 2 interprets it
   yet.
-- **`build_temporal` takes `window_id: Option<WindowId>`** and threads it
-  unvalidated into `TemporalBuildMetadata` — it exists for Phase 3's
-  idempotency/publication tracking, per the plan's "temporal build entry
-  point taking a TimeRange/WindowId." Nothing in Phase 2 interprets it yet.
 - **`TemporalBuildMetadata.coverage: Option<Coverage>`, added in a
   follow-up session.** `None` when no `window` was requested (`Coverage::
   requested` needs a `TimeRange`; an unbounded build has none). `Some`
@@ -160,9 +156,11 @@ Two new modules in `cubism-datafusion`, per the plan
   registration. Documented in the function's doc comment; every test uses a
   fresh context per build.
 
-## Tests (24 in `cubism-datafusion`, all passing)
+## Tests (30 in `cubism-datafusion`, all passing)
 
-Covers the plan's named requirements directly:
+The 24 below are this phase's original session; the 6 `coverage_*` tests
+added in the CLI/`Coverage` follow-up session are listed under Deferred
+item 2, not repeated here. Covers the plan's named requirements directly:
 
 - **Schema authority**: `temporal_state_schema_names_and_types_measures_by_kind`
   (column naming/typing per `AggKind`), plus the end-to-end test asserting
@@ -230,6 +228,25 @@ cargo test --workspace --exclude cubism-py     # all crates green, including
                                                 #  cubism-timeseries-bench and
                                                 #  cubism-iceberg-spike's Phase 0A tests
 ```
+
+**Follow-up session (CLI wiring + `Coverage`, same date) re-verified after
+its changes:**
+
+```text
+cargo test -p cubism-datafusion --lib          # 30 passed (24 above + 6 coverage_* tests)
+cargo clippy -p cubism-datafusion --all-targets --no-deps -- -D warnings   # clean
+cargo build -p cubism-cli                      # clean
+cargo clippy -p cubism-cli --all-targets --no-deps -- -D warnings          # clean
+cargo test --workspace --exclude cubism-py     # 136 passed, 1 ignored, 0 failed
+```
+
+Plus manual CLI smoke tests against real Parquet/CSV fixtures (`--explain`
+counts, window filtering actually excluding rows, single-file fixture
+writes, and the missing-output/mismatched-window/bad-`--null-policy` error
+paths — see Deferred item 1). An advisor review of the `Coverage` work
+caught one real bug before it shipped (see Deferred item 2 and the
+`coverage` field's doc comment): unclamped `covered` bounds could report
+coverage of time a non-bucket-aligned window's own row filter excluded.
 
 An independent review pass (advisor) caught five real gaps before this was
 considered done: `write_temporal_fixtures` had never actually been
@@ -314,8 +331,20 @@ silently worked around.
 
 ## Worktree state
 
-Committed this session (see git log on `feature/timeseries-phase-0a` for the
-exact commit). Changed/new files:
+**Committed and pushed** to `feature/timeseries-phase-0a` — two commits, both
+on `origin`:
+
+- `c36ba6a` — this phase's original session (`state_udaf.rs`,
+  `temporal_build.rs`, the CLI/`Coverage` work not yet started).
+- `a76cd65` — the CLI wiring + `Coverage` follow-up session described
+  throughout this doc's updated sections.
+
+Working tree is otherwise clean except for two files deliberately left
+uncommitted, per prior-session convention: `.serena/` (local tooling
+state), `examples/web_analytics_demo/events.csv` (generated demo output,
+matching the repo's `examples/` convention).
+
+Changed/new files across both commits:
 
 - New: `crates/cubism-datafusion/src/state_udaf.rs`,
   `crates/cubism-datafusion/src/temporal_build.rs`,
@@ -326,10 +355,8 @@ exact commit). Changed/new files:
   `clippy::doc_lazy_continuation` lint that was blocking `-D warnings` on
   this crate), `crates/cubism-datafusion/Cargo.toml` (new deps),
   `crates/cubism-core/src/aggregate_state.rs` (`QuantileState::bin_count()`
-  accessor), `Cargo.lock`.
-- Deliberately left uncommitted/untouched, per prior-session convention:
-  `.serena/` (local tooling state), `examples/web_analytics_demo/events.csv`
-  (generated demo output, matching the repo's `examples/` convention).
+  accessor), `crates/cubism-cli/src/main.rs` (`temporal-build` subcommand),
+  `crates/cubism-cli/Cargo.toml` (new `chrono` dep), `Cargo.lock`.
 
 ## Primary files
 
