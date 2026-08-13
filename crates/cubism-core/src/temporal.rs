@@ -446,12 +446,21 @@ pub enum Lateness {
 /// `docs/TIMESERIES_IMPLEMENTATION_PLAN.md` lines 582-670; it does not by
 /// itself close any of that plan section's test-list items).
 ///
-/// This is a pure boundary check: [`classify`](Self::classify) takes the
-/// window's `bucket_end` as a parameter instead of consulting a
-/// publication/control store or an ingestion-time watermark, so a `Late`
-/// result says nothing about whether the window has actually been published
-/// yet — that reconciliation is `cubism-iceberg`'s `PublicationStore`
-/// (Milestone 2), layered on top of this, not this type's job.
+/// This is a pure boundary check with no I/O: [`classify`](Self::classify)
+/// takes both timestamps as parameters instead of consulting a
+/// publication/control store or a real ingestion-time watermark. `bucket_end`
+/// must be the end of the window being *tested* — typically an
+/// already-closed, earlier window than whatever bucket `event_time` would
+/// compute to on its own — and `event_time` stands in for the caller's
+/// current watermark position, not necessarily an event that itself belongs
+/// to that window. Passing an event's own `bucket_end` (the bucket the
+/// event's own timestamp falls into) always yields `OnTime`: since
+/// `AllowedLateness` cannot be negative and bucket membership already
+/// guarantees `event_time < bucket_end`, `event_time < bucket_end + allowed`
+/// holds unconditionally in that case. A `Late` result also says nothing
+/// about whether the window has actually been published yet — that
+/// reconciliation is `cubism-iceberg`'s `PublicationStore` (Milestone 2),
+/// layered on top of this, not this type's job.
 ///
 /// Two-valued by design: this milestone does not add a third "too old,
 /// reject as backfill" classification. Plan line 662 ("when a correction is

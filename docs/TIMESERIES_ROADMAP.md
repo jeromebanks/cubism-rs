@@ -105,9 +105,16 @@ compiles.
 - **What it does:** `LatenessPolicy::classify(event_time, bucket_end)` is a
   pure boundary check — `OnTime` iff `event_time` is strictly before
   `bucket_end + allowed` — that does **not** consult
-  `PublicationStore`/`Publication` or an ingestion-time watermark; it takes
-  the window boundary as a caller-supplied parameter instead. Plan line
-  659's "window duration versus correction blast radius" is resolved:
+  `PublicationStore`/`Publication` or a real ingestion-time watermark; both
+  timestamps are caller-supplied. Caller contract Milestone 3+ must get
+  right: `bucket_end` is the already-closed *earlier* window being tested,
+  not necessarily the bucket `event_time` itself falls into, and
+  `event_time` stands in for the caller's current watermark position.
+  Passing an event's own `bucket_end` always yields `OnTime` (bucket
+  membership already guarantees `event_time < bucket_end`, and
+  `AllowedLateness` can't be negative) — see the type's doc comment for the
+  full reasoning. Plan line 659's "window duration versus correction blast
+  radius" is resolved:
   `LatenessPolicy` is constructed from an `AllowedLateness` alone, never a
   window's `Resolution`, so the lateness bound is independent of window
   duration by construction (recorded in the type's own doc comment,

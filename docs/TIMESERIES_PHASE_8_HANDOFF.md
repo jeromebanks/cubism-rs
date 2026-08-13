@@ -54,14 +54,37 @@ two-valued (on-time/late) rather than silently also answering plan line 662
   watermark/lateness decisions." An unclaimed purpose statement for a type
   already in `cubism-core::temporal` is evidence the classification concept
   belongs beside it, not in the Iceberg persistence crate. `classify`
-  compares `event_time` against `bucket_end + allowed` only — no
-  `PublicationStore`, no watermark — and the type's doc comment says so
-  explicitly, plus records plan line 659's decision (allowed-lateness is
+  compares `event_time` against `bucket_end + allowed` only, with no I/O —
+  no `PublicationStore`, no real ingestion-time watermark — but
+  `event_time` itself functions as the caller's watermark position; the
+  advisor's second pass caught that the first version of this doc comment
+  said "does not consult... a watermark," which reads as if `event_time`
+  were something else. Fixed: the doc comment now states plainly that
+  `bucket_end` must be an already-closed *earlier* window than whatever
+  bucket `event_time` would compute to on its own (passing an event's own
+  `bucket_end` always yields `OnTime` — bucket membership already
+  guarantees `event_time < bucket_end`, and `AllowedLateness` can't be
+  negative). Also records plan line 659's decision (allowed-lateness is
   independent of window duration by construction — see the doc comment for
   the full reasoning) and plan line 662's non-scope (deliberately left
   open).
 - **`crates/cubism-core/src/lib.rs`** (modified): re-exports `Lateness`,
   `LatenessPolicy` alongside the rest of `temporal`'s public surface.
+
+**On scope:** `.claude/skills/timeseries-slice/SKILL.md`'s own frontmatter
+says not to use this skill "for work outside `crates/cubism-iceberg` and its
+docs." This session's source change lands in `crates/cubism-core/src/`, not
+`crates/cubism-iceberg/`. That's a real boundary crossing, not something to
+leave unremarked — the `IngestionTime` evidence above is why it's the
+technically correct location (the concept's designated home already exists
+in `cubism-core::temporal`, unclaimed by any consumer), and the roadmap
+itself, which this skill's step 1 now consults first, explicitly scopes
+Milestone 1's target to "`cubism-core` if it needs to be shared with
+non-Iceberg readers" (the roadmap's original wording, before this session
+resolved the "decide at implementation time" it left open). So: an
+exception to the skill's stated scope line, made deliberately and for a
+reason the roadmap already anticipated, not a silent drift — same pattern
+Phase 7 used when it edited the skill's own step 1.
 - **`docs/TIMESERIES_ROADMAP.md`** (modified): added a `**Status:**` line to
   every milestone (`Done — <handoff>` for Milestone 1, `Not started` for
   2-6) and a sentence in "How `timeseries-slice` step 1 should use this doc"
@@ -161,12 +184,15 @@ This session's new test lives in `cubism-core`, not `cubism-iceberg` — see
 "What this session built" for why. `cargo test -p cubism-iceberg` stays at
 21 (8 unit + 6 Phase-3 integration + 3 durability integration + 4
 concurrency integration, all passing, unchanged from Phase 7).
-`cargo test -p cubism-core` reports 92 passed (4 suites) this session; this
-session added exactly one test (`lateness_policy_classifies_on_the_allowed_lateness_boundary`),
-so the prior count was 91 — not independently re-verified against a Phase 7
-baseline (Phase 7's handoff never ran `cargo test -p cubism-core` directly,
-only the workspace total), but consistent with the workspace-level count
-below (157 → 158, a +1 matching this session's one new test).
+`cargo test -p cubism-core` reports 92 passed (4 suites) this session.
+`cargo test -p cubism-core lateness_policy` isolates the new test directly:
+`1 passed, 91 filtered out` — non-circular confirmation that the named test
+ran, passed, and that the other 91 are exactly this session's starting
+count (not derived by subtraction alone). Not independently re-verified
+against a Phase 7 baseline (Phase 7's handoff never ran `cargo test -p
+cubism-core` directly, only the workspace total), but consistent with the
+workspace-level count below (157 → 158, a +1 matching this session's one
+new test).
 
 ## Verification performed
 
