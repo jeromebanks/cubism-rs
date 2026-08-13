@@ -33,6 +33,7 @@ impl AggregateReader {
     ) -> Result<Vec<RecordBatch>> {
         let current = publications
             .current(&temporal_table.cube_id, window_id)
+            .await?
             .ok_or_else(|| CubismIcebergError::UnpublishedWindow(window_id.as_str().to_string()))?;
 
         let states_table = temporal_table.states_table(catalog).await?;

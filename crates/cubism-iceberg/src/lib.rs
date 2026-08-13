@@ -12,6 +12,7 @@
 
 pub mod config;
 pub mod control;
+mod durable_control;
 pub mod error;
 pub mod reader;
 pub mod schema;

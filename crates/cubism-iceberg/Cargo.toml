@@ -9,6 +9,8 @@ repository.workspace = true
 [dependencies]
 cubism-core = { path = "../cubism-core" }
 iceberg = "=0.10.0"
+iceberg-catalog-sql = "=0.10.1"
+sqlx = { version = "=0.8.1", default-features = false, features = ["any", "sqlite", "runtime-tokio"] }
 arrow-array = "58"
 arrow-schema = "58"
 parquet = "58"

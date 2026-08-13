@@ -7,8 +7,8 @@ Branch: `feature/timeseries-phase-0a`
 Status: **A complete, tested rollback-point slice of Phase 3 is implemented**
 (`cargo test`/`clippy -D warnings` clean across `cubism-iceberg`, `cubism-cli`,
 and the full workspace), **CLI-wired, and manually verified end-to-end
-against real Parquet fixtures.** Not committed yet — see "Worktree state"
-below.
+against real Parquet fixtures.** Committed and pushed as `aee6a54` — see
+"Worktree state" below.
 
 ## What this session built
 
@@ -268,7 +268,8 @@ expected behavior given no cross-process control-store state, not a bug).
 
 ## Worktree state
 
-**Not committed.** Working tree has:
+**Committed and pushed** as `aee6a54` on `feature/timeseries-phase-0a`. That
+commit contains:
 
 - New: `crates/cubism-iceberg/` (full crate: `Cargo.toml`, `src/{lib,error,
   config,schema,table,writer,control,reader}.rs`, `tests/phase3.rs`),
@@ -279,6 +280,11 @@ expected behavior given no cross-process control-store state, not a bug).
   (`iceberg-build` subcommand).
 - Untouched: `crates/cubism-iceberg-spike/` (Phase 0A evidence, not a
   dependency of anything new).
+
+Deferred items were filed as GitHub issues #7-#10 on `jeromebanks/cubism-rs`
+(durable catalog/control store, real object store + maintenance, DataFusion
+`TableProvider` exposure, and the state-blob checksum gap, respectively) —
+see `TIMESERIES_PHASE_4_HANDOFF.md` for what the next session did with them.
 
 Also present, deliberately uncommitted per prior-session convention
 (carried over from Phase 2, not touched this session): `.serena/` (local

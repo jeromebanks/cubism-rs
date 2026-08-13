@@ -10,17 +10,28 @@
 //! cubism iceberg-build <spec.yaml> --states-input <states.parquet>
 //!     --registry-input <registry.parquet> --window-id <id> --revision <n>
 //!     --run-id <id> --warehouse <path>
+//!     [--catalog-db <path> --control-db <path>]
 //! ```
 //!
 //! `iceberg-build` creates the tables (if needed), claims, appends,
 //! publishes, and reads the published rows back — all in one process. This
-//! is one command, not separate `init`/`append`/`publish`/`verify` steps,
-//! because `CatalogConfig::Memory`'s namespace/table registry lives only in
-//! that process's RAM (`iceberg::catalog::memory::NamespaceState`, backed
-//! by a `Mutex`, never scanned from disk at open) — a second process
-//! opening the same warehouse path gets a genuinely empty catalog, not the
-//! first process's tables. See `docs/TIMESERIES_PHASE_3_HANDOFF.md` for
-//! what a durable catalog would need to change.
+//! is one command, not separate `init`/`append`/`publish`/`verify` steps —
+//! that split is still a follow-on, even now that a durable backend exists
+//! (see `docs/TIMESERIES_PHASE_4_HANDOFF.md`).
+//!
+//! With `--catalog-db`/`--control-db` omitted, `iceberg-build` uses
+//! `CatalogConfig::Memory` and an in-process `PublicationStore`, neither of
+//! which survive past this process — a second invocation against the same
+//! `--warehouse` path gets a genuinely empty catalog
+//! (`iceberg::catalog::memory::NamespaceState`, backed by a `Mutex`, never
+//! scanned from disk at open). Passing both flags switches to
+//! `CatalogConfig::Sqlite` and `PublicationStore::Sqlite`: a second
+//! invocation with the same three paths (`--warehouse`, `--catalog-db`,
+//! `--control-db`) observes the first's tables and publications, and a
+//! retried `run_id` reconciles against its own recorded claim/append state
+//! instead of re-running the whole append. See
+//! `docs/TIMESERIES_PHASE_3_HANDOFF.md` for how the non-durable default was
+//! discovered to be a hard limitation, not just a production gap.
 
 use cubism_core::{CubeSpec, EventTime, TimeRange};
 use cubism_datafusion::build_cube;
@@ -30,12 +41,12 @@ use cubism_datafusion::temporal_build::{
     explain_temporal_build, temporal_state_schema, write_temporal_fixtures, NullEventTimePolicy,
 };
 use cubism_core::temporal::{WindowId, WindowRevision};
-use cubism_iceberg::{AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, PublicationStore, TemporalTable};
+use cubism_iceberg::{AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, PublicationStore, TemporalTable};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "usage:\n  cubism validate <spec.yaml>\n  cubism run <spec.yaml> --input <events.parquet|csv> [--output cube.parquet] [--show N]\n  cubism temporal-build <spec.yaml> --input <events.parquet|csv> [--window-start <RFC3339>] [--window-end <RFC3339>] [--states-output <path> --registry-output <path>] [--null-policy reject|quarantine] [--explain]\n  cubism iceberg-build <spec.yaml> --states-input <path> --registry-input <path> --window-id <id> --revision <n> --run-id <id> --warehouse <path>\n  cubism serve <cube.parquet> [--port 8080]";
+const USAGE: &str = "usage:\n  cubism validate <spec.yaml>\n  cubism run <spec.yaml> --input <events.parquet|csv> [--output cube.parquet] [--show N]\n  cubism temporal-build <spec.yaml> --input <events.parquet|csv> [--window-start <RFC3339>] [--window-end <RFC3339>] [--states-output <path> --registry-output <path>] [--null-policy reject|quarantine] [--explain]\n  cubism iceberg-build <spec.yaml> --states-input <path> --registry-input <path> --window-id <id> --revision <n> --run-id <id> --warehouse <path> [--catalog-db <path> --control-db <path>]\n  cubism serve <cube.parquet> [--port 8080]";
 
 fn load_spec(path: &str) -> Result<CubeSpec, String> {
     let yaml = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -207,6 +218,15 @@ fn read_parquet_batches(path: &str) -> Result<Vec<arrow_array::RecordBatch>, Str
 /// the published rows back — all within this one process. See the module
 /// doc comment for why this is one command rather than separate
 /// `init`/`append`/`publish`/`verify` steps.
+///
+/// `--catalog-db`/`--control-db` are optional. Given both, `iceberg-build`
+/// uses [`CatalogConfig::Sqlite`] and [`PublicationStore::Sqlite`] instead
+/// of the non-durable defaults, so a second invocation pointed at the same
+/// three paths (`--warehouse`, `--catalog-db`, `--control-db`) sees the
+/// first invocation's tables and publications — a real cross-process
+/// build. Omitted, `iceberg-build` behaves exactly as before: an isolated,
+/// non-durable single-process build (see the module doc comment's original
+/// rationale for why that was the only option Phase 3 shipped with).
 #[allow(clippy::too_many_arguments)]
 async fn iceberg_build(
     spec_path: &str,
@@ -216,6 +236,8 @@ async fn iceberg_build(
     revision: u64,
     run_id: &str,
     warehouse: &str,
+    catalog_db: Option<&str>,
+    control_db: Option<&str>,
 ) -> Result<(), String> {
     let spec = load_spec(spec_path)?;
     let window_id = WindowId::new(window_id).map_err(|e| e.to_string())?;
@@ -225,31 +247,67 @@ async fn iceberg_build(
     let registry = read_parquet_batches(registry_input)?;
     let expected_rows: u64 = states.iter().map(|b| b.num_rows() as u64).sum();
 
+    let durable = catalog_db.is_some() || control_db.is_some();
+    let (catalog_db, control_db) = match (catalog_db, control_db) {
+        (Some(c), Some(p)) => (c, p),
+        _ if durable => {
+            return Err("--catalog-db and --control-db must both be given, or neither".into());
+        }
+        _ => ("", ""),
+    };
+
     let states_schema = temporal_state_schema(&spec).map_err(|e| e.to_string())?;
-    let config = CatalogConfig::Memory { warehouse: PathBuf::from(warehouse) };
+    let config = if durable {
+        CatalogConfig::Sqlite { warehouse: PathBuf::from(warehouse), catalog_db: PathBuf::from(catalog_db) }
+    } else {
+        CatalogConfig::Memory { warehouse: PathBuf::from(warehouse) }
+    };
     let catalog = cubism_iceberg::config::open_catalog(&config).await.map_err(|e| e.to_string())?;
     let table = TemporalTable::create(catalog.as_ref(), &spec.name, &states_schema)
         .await
         .map_err(|e| e.to_string())?;
 
-    let publications = PublicationStore::new();
+    let publications = if durable {
+        PublicationStore::sqlite(std::path::Path::new(control_db)).await.map_err(|e| e.to_string())?
+    } else {
+        PublicationStore::in_memory()
+    };
     let claim = publications
         .claim_run(&spec.name, &window_id, run_id, revision, expected_rows)
+        .await
         .map_err(|e| e.to_string())?;
-    if !matches!(claim, ClaimResult::New(_)) {
-        return Err(format!("run '{run_id}' was already claimed in this process"));
-    }
+    let already_appended =
+        matches!(claim.state(), cubism_iceberg::RunState::Appended { .. } | cubism_iceberg::RunState::Published { .. });
 
     let started = Instant::now();
-    let result = AggregateWriter::append_window(
-        catalog.as_ref(),
-        &table,
-        AppendWindow { window_id: &window_id, revision, run_id, states: &states, registry: &registry },
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    publications.record_append(run_id, result.snapshot_id).map_err(|e| e.to_string())?;
-    let publication = publications.publish(run_id, None).map_err(|e| e.to_string())?;
+    let result = if already_appended {
+        match claim.state() {
+            cubism_iceberg::RunState::Appended { aggregate_snapshot_id, .. }
+            | cubism_iceberg::RunState::Published { aggregate_snapshot_id, .. } => {
+                cubism_iceberg::CommitResult {
+                    snapshot_id: *aggregate_snapshot_id,
+                    states_file_count: 0,
+                    registry_file_count: 0,
+                    row_count: expected_rows,
+                }
+            }
+            cubism_iceberg::RunState::Claimed { .. } => unreachable!("already_appended excludes Claimed"),
+        }
+    } else {
+        let result = AggregateWriter::append_window(
+            catalog.as_ref(),
+            &table,
+            AppendWindow { window_id: &window_id, revision, run_id, states: &states, registry: &registry },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        publications.record_append(run_id, result.snapshot_id).await.map_err(|e| e.to_string())?;
+        result
+    };
+
+    let expected_current =
+        publications.current(&spec.name, &window_id).await.map_err(|e| e.to_string())?;
+    let publication = publications.publish(run_id, expected_current).await.map_err(|e| e.to_string())?;
 
     let visible = AggregateReader::read_window(catalog.as_ref(), &table, &publications, &window_id)
         .await
@@ -267,9 +325,13 @@ async fn iceberg_build(
         result.registry_file_count,
         result.row_count,
     );
-    println!(
-        "note: publish here is unconditional — this CLI's control store is in-process only and does not survive across invocations (see docs/TIMESERIES_PHASE_3_HANDOFF.md)"
-    );
+    if durable {
+        println!("catalog and control store are durable (--catalog-db, --control-db) — a second invocation with the same paths observes this one's tables and publications");
+    } else {
+        println!(
+            "note: this build used the non-durable defaults — catalog and control store do not survive past this process (pass --catalog-db and --control-db for a durable build; see docs/TIMESERIES_PHASE_4_HANDOFF.md)"
+        );
+    }
     Ok(())
 }
 
@@ -399,6 +461,8 @@ async fn main() -> ExitCode {
             let mut revision = None;
             let mut run_id = None;
             let mut warehouse = None;
+            let mut catalog_db = None;
+            let mut control_db = None;
             let mut flag_err = None;
             let mut i = 2;
             while i < args.len() {
@@ -412,6 +476,8 @@ async fn main() -> ExitCode {
                     },
                     ("--run-id", Some(v)) => run_id = Some(v.clone()),
                     ("--warehouse", Some(v)) => warehouse = Some(v.clone()),
+                    ("--catalog-db", Some(v)) => catalog_db = Some(v.clone()),
+                    ("--control-db", Some(v)) => control_db = Some(v.clone()),
                     (flag, _) => flag_err = Some(format!("unknown or incomplete flag '{flag}'")),
                 }
                 i += 2;
@@ -419,7 +485,8 @@ async fn main() -> ExitCode {
             match (flag_err, states_input, registry_input, window_id, revision, run_id, warehouse) {
                 (Some(e), ..) => Err(e),
                 (None, Some(s), Some(r), Some(w), Some(rev), Some(run), Some(wh)) => {
-                    iceberg_build(spec_path, &s, &r, &w, rev, &run, &wh).await
+                    iceberg_build(spec_path, &s, &r, &w, rev, &run, &wh, catalog_db.as_deref(), control_db.as_deref())
+                        .await
                 }
                 _ => Err(
                     "--states-input, --registry-input, --window-id, --revision, --run-id, and --warehouse are all required"

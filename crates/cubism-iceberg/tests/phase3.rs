@@ -92,7 +92,7 @@ impl Fixture {
         let temporal_table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
             .await
             .unwrap();
-        Self { _warehouse: warehouse, catalog, temporal_table, publications: PublicationStore::new() }
+        Self { _warehouse: warehouse, catalog, temporal_table, publications: PublicationStore::in_memory() }
     }
 
     async fn append(
@@ -107,6 +107,7 @@ impl Fixture {
         let claim = self
             .publications
             .claim_run(CUBE_ID, window_id, run_id, revision, expected_rows)
+            .await
             .unwrap();
         assert!(matches!(claim, ClaimResult::New(_)), "expected a fresh claim for {run_id}");
 
@@ -117,7 +118,7 @@ impl Fixture {
         )
         .await
         .unwrap();
-        self.publications.record_append(run_id, result.snapshot_id).unwrap();
+        self.publications.record_append(run_id, result.snapshot_id).await.unwrap();
         result
     }
 
@@ -188,10 +189,10 @@ async fn retrying_the_same_run_id_after_a_simulated_crash_does_not_double_append
 
     // Simulate a process restart: the caller re-claims the same run_id
     // before it ever gets to `publish`.
-    let retry_claim = fixture.publications.claim_run(CUBE_ID, &window_id, "run-1", revision, 1).unwrap();
+    let retry_claim = fixture.publications.claim_run(CUBE_ID, &window_id, "run-1", revision, 1).await.unwrap();
     let recovered_snapshot = match retry_claim {
         ClaimResult::Existing(RunState::Appended { .. }) => {
-            fixture.publications.run_state("run-1")
+            fixture.publications.run_state("run-1").await.unwrap()
         }
         other => panic!("expected Existing(Appended {{ .. }}), got {other:?}"),
     };
@@ -199,7 +200,7 @@ async fn retrying_the_same_run_id_after_a_simulated_crash_does_not_double_append
 
     // The caller sees the run is already appended and skips straight to
     // publish — no second `AggregateWriter::append_window` call.
-    fixture.publications.publish("run-1", None).unwrap();
+    fixture.publications.publish("run-1", None).await.unwrap();
 
     let batches = fixture.read(&window_id).await.unwrap();
     assert_eq!(total_rows(&batches), 1, "a recovered retry must not have doubled the physical row count");
@@ -231,7 +232,7 @@ async fn publishing_a_new_revision_replaces_visibility_of_the_prior_one() {
     ])];
     let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a"), (xunit_id(2), b"b")])];
     fixture.append(&window_id, WindowRevision::new(1).unwrap(), "run-1", &states_v1, &registry_v1).await;
-    fixture.publications.publish("run-1", None).unwrap();
+    fixture.publications.publish("run-1", None).await.unwrap();
 
     let visible_v1 = fixture.read(&window_id).await.unwrap();
     assert_eq!(total_rows(&visible_v1), 2);
@@ -239,9 +240,9 @@ async fn publishing_a_new_revision_replaces_visibility_of_the_prior_one() {
     let states_v2 = vec![states_batch(&[("2026-08-12T00:15:00Z", xunit_id(3), 9, 9.0)])];
     let registry_v2 = vec![registry_batch(&[(xunit_id(3), b"c")])];
     fixture.append(&window_id, WindowRevision::new(2).unwrap(), "run-2", &states_v2, &registry_v2).await;
-    let stale = fixture.publications.publish("run-2", Some(WindowRevision::new(99).unwrap()));
+    let stale = fixture.publications.publish("run-2", Some(WindowRevision::new(99).unwrap())).await;
     assert!(stale.is_err(), "publish must reject a caller that observed the wrong current revision");
-    fixture.publications.publish("run-2", Some(WindowRevision::new(1).unwrap())).unwrap();
+    fixture.publications.publish("run-2", Some(WindowRevision::new(1).unwrap())).await.unwrap();
 
     let visible_v2 = fixture.read(&window_id).await.unwrap();
     assert_eq!(total_rows(&visible_v2), 1, "only revision 2's row should be visible, not both revisions summed");

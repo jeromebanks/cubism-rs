@@ -14,6 +14,12 @@ pub enum CubismIcebergError {
     #[error("cubism-core error: {0}")]
     Core(#[from] cubism_core::CubismError),
 
+    #[error("sql control/catalog store operation failed: {0}")]
+    Sql(#[from] sqlx::Error),
+
+    #[error("control store row is inconsistent with the claim/append/publish protocol: {0}")]
+    CorruptControlStore(String),
+
     #[error(
         "publish rejected for window '{window_id}': expected current revision {expected:?}, found {actual:?}"
     )]
