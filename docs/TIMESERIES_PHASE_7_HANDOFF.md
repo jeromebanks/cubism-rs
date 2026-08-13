@@ -118,9 +118,7 @@ Also present, deliberately uncommitted per prior-session convention:
 `.serena/` (local tooling state), `examples/web_analytics_demo/events.csv`
 (generated demo output).
 
-## Tests (21 in `cubism-iceberg`: 8 unit + 6 Phase-3 integration + 3
-durability integration + 4 concurrency integration, all passing — unchanged
-from Phase 6, no new tests this session)
+## Tests (21 in `cubism-iceberg`: 8 unit + 6 Phase-3 integration + 3 durability integration + 4 concurrency integration, all passing — unchanged from Phase 6, no new tests this session; unit/suite breakdown re-verified this session via raw `cargo test` output, not carried over unchecked)
 
 ## Verification performed
 
