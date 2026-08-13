@@ -40,6 +40,13 @@
 //! two-deferred-reader-then-writer interleaving that risk describes; that
 //! would need a test hook inside `with_immediate_tx` itself to pause
 //! between read and write, which does not exist.
+//!
+//! `disjoint_windows_can_commit_concurrently_without_conflicting` covers the
+//! next Phase 4 requirement (plan line ~637). See its own doc comment for
+//! why "concurrently" here means "without cross-window conflict," not
+//! "in parallel at the database level" — `max_connections(1)` and `BEGIN
+//! IMMEDIATE`'s file-level lock mean this store still serializes all
+//! writers, disjoint windows included.
 
 use std::sync::Arc;
 
@@ -179,6 +186,92 @@ async fn concurrent_publish_of_the_same_run_from_two_handles_is_idempotent() {
     let publication_a = result_a.unwrap().unwrap();
     let publication_b = result_b.unwrap().unwrap();
     assert_eq!(publication_a, publication_b, "both handles must observe the same published revision, not a race");
+}
+
+/// Phase 4's "disjoint windows can commit concurrently"
+/// (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md` line ~637, the requirement
+/// right after the one the other tests in this file cover) — two different
+/// windows, raced behind a barrier, must both succeed with no CAS conflict
+/// between them and both end up correctly published.
+///
+/// **What "concurrently" means here, precisely.** `SqliteStore`'s pool is
+/// `max_connections(1)` and every operation runs inside a real `BEGIN
+/// IMMEDIATE`, which takes a database-file-level write lock — not a
+/// per-window or per-row lock. So the two `publish` calls below do not
+/// execute their transactions in parallel; SQLite still serializes them at
+/// the file level, one `BEGIN IMMEDIATE`/`COMMIT` fully completing before
+/// the other's begins. What this test actually demonstrates is the
+/// application-level guarantee that matters for Phase 4: racing two
+/// *unrelated* windows produces zero cross-window interference — neither
+/// call observes the other as a `StaleRevision`/`RunConflict`, and each
+/// window's published revision is exactly the one its own writer wrote, not
+/// mixed up with the other window's. It is not evidence of the store
+/// executing writes in parallel; the underlying `BEGIN IMMEDIATE` +
+/// single-connection design (see `durable_control.rs`'s module doc comment)
+/// means it cannot. That global serialization is a real scaling limit for a
+/// production control store — see GitHub issue #12, which already flags
+/// that `BEGIN IMMEDIATE` has no direct Postgres equivalent and a
+/// Postgres/MySQL backend would need its own per-row locking strategy to
+/// get genuine cross-window parallelism.
+#[tokio::test]
+async fn disjoint_windows_can_commit_concurrently_without_conflicting() {
+    let control_dir = TempDir::new().unwrap();
+    let control_db = control_dir.path().join("control.sqlite");
+    let window_a = WindowId::new("2026-08-12").unwrap();
+    let window_b = WindowId::new("2026-08-13").unwrap();
+
+    let store_a = Arc::new(PublicationStore::sqlite(&control_db).await.unwrap());
+    let store_b = Arc::new(PublicationStore::sqlite(&control_db).await.unwrap());
+
+    let claim_a = store_a
+        .claim_run(CUBE_ID, &window_a, "run-a", WindowRevision::new(1).unwrap(), 1)
+        .await
+        .unwrap();
+    assert!(matches!(claim_a, ClaimResult::New(_)));
+    store_a.record_append("run-a", 201).await.unwrap();
+
+    let claim_b = store_b
+        .claim_run(CUBE_ID, &window_b, "run-b", WindowRevision::new(1).unwrap(), 1)
+        .await
+        .unwrap();
+    assert!(matches!(claim_b, ClaimResult::New(_)));
+    store_b.record_append("run-b", 202).await.unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let task_a = {
+        let store_a = Arc::clone(&store_a);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store_a.publish("run-a", None).await
+        })
+    };
+    let task_b = {
+        let store_b = Arc::clone(&store_b);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store_b.publish("run-b", None).await
+        })
+    };
+
+    let (result_a, result_b) = tokio::join!(task_a, task_b);
+    let publication_a = result_a.unwrap().expect("window A's own publish must not be rejected by window B's activity");
+    let publication_b = result_b.unwrap().expect("window B's own publish must not be rejected by window A's activity");
+    assert_eq!(publication_a.run_id, "run-a");
+    assert_eq!(publication_b.run_id, "run-b");
+
+    let store_c = PublicationStore::sqlite(&control_db).await.unwrap();
+    assert_eq!(
+        store_c.current(CUBE_ID, &window_a).await.unwrap(),
+        Some(publication_a.revision),
+        "window A's published revision must not be clobbered by window B's concurrent write"
+    );
+    assert_eq!(
+        store_c.current(CUBE_ID, &window_b).await.unwrap(),
+        Some(publication_b.revision),
+        "window B's published revision must not be clobbered by window A's concurrent write"
+    );
 }
 
 /// `publish` must wait for a genuinely held write lock and then succeed,
