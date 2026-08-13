@@ -11,8 +11,13 @@ name = "cubism"
 path = "src/main.rs"
 
 [dependencies]
+arrow-array = "58"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 cubism-core = { path = "../cubism-core" }
 cubism-datafusion = { path = "../cubism-datafusion" }
+cubism-iceberg = { path = "../cubism-iceberg" }
 cubism-serve = { path = "../cubism-serve" }
+futures = "0.3"
+iceberg = "=0.10.0"
+parquet = "58"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }

@@ -1,0 +1,24 @@
+[package]
+name = "cubism-iceberg"
+description = "Append-only Iceberg persistence and publication for Cubism temporal aggregates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cubism-core = { path = "../cubism-core" }
+iceberg = "=0.10.0"
+arrow-array = "58"
+arrow-schema = "58"
+parquet = "58"
+futures = "0.3"
+thiserror.workspace = true
+
+[dev-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints.rust]
+unsafe_code = "forbid"

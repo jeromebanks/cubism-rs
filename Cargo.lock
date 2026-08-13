@@ -936,10 +936,15 @@ dependencies = [
 name = "cubism-cli"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
  "chrono",
  "cubism-core",
  "cubism-datafusion",
+ "cubism-iceberg",
  "cubism-serve",
+ "futures",
+ "iceberg",
+ "parquet",
  "tokio",
 ]
 
@@ -966,6 +971,22 @@ dependencies = [
  "datafusion 54.0.0",
  "proptest",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "cubism-iceberg"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "chrono",
+ "cubism-core",
+ "futures",
+ "iceberg",
+ "parquet",
+ "tempfile",
+ "thiserror",
  "tokio",
 ]
 
