@@ -37,13 +37,24 @@ points to).
 
 ## 1. Call advisor before picking the slice
 
-Do not choose the code slice yourself from the deferred list without a
-second opinion — in the session that produced this skill, the advisor
-caught that one candidate issue (#10) already covered scope a naively-filed
-new issue would have duplicated, and it picked a better-scoped code slice
-than the first candidate considered. Orientation (step 0) is not
-substantive work, so do it first, *then* call `advisor()` and ask it to:
+**First check `docs/TIMESERIES_ROADMAP.md` if it exists.** For any phase the
+roadmap covers, find the first milestone not yet marked done and confirm its
+dependencies are done — that's the candidate slice, not a fresh scan of the
+deferred list. Only fall back to the ad hoc deferred-list/issue scan below
+for phases the roadmap doesn't reach yet (it does not cover plan-Phase 5+ as
+of this writing) or once every milestone in it is done.
 
+Do not choose the code slice yourself — whether from the roadmap or the
+deferred list — without a second opinion: in the session that produced this
+skill, the advisor caught that one candidate issue (#10) already covered
+scope a naively-filed new issue would have duplicated, and it picked a
+better-scoped code slice than the first candidate considered. Orientation
+(step 0) is not substantive work, so do it first, *then* call `advisor()`
+and ask it to:
+
+- if a roadmap milestone was picked: confirm its dependencies are actually
+  done (not just listed as done) and that the milestone is still sized to
+  one bounded slice — the roadmap's sizing is a plan, not a guarantee;
 - confirm which deferred items already have GitHub issues (read the full
   body of any issue whose title looks like it might already cover the
   scope — GitHub list views truncate titles, so a short grep of the list

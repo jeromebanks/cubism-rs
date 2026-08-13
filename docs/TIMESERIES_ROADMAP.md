@@ -1,0 +1,212 @@
+# Time-Series Roadmap: Phase 4 Session-Slice Milestones
+
+Date: 2026-08-12
+
+Branch: `feature/timeseries-phase-0a`
+
+This is a **session-sequencing layer**, not a spec. `docs/TIMESERIES_IMPLEMENTATION_PLAN.md`
+stays the authoritative phase-level spec; this doc decomposes its Phase 4
+section (lines 582-670) into an ordered list of milestones sized to what one
+`.claude/skills/timeseries-slice/SKILL.md` run can land — "one bounded
+type/API surface plus its test," the same size every prior slice in this
+series has been. Filed in response to
+[#15](https://github.com/jeromebanks/cubism-rs/issues/15).
+
+Scope: Phase 4 minus compaction/retention/object-store (tracked separately in
+[#10](https://github.com/jeromebanks/cubism-rs/issues/10)), per
+[#13](https://github.com/jeromebanks/cubism-rs/issues/13)'s explicit
+non-goals. **Does not yet cover plan-Phase 5** (exactness-aware DataFusion
+range queries) — extending this roadmap past Phase 4 is deferred; see the
+Phase 7 handoff's deferred list.
+
+## How `timeseries-slice` step 1 should use this doc
+
+When picking the next slice, check the milestone list below **before**
+falling back to the ad hoc deferred-list/advisor scan the skill used before
+this doc existed:
+
+1. Find the first milestone below not yet marked done.
+2. Confirm its "Depends on" milestones are done. If not, something is wrong —
+   stop and reconcile before picking a slice (a later milestone should never
+   be reachable before its dependencies).
+3. Advisor still reviews the pick — this doc narrows the candidate list to
+   one, it doesn't replace the advisor's scope/locking-model check (skill
+   step 1, item 3).
+4. **Once every milestone below is marked done**, Phase 4 (`#13`'s scope) is
+   finished. At that point step 1 has no more milestones to consult here and
+   should fall back to its original behavior: scan open issues and the
+   latest handoff's deferred list directly (starting with #10 and this
+   roadmap's own "Deferred" note about Phase 5).
+
+## Current state (read before drafting Milestone 1's implementation)
+
+Grounding for what already exists, so a milestone doesn't re-discover or
+re-litigate it:
+
+- `PublicationStore::publish(run_id, expected_current: Option<WindowRevision>)`
+  (`crates/cubism-iceberg/src/control.rs:188`, durable variant
+  `crates/cubism-iceberg/src/durable_control.rs:260`) already implements
+  optimistic compare-and-swap against a caller-supplied expected revision,
+  and already rejects a stale caller with `CubismIcebergError::StaleRevision`
+  (tested: `control.rs`'s `stale_publish_cannot_replace_a_newer_revision`,
+  one of the 8 unit tests in the current 21-test count). This is the
+  plan's "ExpectedRevision" half of "`WindowLease` or `ExpectedRevision`"
+  already built — Milestone 2 below is about formalizing/naming it and
+  testing it in a correction-shaped scenario, not building CAS from
+  scratch.
+- None of `LatenessPolicy`, `CorrectionPlan`, `ReconciliationRecord`,
+  `CompactionPlan`, `RetentionPlan`, or `WindowLease` exist anywhere in
+  `crates/cubism-iceberg/src` or `crates/cubism-core/src` today (confirmed
+  via `rtk proxy grep -rn` over both, zero matches). Milestones 1, 3, and 5
+  below start from nothing.
+- Plan lines 636 (two same-window writers produce one winner) and 637
+  (disjoint windows commit concurrently) are done —
+  `docs/TIMESERIES_PHASE_5_HANDOFF.md` and
+  `docs/TIMESERIES_PHASE_6_HANDOFF.md` respectively. They are **not**
+  milestones below; this roadmap starts at the plan's remaining Phase 4 test
+  list (lines 634-635, 638-639).
+
+## Milestones
+
+Each entry: target file(s), the one test it adds, its dependencies, and its
+done-condition. A milestone is done when its test is committed, passing, and
+the full step-4 verification battery is clean — not when the type merely
+compiles.
+
+### Milestone 1 — `LatenessPolicy`
+
+- **Target:** new type in `crates/cubism-iceberg/src` (or `cubism-core` if it
+  needs to be shared with non-Iceberg readers — decide at implementation
+  time; not yet decided here).
+- **What it does:** classifies an incoming event's timestamp against a
+  window's already-published state as on-time or late, given a configured
+  allowed-lateness bound (plan line 659's "window duration versus correction
+  blast radius" unresolved decision lives here — this milestone should
+  record a decision, not leave it open indefinitely).
+- **Test:** one unit test asserting an event within the allowed-lateness
+  bound classifies as on-time and one past it classifies as late.
+- **Depends on:** nothing (first milestone).
+- **Done when:** `LatenessPolicy` exists, is unit-tested, and the plan's
+  "window duration versus correction blast radius" decision is recorded
+  (either in this file or the type's own doc comment — a future slice
+  reading this roadmap should not have to re-derive it).
+
+### Milestone 2 — Formalize `ExpectedRevision`, test it against a correction shape
+
+- **Target:** `crates/cubism-iceberg/src/control.rs` /
+  `durable_control.rs` (the existing `expected_current: Option<WindowRevision>`
+  parameter), plus a new test.
+- **What it does:** resolves plan line 660's unresolved decision ("lease
+  service versus optimistic expected-revision only") explicitly in favor of
+  the already-built optimistic expected-revision mechanism (no new lease
+  service — see "Current state" above for why this is mostly already built),
+  and adds the dedicated test plan line 639 asks for, framed around a
+  correction attempt specifically: a stale correction (built against a
+  revision that is no longer current) must be rejected by the existing
+  `StaleRevision` path, distinct from `control.rs`'s existing
+  `stale_publish_cannot_replace_a_newer_revision` test (which races two
+  initial runs, not a correction against a superseded revision).
+- **Test:** `stale_correction_cannot_overwrite_a_newer_revision` (or
+  similar) in `tests/concurrency.rs` or `tests/durability.rs` — publish an
+  initial revision, publish a second revision, then attempt a "correction"
+  publish carrying the first revision as its expected-current and assert
+  `StaleRevision`.
+- **Depends on:** nothing structurally new required, but should follow
+  Milestone 1 so the test can plausibly describe the corrected write as
+  "late" per that policy.
+- **Done when:** the unresolved decision is recorded and the correction-shaped
+  stale-rejection test passes. This closes plan line 639.
+
+### Milestone 3 — `CorrectionPlan`
+
+- **Target:** new type in `crates/cubism-iceberg/src`, informed by
+  `cubism-core`'s existing aggregate state kinds (`AVG`/`VAR`/`QNT` —
+  `crates/cubism-core/src/aggregate_state.rs`) to determine which are
+  additive/subtractable and which require a full rebuild.
+- **What it does:** represents a planned correction (source checkpoint or
+  time range, affected windows, whether an additive/subtractive shortcut is
+  valid for the aggregate kinds involved or a full rebuild is required).
+- **Test:** plan line 635 — a test asserting that for a non-idempotent/
+  non-subtractable state kind, `CorrectionPlan` selects (or refuses anything
+  but) a full-rebuild strategy, never an additive shortcut.
+- **Depends on:** Milestone 1 (needs `LatenessPolicy` to determine which
+  events a correction is even responding to).
+- **Done when:** the type exists and plan line 635's test passes.
+
+### Milestone 4 — Coordinator/job API + late-event rebuild test
+
+- **Target:** new coordinator module in `crates/cubism-iceberg/src`.
+- **What it does:** identifies affected windows from event time, rebuilds
+  them completely using the existing append/publish protocol, and publishes
+  a new revision via the CAS mechanism formalized in Milestone 2.
+- **Test:** plan line 634 — a late-event rebuild produces a state
+  byte-identical (or answer-identical, per whatever equality the aggregate
+  state supports) to a clean rebuild from the corrected source.
+- **Depends on:** Milestone 2 (publishes via expected-revision CAS),
+  Milestone 3 (needs a `CorrectionPlan` to execute).
+- **Done when:** the coordinator can run a correction end-to-end for at
+  least one aggregate kind and the rebuild-equality test passes.
+
+### Milestone 5 — `ReconciliationRecord` + failure-injection recoverability
+
+- **Target:** new type in `crates/cubism-iceberg/src`; coordinator from
+  Milestone 4 extended to record reconciliation state at each stage.
+- **What it does:** records what a coordinator run did/attempted at each
+  commit/publication stage, so an interrupted job can be classified and
+  reconciled on retry (plan's completion criterion: "a deterministic
+  recovery run classifies and reconciles every interrupted job").
+- **Test:** plan line 638 — failure injection at every commit/publication
+  stage the coordinator passes through, asserting recovery reaches a
+  consistent published state (not a partial/corrupt one) in every case.
+- **Depends on:** Milestone 4 (needs the coordinator's stages to inject
+  failures into).
+- **Done when:** `ReconciliationRecord` exists and the failure-injection
+  test passes for every stage the coordinator has.
+
+### Milestone 6 — Public correction API
+
+- **Target:** public API surface in `crates/cubism-iceberg/src` (library
+  level — plan's "Public API changes"; a CLI surface for this is explicitly
+  #11's scope, not this milestone's).
+- **What it does:** submit/schedule a correction by source checkpoint or
+  time range; inspect current/superseded revisions and reconciliation state.
+- **Test:** an integration test exercising submit → coordinator runs →
+  inspect reconciliation state, using Milestones 3-5's types together.
+- **Depends on:** Milestones 3, 4, 5.
+- **Done when:** the public API is callable end-to-end with a passing
+  integration test. **This closes Phase 4's #13 scope** (modulo the
+  "Unresolved decisions" and "Rollback point" items below, which are
+  design/ops concerns rather than a coded milestone — see "Phase 4 done"
+  below).
+
+## Phase 4 "done" condition
+
+Distinct from "every milestone above is done," per plan lines 650-669:
+
+- All eight plan Phase 4 test-list items (lines 634-641) pass — six covered
+  by Milestones 1-6 above (634, 635, 638, 639 plus 636/637 already closed);
+  the remaining two (640 compaction, 641 retention) are #10's scope, not
+  this roadmap's.
+- Plan's four completion criteria (lines 651-655) hold, verified explicitly
+  in the handoff that closes Milestone 6 — don't just assert "milestones
+  done, therefore criteria met" without checking each one against what was
+  actually built.
+- Plan's "Unresolved decisions" (lines 658-663) are each either resolved (as
+  Milestones 1 and 2 do for two of them) or explicitly deferred with a
+  reason, not silently dropped.
+- Plan's "Rollback point" (lines 666-669) — repointing a window to its prior
+  published revision — is implemented and tested. Not currently assigned to
+  a milestone above; whichever slice implements Milestone 6's public API
+  should confirm whether rollback falls out of the existing CAS/publish
+  mechanism already or needs its own bounded milestone (open question,
+  flagged here rather than guessed at).
+
+## Deferred (not in scope for this roadmap doc)
+
+1. **Extend this roadmap to plan-Phase 5** (DataFusion range queries and
+   serving, exactness-aware) once Milestones 1-6 above are underway — #15's
+   own suggested steps ask for this, deliberately not done in the same slice
+   that drafted Phase 4's milestones (see the Phase 7 handoff for why).
+2. **The Rollback-point milestone gap** noted above under "Phase 4 done" —
+   needs a decision on whether it's covered by Milestone 6 or needs its own
+   slice.

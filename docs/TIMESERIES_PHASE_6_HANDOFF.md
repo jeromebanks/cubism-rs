@@ -19,6 +19,13 @@ the implementation plan — same convention `docs/TIMESERIES_PHASE_4_HANDOFF.md`
 and `docs/TIMESERIES_PHASE_5_HANDOFF.md` established: plan Phase 5 is
 DataFusion range queries and serving, plan Phase 4 hasn't started yet.)
 
+**Superseded by:** `docs/TIMESERIES_PHASE_7_HANDOFF.md`, which is a
+docs-only slice (no code) writing `docs/TIMESERIES_ROADMAP.md` in response to
+issue #15 — filed after this session added `docs/handoff_latest.md` and
+`.claude/skills/timeseries-slice/SKILL.md`. The roadmap decomposes #13
+(Phase 4 proper) into the six milestones this handoff's deferred items 1 and
+6 gestured at without sequencing.
+
 ## What this session built
 
 Read `docs/TIMESERIES_PHASE_5_HANDOFF.md`, confirmed its commits
