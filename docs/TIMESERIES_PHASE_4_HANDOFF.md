@@ -11,8 +11,8 @@ This session cleared Phase 4's own hard prerequisite instead: durable
 (`docs/TIMESERIES_PHASE_3_HANDOFF.md`'s design-decision note, tracked as
 GitHub issue #7). `cargo test`/`clippy -D warnings` clean across
 `cubism-iceberg`, `cubism-cli`, and the full workspace; manually verified
-end-to-end with a **three-separate-OS-process** CLI smoke test. Not
-committed yet — see "Worktree state" below.
+end-to-end with a **three-separate-OS-process** CLI smoke test. Committed
+and pushed as `a820dec` — see "Worktree state" below.
 
 ## What this session built
 
@@ -249,7 +249,8 @@ backend.
 
 ## Worktree state
 
-**Not committed.** Working tree has:
+**Committed and pushed** as `a820dec` on `feature/timeseries-phase-0a`.
+That commit contains:
 
 - New: `crates/cubism-iceberg/src/durable_control.rs`,
   `crates/cubism-iceberg/tests/durability.rs`,
