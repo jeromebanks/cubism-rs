@@ -104,6 +104,11 @@ silently guessing.
   attempted here. Don't read the durability tests in
   `tests/durability.rs` as proof of concurrent-writer safety; they prove
   restart/reopen durability only.
+  **Superseded:** `BEGIN IMMEDIATE` plus a bounded Rust-level busy-retry
+  loop landed in `docs/TIMESERIES_PHASE_5_HANDOFF.md` — see that doc and
+  `crates/cubism-iceberg/tests/concurrency.rs` for exactly what was and
+  wasn't verified about it. This paragraph is left as-is as the historical
+  record of what this session shipped.
 - **`SqliteStore` uses a single-connection pool
   (`SqlitePoolOptions::max_connections(1)`)** so that one `PublicationStore`
   handle never races itself across async tasks within one process; a

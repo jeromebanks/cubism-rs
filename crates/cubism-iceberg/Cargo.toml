@@ -15,12 +15,13 @@ arrow-array = "58"
 arrow-schema = "58"
 parquet = "58"
 futures = "0.3"
+tokio = { version = "1", default-features = false, features = ["time"] }
 thiserror.workspace = true
 
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [lints.rust]
 unsafe_code = "forbid"
