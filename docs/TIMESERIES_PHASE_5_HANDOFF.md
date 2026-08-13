@@ -22,10 +22,9 @@ actual Phase 4.)
 ## What this session built
 
 Read `docs/TIMESERIES_PHASE_4_HANDOFF.md`, confirmed its work was committed
-(`a820dec`) and pushed, and found its own stale self-reference (the doc
-described itself as "this file" inside its own worktree-state section
-before the commit that added it — already fixed by a same-day follow-up
-commit `c2c92b3`, itself confirmed already pushed). Per that handoff's
+(`a820dec`) and pushed, along with its same-day follow-up commit
+`c2c92b3` (fixed a stale "Not committed yet" line the doc still had when
+first committed — both confirmed already pushed). Per that handoff's
 deferred-items list and issue #7's own progress comment, the two things
 still open after durability landed were (a) concurrent-writer arbitration
 and (b) the multi-step CLI split. This session took (a); (b) and one new
@@ -152,8 +151,7 @@ extending either file, since the reasoning is the documentation here.
   note, don't erase the historical record of what a prior session actually
   shipped.
 
-## Tests (20 in `cubism-iceberg`: 8 unit + 6 Phase-3 integration + 3
-durability integration + 3 new concurrency integration, all passing)
+## Tests (20 in `cubism-iceberg`: 8 unit + 6 Phase-3 integration + 3 durability integration + 3 new concurrency integration, all passing)
 
 New this session (`tests/concurrency.rs`):
 
