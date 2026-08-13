@@ -204,16 +204,16 @@ revert were not committed.
   items) is now addressed per the precise claim in "What was actually
   verified" above. The other remaining item, the multi-step CLI split, is
   now its own issue (below) rather than staying as a sub-note on #7.
-- **New issue** (multi-step CLI): `iceberg-init`/`iceberg-append`/
+- **#11** (multi-step CLI, new this session): `iceberg-init`/`iceberg-append`/
   `iceberg-publish`/`iceberg-verify` as separate invocations — unblocked by
   durability, per-step failure/retry contract still undecided. Deferred
   item 3 from `docs/TIMESERIES_PHASE_4_HANDOFF.md`.
-- **New issue** (Postgres/MySQL catalog/control-store backend): both
-  `CatalogConfig` and `PublicationStore::Sqlite` are wired through `sqlx`
-  and `iceberg-catalog-sql` binds through `sqlx`'s `Any` driver, so this is
-  a bind-style/driver swap plus a locking-model rewrite (SQLite's `BEGIN
-  IMMEDIATE` has no direct Postgres equivalent), not a redesign. Deferred
-  item 5 from `docs/TIMESERIES_PHASE_4_HANDOFF.md`.
+- **#12** (Postgres/MySQL catalog/control-store backend, new this session):
+  both `CatalogConfig` and `PublicationStore::Sqlite` are wired through
+  `sqlx` and `iceberg-catalog-sql` binds through `sqlx`'s `Any` driver, so
+  this is a bind-style/driver swap plus a locking-model rewrite (SQLite's
+  `BEGIN IMMEDIATE` has no direct Postgres equivalent), not a redesign.
+  Deferred item 5 from `docs/TIMESERIES_PHASE_4_HANDOFF.md`.
 - **#8, #9, #10**: untouched — DataFusion `TableProvider` exposure, the
   state-blob checksum gap, and real object store + maintenance are exactly
   as filed; nothing this session did changes any of them.
@@ -226,10 +226,8 @@ revert were not committed.
    (line 636) as a standalone slice against the existing claim/append/
    publish protocol, not the phase itself — no `LatenessPolicy`,
    `CorrectionPlan`, `CompactionPlan`, or coordinator/job API exists yet.
-2. **Multi-step CLI.** Filed as a new issue this session (see above); not
-   attempted.
-3. **Postgres/MySQL backend.** Filed as a new issue this session (see
-   above); not attempted.
+2. **Multi-step CLI.** Filed as #11 this session; not attempted.
+3. **Postgres/MySQL backend.** Filed as #12 this session; not attempted.
 4. **Retry-loop coverage under the shipped `BEGIN IMMEDIATE` config** (see
    "Design decisions" above) — `is_retryable`/`backoff` are real code with
    zero test forcing them to fire in CI today. Would need a >5s
@@ -270,3 +268,5 @@ demo output).
 - [`TIMESERIES_IMPLEMENTATION_PLAN.md`](TIMESERIES_IMPLEMENTATION_PLAN.md) (Phase 4 spec, lines 582-670, line 636 specifically)
 - [`TIMESERIES_PHASE_4_HANDOFF.md`](TIMESERIES_PHASE_4_HANDOFF.md)
 - GitHub issue [#7](https://github.com/jeromebanks/cubism-rs/issues/7) (durable catalog + control store)
+- GitHub issue [#11](https://github.com/jeromebanks/cubism-rs/issues/11) (multi-step CLI, new this session)
+- GitHub issue [#12](https://github.com/jeromebanks/cubism-rs/issues/12) (Postgres/MySQL backend, new this session)
