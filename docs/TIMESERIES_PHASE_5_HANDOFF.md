@@ -19,6 +19,12 @@ the implementation plan — matching the established naming convention where
 `TIMESERIES_PHASE_4_HANDOFF.md` documented issue #7's durability work, not
 actual Phase 4.)
 
+**Superseded by:** `docs/TIMESERIES_PHASE_6_HANDOFF.md` continues this
+session's work (line 637, the next Phase 4 test requirement after this
+doc's line 636) and files GitHub issues #13 and #14 for this doc's deferred
+items 1 and 4 below — historical claims in this doc are left as written,
+same convention this doc itself used for `TIMESERIES_PHASE_4_HANDOFF.md`.
+
 ## What this session built
 
 Read `docs/TIMESERIES_PHASE_4_HANDOFF.md`, confirmed its work was committed

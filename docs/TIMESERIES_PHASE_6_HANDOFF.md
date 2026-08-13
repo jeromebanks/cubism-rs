@@ -8,11 +8,16 @@ Status: **Phase 4 proper (late data, corrections, compaction —
 `docs/TIMESERIES_IMPLEMENTATION_PLAN.md` lines 582-670) still has not
 started.** This session took the next bounded slice of Phase 4's own test
 list after `docs/TIMESERIES_PHASE_5_HANDOFF.md`'s: "disjoint windows can
-commit concurrently" (plan line ~637, immediately after line 636, which the
+commit concurrently" (plan line 637, immediately after line 636, which the
 prior session closed). It also filed the two deferred items that didn't
 already have a GitHub issue. `cargo test`/`clippy -D warnings` clean across
 `cubism-iceberg`, `cubism-cli`, and the full workspace. Committed and pushed
 to `feature/timeseries-phase-0a` — see "Worktree state" below.
+
+(Despite the filename, this doc documents a session slice, not "Phase 6" of
+the implementation plan — same convention `docs/TIMESERIES_PHASE_4_HANDOFF.md`
+and `docs/TIMESERIES_PHASE_5_HANDOFF.md` established: plan Phase 5 is
+DataFusion range queries and serving, plan Phase 4 hasn't started yet.)
 
 ## What this session built
 
@@ -54,7 +59,7 @@ What the test does demonstrate, precisely: racing two transactions against
 conflict), and each window's published revision is exactly the one its own
 writer wrote — a fresh third handle confirms this via `.current()` on both
 windows independently. That is the application-level guarantee Phase 4's
-line ~637 actually asks for: two unrelated windows don't corrupt each
+line 637 actually asks for: two unrelated windows don't corrupt each
 other, not that the store executes them in parallel. The store's global
 serialization (one writer at a time, regardless of which window) is a real
 scaling limit worth knowing about before treating this store as a
@@ -94,7 +99,7 @@ made about actual parallelism, so none was needed.
    `docs/TIMESERIES_IMPLEMENTATION_PLAN.md` lines 582-670) has still not
    started; now tracked as #13 (minus compaction/retention, tracked in
    #10). This session closed one more of Phase 4's own test requirements
-   (line ~637) against the existing claim/append/publish protocol, same
+   (line 637) against the existing claim/append/publish protocol, same
    pattern as the prior session's line 636 — neither is the phase itself.
 2. **Multi-step CLI.** #11; not attempted.
 3. **Postgres/MySQL backend.** #12; not attempted.
@@ -104,13 +109,13 @@ made about actual parallelism, so none was needed.
    re-litigated).
 5. **Real object store, DataFusion `TableProvider` exposure, state-blob
    checksum, compaction/retention** — unchanged, tracked as #10/#8/#9.
-6. **The remaining Phase 4 test-list items beyond line ~637**: failure
+6. **The remaining Phase 4 test-list items beyond line 637**: failure
    injection at every commit/publication stage, stale leases/expected
    revisions rejecting overwrites, and the late-event-rebuild-equals-clean-rebuild
    property test all still need Phase 4's actual types (`LatenessPolicy`,
    `CorrectionPlan`, coordinator) to exist first — tracked under #13, not
    independently attemptable as further protocol-level slices the way
-   lines 636 and ~637 were.
+   lines 636 and 637 were.
 
 ## Worktree state
 
@@ -143,7 +148,7 @@ New this session (`tests/concurrency.rs`):
 ## Verification performed
 
 ```text
-cargo test -p cubism-iceberg                                              # 8 unit + 6 phase3, all passed
+cargo test -p cubism-iceberg                                              # 21 passed
 cargo test -p cubism-iceberg --test concurrency                           # 4 passed
 cargo test -p cubism-iceberg --test durability                            # 3 passed
 cargo clippy -p cubism-iceberg --all-targets --no-deps -- -D warnings     # clean
@@ -158,7 +163,7 @@ cargo clippy --workspace --exclude cubism-py --all-targets --no-deps -- -D warni
 - [`../crates/cubism-iceberg/tests/concurrency.rs`](../crates/cubism-iceberg/tests/concurrency.rs)
   (module doc comment updated; new test's own doc comment has the full
   "what this does and doesn't prove" writeup)
-- [`TIMESERIES_IMPLEMENTATION_PLAN.md`](TIMESERIES_IMPLEMENTATION_PLAN.md) (Phase 4 spec, lines 582-670, line ~637 specifically)
+- [`TIMESERIES_IMPLEMENTATION_PLAN.md`](TIMESERIES_IMPLEMENTATION_PLAN.md) (Phase 4 spec, lines 582-670, line 637 specifically)
 - [`TIMESERIES_PHASE_5_HANDOFF.md`](TIMESERIES_PHASE_5_HANDOFF.md)
 - GitHub issue [#13](https://github.com/jeromebanks/cubism-rs/issues/13) (Phase 4 proper, new this session)
 - GitHub issue [#14](https://github.com/jeromebanks/cubism-rs/issues/14) (retry-loop coverage, new this session)

@@ -42,7 +42,7 @@
 //! between read and write, which does not exist.
 //!
 //! `disjoint_windows_can_commit_concurrently_without_conflicting` covers the
-//! next Phase 4 requirement (plan line ~637). See its own doc comment for
+//! next Phase 4 requirement (plan line 637). See its own doc comment for
 //! why "concurrently" here means "without cross-window conflict," not
 //! "in parallel at the database level" — `max_connections(1)` and `BEGIN
 //! IMMEDIATE`'s file-level lock mean this store still serializes all
@@ -189,7 +189,7 @@ async fn concurrent_publish_of_the_same_run_from_two_handles_is_idempotent() {
 }
 
 /// Phase 4's "disjoint windows can commit concurrently"
-/// (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md` line ~637, the requirement
+/// (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md` line 637, the requirement
 /// right after the one the other tests in this file cover) — two different
 /// windows, raced behind a barrier, must both succeed with no CAS conflict
 /// between them and both end up correctly published.
@@ -213,6 +213,17 @@ async fn concurrent_publish_of_the_same_run_from_two_handles_is_idempotent() {
 /// that `BEGIN IMMEDIATE` has no direct Postgres equivalent and a
 /// Postgres/MySQL backend would need its own per-row locking strategy to
 /// get genuine cross-window parallelism.
+///
+/// **The barrier below does no discriminating work, unlike the file's other
+/// barrier-based test.** Because there is no cross-window CAS check for
+/// `publish` to race against, this test would pass identically without the
+/// barrier at all, or under a reverted plain-`BEGIN` — it is not a
+/// regression test for `BEGIN IMMEDIATE` the way
+/// `two_same_window_writers_produce_exactly_one_published_winner` is (see
+/// that test's own caveat above about its 300-run, zero-failure result
+/// under plain `BEGIN`). It exists to pin the cross-window-isolation
+/// behavior down as an explicit assertion, not to catch a locking
+/// regression.
 #[tokio::test]
 async fn disjoint_windows_can_commit_concurrently_without_conflicting() {
     let control_dir = TempDir::new().unwrap();
