@@ -21,6 +21,11 @@ hasn't started coding yet. This particular slice is unusual in the series in
 that it produced no plan-phase progress at all — it produced the sequencing
 doc that the *next* several slices will use to make that progress.)
 
+**Superseded by:** [`TIMESERIES_PHASE_8_HANDOFF.md`](TIMESERIES_PHASE_8_HANDOFF.md),
+which picked up this doc's deferred item 2 (Milestone 1, `LatenessPolicy`)
+using the roadmap this session wrote — the roadmap's first milestone,
+implemented and closed.
+
 ## What this session built
 
 Read `docs/TIMESERIES_PHASE_6_HANDOFF.md` and confirmed its commit was

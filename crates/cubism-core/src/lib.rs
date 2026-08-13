@@ -38,7 +38,7 @@ pub use sketch::KmvSketch;
 pub use spec::{AggKind, AggregateStateConfig, CubeSpec, DimensionSpec, LevelSpec, MeasureSpec};
 pub use temporal::{
     AllowedLateness, BucketEnd, BucketOrigin, BucketStart, BucketValue, CalendarResolution,
-    Coverage, EventTime, Exactness, FixedResolution, IngestionTime, Resolution, TemporalSpec,
-    TimeBucket, TimeRange, WindowId, WindowRevision,
+    Coverage, EventTime, Exactness, FixedResolution, IngestionTime, Lateness, LatenessPolicy,
+    Resolution, TemporalSpec, TimeBucket, TimeRange, WindowId, WindowRevision,
 };
 pub use ypath::{XUnit, YPath};

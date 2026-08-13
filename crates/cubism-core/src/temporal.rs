@@ -432,6 +432,62 @@ impl<'de> Deserialize<'de> for AllowedLateness {
     }
 }
 
+/// Whether an event's timestamp falls inside or past a window's
+/// allowed-lateness bound. See [`LatenessPolicy::classify`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Lateness {
+    OnTime,
+    Late,
+}
+
+/// Classifies an event as on-time or late against a window boundary plus a
+/// configured [`AllowedLateness`] bound (`docs/TIMESERIES_ROADMAP.md`
+/// Milestone 1 — a building block for the Phase 4 correction machinery in
+/// `docs/TIMESERIES_IMPLEMENTATION_PLAN.md` lines 582-670; it does not by
+/// itself close any of that plan section's test-list items).
+///
+/// This is a pure boundary check: [`classify`](Self::classify) takes the
+/// window's `bucket_end` as a parameter instead of consulting a
+/// publication/control store or an ingestion-time watermark, so a `Late`
+/// result says nothing about whether the window has actually been published
+/// yet — that reconciliation is `cubism-iceberg`'s `PublicationStore`
+/// (Milestone 2), layered on top of this, not this type's job.
+///
+/// Two-valued by design: this milestone does not add a third "too old,
+/// reject as backfill" classification. Plan line 662 ("when a correction is
+/// too old and must be rejected or handled as a backfill") stays an open
+/// unresolved decision, not silently answered here.
+///
+/// Resolves plan line 659 ("window duration versus correction blast
+/// radius"): the allowed-lateness bound is independent of window duration —
+/// `LatenessPolicy` is constructed from an [`AllowedLateness`] alone, never
+/// a window's own [`Resolution`], so a caller who wants to bound a
+/// correction's blast radius does so by choosing a small `AllowedLateness`
+/// directly; a coarser window resolution does not implicitly widen it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LatenessPolicy {
+    allowed: AllowedLateness,
+}
+
+impl LatenessPolicy {
+    pub const fn new(allowed: AllowedLateness) -> Self {
+        Self { allowed }
+    }
+
+    /// `OnTime` iff `event_time` is strictly before `bucket_end + allowed`
+    /// — half-open, matching this module's other boundary types (e.g.
+    /// [`TimeBucket::contains`]): the deadline instant itself is `Late`, not
+    /// `OnTime`.
+    pub fn classify(&self, event_time: EventTime, bucket_end: BucketEnd) -> Lateness {
+        let deadline = bucket_end.unix_micros() + self.allowed.micros();
+        if event_time.unix_micros() < deadline {
+            Lateness::OnTime
+        } else {
+            Lateness::Late
+        }
+    }
+}
+
 /// Query truthfulness: approximations and incomplete coverage cannot claim
 /// exactness merely because a scalar was produced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,5 +727,20 @@ mod tests {
         let lateness: AllowedLateness = "0s".parse().unwrap();
         assert_eq!(lateness.micros(), 0);
         assert_eq!(lateness.to_string(), "0s");
+    }
+
+    #[test]
+    fn lateness_policy_classifies_on_the_allowed_lateness_boundary() {
+        let policy = LatenessPolicy::new("10s".parse().unwrap());
+        let bucket_end = BucketEnd::from_unix_micros(0);
+
+        assert_eq!(
+            policy.classify(EventTime::from_unix_micros(10 * MICROS_PER_SECOND - 1), bucket_end),
+            Lateness::OnTime
+        );
+        assert_eq!(
+            policy.classify(EventTime::from_unix_micros(10 * MICROS_PER_SECOND), bucket_end),
+            Lateness::Late
+        );
     }
 }

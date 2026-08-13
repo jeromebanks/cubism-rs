@@ -25,7 +25,13 @@ When picking the next slice, check the milestone list below **before**
 falling back to the ad hoc deferred-list/advisor scan the skill used before
 this doc existed:
 
-1. Find the first milestone below not yet marked done.
+1. Find the first milestone below not yet marked done — each milestone entry
+   carries a `**Status:**` line; `Not started` until a slice closes it, then
+   `Done — <handoff link>` naming the handoff whose "What was actually
+   verified" section confirmed the done-condition. This is the marking
+   convention this doc uses; it didn't exist before Milestone 1 closed and
+   is established here so a later slice has something to read instead of
+   re-deriving "done" from prose.
 2. Confirm its "Depends on" milestones are done. If not, something is wrong —
    stop and reconcile before picking a slice (a later milestone should never
    be reachable before its dependencies).
@@ -59,6 +65,20 @@ re-litigate it:
   `crates/cubism-iceberg/src` or `crates/cubism-core/src` today (confirmed
   via `rtk proxy grep -rn` over both, zero matches). Milestones 1, 3, and 5
   below start from nothing.
+- `cubism-core::temporal` already has an `AllowedLateness` duration type
+  (`crates/cubism-core/src/temporal.rs:377`, `pub allowed_lateness:
+  AllowedLateness` on `TemporalSpec` at line 584) and an `IngestionTime`
+  timestamp type (line 41) whose module doc already states "Ingestion time
+  exists only for watermark/lateness decisions" (lines 4-5) — but as of
+  Milestone 1's start, nothing in the workspace *consumed* `IngestionTime`
+  outside its own definition/export (`rtk proxy grep -rn "IngestionTime"
+  crates/ | grep -v target` returned only the definition and the `lib.rs`
+  re-export). Milestone 1 wraps `AllowedLateness` rather than inventing a
+  new duration type, exactly parallel to Milestone 2's "`ExpectedRevision`
+  is already half-built" note above — and lands in `cubism-core`, not
+  `cubism-iceberg`, because that unclaimed `IngestionTime` purpose statement
+  is evidence the classification concept belongs beside it, in
+  `cubism-core::temporal`, not in the Iceberg persistence crate.
 - Plan lines 636 (two same-window writers produce one winner) and 637
   (disjoint windows commit concurrently) are done —
   `docs/TIMESERIES_PHASE_5_HANDOFF.md` and
@@ -75,24 +95,39 @@ compiles.
 
 ### Milestone 1 — `LatenessPolicy`
 
-- **Target:** new type in `crates/cubism-iceberg/src` (or `cubism-core` if it
-  needs to be shared with non-Iceberg readers — decide at implementation
-  time; not yet decided here).
-- **What it does:** classifies an incoming event's timestamp against a
-  window's already-published state as on-time or late, given a configured
-  allowed-lateness bound (plan line 659's "window duration versus correction
-  blast radius" unresolved decision lives here — this milestone should
-  record a decision, not leave it open indefinitely).
-- **Test:** one unit test asserting an event within the allowed-lateness
-  bound classifies as on-time and one past it classifies as late.
+- **Status:** Done — `docs/TIMESERIES_PHASE_8_HANDOFF.md`.
+- **Target:** landed in `cubism-core`, not `cubism-iceberg`
+  (`crates/cubism-core/src/temporal.rs`, beside `AllowedLateness`) — see
+  "Current state" above for why: `IngestionTime`'s module-doc purpose
+  ("watermark/lateness decisions") was unclaimed by any consumer, which is
+  evidence the concept belongs in core, and it's a pure function with no
+  Iceberg/control-store dependency.
+- **What it does:** `LatenessPolicy::classify(event_time, bucket_end)` is a
+  pure boundary check — `OnTime` iff `event_time` is strictly before
+  `bucket_end + allowed` — that does **not** consult
+  `PublicationStore`/`Publication` or an ingestion-time watermark; it takes
+  the window boundary as a caller-supplied parameter instead. Plan line
+  659's "window duration versus correction blast radius" is resolved:
+  `LatenessPolicy` is constructed from an `AllowedLateness` alone, never a
+  window's `Resolution`, so the lateness bound is independent of window
+  duration by construction (recorded in the type's own doc comment,
+  `temporal.rs`). Two-valued by design — plan line 662 ("too old, reject as
+  backfill") is deliberately left open, not answered by this milestone.
+- **Test:** `lateness_policy_classifies_on_the_allowed_lateness_boundary`
+  (`crates/cubism-core/src/temporal.rs`, `mod tests`) — one event one
+  microsecond before the deadline classifies `OnTime`, the event exactly at
+  the deadline classifies `Late`.
 - **Depends on:** nothing (first milestone).
 - **Done when:** `LatenessPolicy` exists, is unit-tested, and the plan's
   "window duration versus correction blast radius" decision is recorded
   (either in this file or the type's own doc comment — a future slice
-  reading this roadmap should not have to re-derive it).
+  reading this roadmap should not have to re-derive it). **Met** — decision
+  recorded in `temporal.rs`'s doc comment (see "What it does" above), full
+  step-4 battery clean (`docs/TIMESERIES_PHASE_8_HANDOFF.md`).
 
 ### Milestone 2 — Formalize `ExpectedRevision`, test it against a correction shape
 
+- **Status:** Not started.
 - **Target:** `crates/cubism-iceberg/src/control.rs` /
   `durable_control.rs` (the existing `expected_current: Option<WindowRevision>`
   parameter), plus a new test.
@@ -119,6 +154,7 @@ compiles.
 
 ### Milestone 3 — `CorrectionPlan`
 
+- **Status:** Not started.
 - **Target:** new type in `crates/cubism-iceberg/src`, informed by
   `cubism-core`'s existing aggregate state kinds (`AVG`/`VAR`/`QNT` —
   `crates/cubism-core/src/aggregate_state.rs`) to determine which are
@@ -135,6 +171,7 @@ compiles.
 
 ### Milestone 4 — Coordinator/job API + late-event rebuild test
 
+- **Status:** Not started.
 - **Target:** new coordinator module in `crates/cubism-iceberg/src`.
 - **What it does:** identifies affected windows from event time, rebuilds
   them completely using the existing append/publish protocol, and publishes
@@ -149,6 +186,7 @@ compiles.
 
 ### Milestone 5 — `ReconciliationRecord` + failure-injection recoverability
 
+- **Status:** Not started.
 - **Target:** new type in `crates/cubism-iceberg/src`; coordinator from
   Milestone 4 extended to record reconciliation state at each stage.
 - **What it does:** records what a coordinator run did/attempted at each
@@ -165,6 +203,7 @@ compiles.
 
 ### Milestone 6 — Public correction API
 
+- **Status:** Not started.
 - **Target:** public API surface in `crates/cubism-iceberg/src` (library
   level — plan's "Public API changes"; a CLI surface for this is explicitly
   #11's scope, not this milestone's).
