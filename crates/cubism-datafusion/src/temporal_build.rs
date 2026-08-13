@@ -46,8 +46,8 @@ use crate::udf::{cube_udfs, SharedDictionary};
 use cubism_core::encoding::{canonical_xunit_content_id, decode_xunit, encode_canonical_xunit};
 use cubism_core::spec::API_VERSION_V2_ALPHA1;
 use cubism_core::{
-    AggKind, BucketOrigin, CanonicalXUnit, CubeSpec, EventTime, FixedResolution, MeasureSpec,
-    Resolution, TemporalSpec, TimeRange, WindowId,
+    AggKind, BucketOrigin, CanonicalXUnit, Coverage, CubeSpec, Exactness, EventTime,
+    FixedResolution, MeasureSpec, Resolution, TemporalSpec, TimeRange, WindowId,
 };
 use datafusion::arrow::array::{
     Array, ArrayRef, AsArray, BinaryBuilder, FixedSizeBinaryBuilder, TimestampMicrosecondArray,
@@ -59,9 +59,11 @@ use datafusion::arrow::datatypes::{
 use datafusion::common::{plan_err, DataFusionError, Result};
 use datafusion::dataframe::{DataFrame, DataFrameWriteOptions};
 use datafusion::execution::context::SessionContext;
+use datafusion::functions_aggregate::expr_fn::{max, min};
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
+use datafusion::prelude::col;
 use std::sync::Arc;
 
 /// How rows with a null event time are handled. Neither policy is inferred
@@ -625,6 +627,27 @@ pub struct TemporalBuildMetadata {
     /// Rows whose event time was null: 0 under `Reject` (the build fails
     /// instead), the drop count under `Quarantine`.
     pub null_event_time_rows: u64,
+    /// `None` when no `window` was requested — [`Coverage::requested`] needs
+    /// a [`TimeRange`] to assess coverage against, and an unbounded build
+    /// has none. `Some` otherwise, computed by [`compute_coverage`]: a cheap
+    /// `MIN`/`MAX(bucket_start)` scan, *not* a per-bucket occupancy check.
+    /// **`Exactness::Exact` means the observed data reaches both edges of
+    /// the requested window — it is not a claim that every bucket in
+    /// between is populated.** Two events near the edges of a 30-day window
+    /// with nothing in between still report `Exact`; a caller gating
+    /// publication on this needs a separate occupancy check if an
+    /// interior gap matters to it. `covered` is at most one element (the
+    /// `[MIN(bucket_start), MAX(bucket_start) + resolution)` span, clamped
+    /// to `requested`'s own edges since bucket assignment is independent of
+    /// the window and would otherwise claim coverage of time the window
+    /// filter guaranteed has zero rows); this function never reports
+    /// multiple disjoint covered ranges. Deliberately *not* derived from
+    /// `MIN`/`MAX(event_time)` over the filtered source instead, which
+    /// would avoid materializing `states` below — a row can pass the
+    /// window's event-time filter and still contribute zero state rows if
+    /// filter rules prune all of its XUnits, so source-derived bounds would
+    /// overclaim at the edges exactly like the unclamped bucket bounds did.
+    pub coverage: Option<Coverage>,
 }
 
 pub struct TemporalBuildOutput {
@@ -706,6 +729,23 @@ pub async fn build_temporal(
     let states_sql = temporal_build_sql(spec, source, window, null_policy)?;
     let states = ctx.sql(&states_sql).await?;
 
+    // Computing `Coverage` requires knowing the actual observed bucket
+    // range, which means executing `states` here rather than leaving it a
+    // lazy plan the caller executes on their own `.collect()` (the
+    // documented behavior for an unwindowed build, see
+    // `bucket_start_rejects_a_non_timestamp_event_time_column`). `.cache()`
+    // executes once and hands back a `DataFrame` over the materialized
+    // result, so this coverage query and the caller's own `.collect()` on
+    // the returned `states` don't re-run the aggregation twice.
+    let (states, coverage) = match window {
+        Some(window) => {
+            let cached = states.cache().await?;
+            let coverage = compute_coverage(&cached, window, resolution).await?;
+            (cached, Some(coverage))
+        }
+        None => (states, None),
+    };
+
     let exploded_sql = exploded_only_sql(spec, source, window, null_policy)?;
     let registry_sql = format!(
         "SELECT DISTINCT cubism_xunit_content_id(__xunit_key) AS xunit_id, \
@@ -718,8 +758,71 @@ pub async fn build_temporal(
         states,
         registry,
         dictionary: dict,
-        metadata: TemporalBuildMetadata { window, window_id, null_event_time_rows: null_count },
+        metadata: TemporalBuildMetadata { window, window_id, null_event_time_rows: null_count, coverage },
     })
+}
+
+/// `requested`'s coverage, derived from the built states' observed
+/// `MIN`/`MAX(bucket_start)` — see [`TemporalBuildMetadata::coverage`] for
+/// what this does and doesn't detect. `cached` must already be materialized
+/// (via `DataFrame::cache`) so this doesn't re-run the aggregation.
+async fn compute_coverage(
+    cached: &DataFrame,
+    requested: TimeRange,
+    resolution: FixedResolution,
+) -> Result<Coverage> {
+    let bounds = cached.clone().aggregate(
+        vec![],
+        vec![min(col("bucket_start")).alias("min_bucket"), max(col("bucket_start")).alias("max_bucket")],
+    )?;
+    let batches = bounds.collect().await?;
+    let batch = &batches[0];
+    let min_col = batch.column(0).as_primitive::<TimestampMicrosecondType>();
+    let max_col = batch.column(1).as_primitive::<TimestampMicrosecondType>();
+
+    if min_col.is_null(0) {
+        return Ok(Coverage {
+            requested,
+            covered: vec![],
+            exactness: Exactness::Inexact("no source rows observed in the requested window".into()),
+        });
+    }
+
+    // Buckets are assigned from `origin`, independent of `requested`'s
+    // edges — a non-bucket-aligned window's edge bucket extends past the
+    // filter that produced these rows (`window_filter_sql` filters on
+    // *event time*, not bucket bounds). Clamping to `requested` keeps
+    // `covered` from claiming coverage of time the filter guaranteed has
+    // zero rows.
+    let observed_end_micros = max_col.value(0).checked_add(resolution.micros()).ok_or_else(|| {
+        DataFusionError::Execution("covered bucket end overflows i64 microseconds".into())
+    })?;
+    let covered_start_micros = min_col.value(0).max(requested.start().unix_micros());
+    let covered_end_micros = observed_end_micros.min(requested.end().unix_micros());
+    let covered = TimeRange::new(
+        EventTime::from_unix_micros(covered_start_micros),
+        EventTime::from_unix_micros(covered_end_micros),
+    )
+    .map_err(to_df_err)?;
+
+    let exactness = if covered == requested {
+        Exactness::Exact
+    } else {
+        // `covered`'s bounds are already clamped to `requested`, so report
+        // the *unclamped* observed bucket span here — otherwise this
+        // message would just restate `covered`/`requested` and hide the
+        // actual reason for the gap (data short of an edge vs. a bucket
+        // that overhangs one).
+        Exactness::Inexact(format!(
+            "observed buckets span [{}, {}) unix-micros; requested window is [{}, {})",
+            min_col.value(0),
+            observed_end_micros,
+            requested.start().unix_micros(),
+            requested.end().unix_micros(),
+        ))
+    };
+
+    Ok(Coverage { requested, covered: vec![covered], exactness })
 }
 
 /// Write a build's two tables to local Parquet fixtures (no Iceberg
@@ -1070,6 +1173,126 @@ includeGlobal: true
         }
 
         assert_eq!(run(&spec).await, run(&spec).await);
+    }
+
+    // -- coverage -------------------------------------------------------------
+
+    #[tokio::test]
+    async fn coverage_is_none_without_a_window() {
+        let spec = CubeSpec::from_yaml(E2E_TEMPORAL_SPEC).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_batch("events", e2e_batch()).unwrap();
+        let output =
+            build_temporal(&ctx, &spec, "events", None, None, NullEventTimePolicy::Reject).await.unwrap();
+        assert!(output.metadata.coverage.is_none());
+    }
+
+    #[tokio::test]
+    async fn coverage_is_exact_when_the_observed_bucket_span_equals_the_requested_window() {
+        let spec = CubeSpec::from_yaml(E2E_TEMPORAL_SPEC).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_batch("events", e2e_batch()).unwrap();
+        // Fixture events span [0, HOUR_US + 500), i.e. buckets [0, HOUR_US)
+        // and [HOUR_US, 2*HOUR_US) — request exactly that span.
+        let window =
+            TimeRange::new(EventTime::from_unix_micros(0), EventTime::from_unix_micros(2 * HOUR_US))
+                .unwrap();
+        let output = build_temporal(&ctx, &spec, "events", Some(window), None, NullEventTimePolicy::Reject)
+            .await
+            .unwrap();
+        let coverage = output.metadata.coverage.unwrap();
+        assert_eq!(coverage.requested, window);
+        assert_eq!(coverage.covered, vec![window]);
+        assert_eq!(coverage.exactness, Exactness::Exact);
+    }
+
+    #[tokio::test]
+    async fn coverage_is_inexact_when_observed_data_does_not_reach_the_requested_edges() {
+        let spec = CubeSpec::from_yaml(E2E_TEMPORAL_SPEC).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_batch("events", e2e_batch()).unwrap();
+        // Request a window wider than the fixture's actual event span.
+        let window = TimeRange::new(
+            EventTime::from_unix_micros(-HOUR_US),
+            EventTime::from_unix_micros(3 * HOUR_US),
+        )
+        .unwrap();
+        let output = build_temporal(&ctx, &spec, "events", Some(window), None, NullEventTimePolicy::Reject)
+            .await
+            .unwrap();
+        let coverage = output.metadata.coverage.unwrap();
+        assert_eq!(coverage.requested, window);
+        let expected_covered =
+            TimeRange::new(EventTime::from_unix_micros(0), EventTime::from_unix_micros(2 * HOUR_US))
+                .unwrap();
+        assert_eq!(coverage.covered, vec![expected_covered]);
+        assert!(matches!(coverage.exactness, Exactness::Inexact(_)));
+    }
+
+    #[tokio::test]
+    async fn coverage_clamps_the_observed_bucket_span_to_a_non_aligned_window() {
+        // Bucket assignment is independent of the requested window's edges
+        // (`window_filter_sql` filters on event time, not bucket bounds), so
+        // a window whose edges fall inside a bucket rather than on its
+        // boundary must not report coverage of time the filter guaranteed
+        // has zero rows.
+        let spec = CubeSpec::from_yaml(E2E_TEMPORAL_SPEC).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_batch("events", e2e_batch()).unwrap();
+        // [30min, 90min): only the two ~1h events pass the filter, both in
+        // bucket [1h, 2h) — whose natural bucket end (2h) is past the
+        // window's end (90min).
+        let window = TimeRange::new(
+            EventTime::from_unix_micros(HOUR_US / 2),
+            EventTime::from_unix_micros(3 * HOUR_US / 2),
+        )
+        .unwrap();
+        let output = build_temporal(&ctx, &spec, "events", Some(window), None, NullEventTimePolicy::Reject)
+            .await
+            .unwrap();
+        let coverage = output.metadata.coverage.unwrap();
+        let covered = coverage.covered[0];
+        assert_eq!(covered.end(), window.end(), "must not overclaim past the requested window's end");
+    }
+
+    #[tokio::test]
+    async fn coverage_is_exact_for_a_non_bucket_aligned_window_fully_spanned_by_data() {
+        let spec = CubeSpec::from_yaml(E2E_TEMPORAL_SPEC).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_batch("events", e2e_batch()).unwrap();
+        // [1h+100us, 2h): only the event at 1h+500us passes the filter, in
+        // bucket [1h, 2h) — whose natural bucket start (1h) is before the
+        // window's start. Clamping should still report `Exact` since the
+        // filtered rows fully span the (narrower) requested window.
+        let window = TimeRange::new(
+            EventTime::from_unix_micros(HOUR_US + 100),
+            EventTime::from_unix_micros(2 * HOUR_US),
+        )
+        .unwrap();
+        let output = build_temporal(&ctx, &spec, "events", Some(window), None, NullEventTimePolicy::Reject)
+            .await
+            .unwrap();
+        let coverage = output.metadata.coverage.unwrap();
+        assert_eq!(coverage.covered, vec![window]);
+        assert_eq!(coverage.exactness, Exactness::Exact);
+    }
+
+    #[tokio::test]
+    async fn coverage_reports_no_rows_observed_when_the_window_matches_no_source_rows() {
+        let spec = CubeSpec::from_yaml(E2E_TEMPORAL_SPEC).unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_batch("events", e2e_batch()).unwrap();
+        let window = TimeRange::new(
+            EventTime::from_unix_micros(10 * HOUR_US),
+            EventTime::from_unix_micros(11 * HOUR_US),
+        )
+        .unwrap();
+        let output = build_temporal(&ctx, &spec, "events", Some(window), None, NullEventTimePolicy::Reject)
+            .await
+            .unwrap();
+        let coverage = output.metadata.coverage.unwrap();
+        assert_eq!(coverage.covered, vec![]);
+        assert!(matches!(coverage.exactness, Exactness::Inexact(_)));
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ name = "cubism"
 path = "src/main.rs"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 cubism-core = { path = "../cubism-core" }
 cubism-datafusion = { path = "../cubism-datafusion" }
 cubism-serve = { path = "../cubism-serve" }

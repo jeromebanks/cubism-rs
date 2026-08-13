@@ -87,22 +87,34 @@ Two new modules in `cubism-datafusion`, per the plan
   unvalidated into `TemporalBuildMetadata` — it exists for Phase 3's
   idempotency/publication tracking, per the plan's "temporal build entry
   point taking a TimeRange/WindowId." Nothing in Phase 2 interprets it yet.
-- **No `Coverage` in the metadata yet.** The plan's "build metadata and
-  source coverage" bullet is only half done: `TemporalBuildMetadata` has
-  `window`/`window_id`/`null_event_time_rows` but not a `Coverage`
-  (requested vs. actually-observed event-time range, per
-  `cubism_core::temporal::Coverage`). Computing it correctly requires
-  materializing the states `DataFrame` once (via `.cache()`) so a coverage
-  query and the caller's own `.collect()` don't re-run the whole
-  aggregation twice — deliberately left out this session rather than risk
-  a subtle double-execution bug under time pressure. Straightforward to add
-  next: cache `states`, derive `covered` from `MIN(bucket_start)`/
-  `MAX(bucket_start) + resolution`, compare against `window`.
-- **UDF/UDAF errors surface at `.collect()`, not at `build_temporal()`.**
-  `ctx.sql()` only builds and analyzes the logical plan; a `ScalarUDFImpl`'s
-  `invoke_with_args` (where `cubism_bucket_start`'s TIMESTAMP-type check
-  lives) only runs during physical execution. `build_temporal` can return
-  `Ok` for a spec whose `eventTime` expression turns out to be non-timestamp
+- **`TemporalBuildMetadata.coverage: Option<Coverage>`, added in a
+  follow-up session.** `None` when no `window` was requested (`Coverage::
+  requested` needs a `TimeRange`; an unbounded build has none). `Some`
+  otherwise, computed by `compute_coverage`: a `MIN`/`MAX(bucket_start)`
+  scan over the (now-cached) states, not a per-bucket occupancy check — it
+  can only see a gap at the requested window's edges, not a hole in the
+  middle of an otherwise fully-covered window, and `covered` is always at
+  most one range. Bucket assignment is independent of the window's edges
+  (`window_filter_sql` filters on event time, not bucket bounds), so a
+  non-bucket-aligned window's edge bucket can extend past what the row
+  filter actually produced; `covered` is clamped to `requested`'s own edges
+  before comparison, or it would claim coverage of time guaranteed to have
+  zero rows. `Exactness::Exact` requires `covered == requested` after
+  clamping — reachable even for a non-bucket-aligned window, as long as
+  observed rows fully span it (see `coverage_is_exact_for_a_non_bucket_
+  aligned_window_fully_spanned_by_data`). Computing this requires knowing
+  the actual observed bucket range, so **windowed builds now execute
+  eagerly inside `build_temporal` (via `.cache()`)** — the previously
+  lazy-until-`.collect()` behavior (see the next bullet) now only holds for
+  *unwindowed* builds; `bucket_start_rejects_a_non_timestamp_event_time_
+  column` deliberately uses `window: None` to keep pinning that case.
+- **UDF/UDAF errors surface at `.collect()`, not at `build_temporal()` —
+  for unwindowed builds only** (windowed builds compute `Coverage` eagerly,
+  see above). `ctx.sql()` only builds and analyzes the logical plan; a
+  `ScalarUDFImpl`'s `invoke_with_args` (where `cubism_bucket_start`'s
+  TIMESTAMP-type check lives) only runs during physical execution.
+  `build_temporal` can return `Ok` for a spec whose `eventTime` expression
+  turns out to be non-timestamp
   at runtime — the error appears the first time a caller collects
   `output.states`. Caught by this session's own
   `bucket_start_rejects_a_non_timestamp_event_time_column` test, which
@@ -244,13 +256,41 @@ silently worked around.
 
 ## Deferred / not done this session
 
-1. **CLI wiring.** `explain_temporal_build`/`build_temporal`/
-   `write_temporal_fixtures` are not exposed via `cubism-cli` (`main.rs`
-   still only has `validate`/`run`/`serve`). Straightforward to add
-   (`cubism temporal-build <spec.yaml> --input ... [--window-start]
-   [--window-end] [--explain]`) following the existing `run` command's
-   pattern.
-2. **`Coverage` in build metadata** — see "Design decisions" above.
+1. ~~**CLI wiring.**~~ Done in a follow-up session: `cubism-cli` gained a
+   `temporal-build` subcommand (`crates/cubism-cli/src/main.rs`) wrapping
+   `build_temporal`/`explain_temporal_build`/`write_temporal_fixtures`:
+   `cubism temporal-build <spec.yaml> --input <events.parquet|csv>
+   [--window-start <RFC3339>] [--window-end <RFC3339>]
+   [--states-output <path> --registry-output <path>]
+   [--null-policy reject|quarantine] [--explain]`. Flag names differ from
+   this doc's original guess (`--states-output`/`--registry-output`/
+   `--null-policy` instead of unnamed output args). `--explain` runs
+   `explain_temporal_build` and prints the dry-run counts; otherwise both
+   output paths are required (mirroring `write_temporal_fixtures`'s
+   two-path signature) and the command writes real fixtures. Window bounds
+   are parsed via `chrono::DateTime::parse_from_rfc3339` (new `cubism-cli`
+   dependency) into `EventTime`/`TimeRange`; both flags are required
+   together or not at all. Manually verified: `--explain` counts against a
+   4-row/2-bucket fixture (both Parquet and CSV input — CSV's RFC3339
+   timestamps are inferred as a real timestamp type by DataFusion, no
+   dedicated handling needed), a narrowed `--window-start`/`--window-end`
+   actually excludes rows (2/1/3 vs. the unwindowed 4/2/5 — proves the flags
+   reach `window_filter_sql`, not just parse), single-file fixture writes,
+   and the missing-output/mismatched-window/bad-`--null-policy` error
+   paths. `cargo test --workspace --exclude cubism-py` (130 passed, 1
+   ignored) and `cargo clippy -p cubism-cli --all-targets --no-deps -- -D
+   warnings` both clean.
+2. ~~**`Coverage` in build metadata**~~ Done in the same follow-up session
+   as item 1 — see "Design decisions" above for `compute_coverage`'s
+   semantics (MIN/MAX-only, clamped to the requested window, no interior-gap
+   detection) and the eager-execution behavior change for windowed builds.
+   Six new tests cover: no window (`coverage` is `None`), an exact
+   bucket-aligned fit, a window wider than the data (`Inexact`, `covered`
+   narrower than requested), a non-aligned window whose edge bucket is
+   clamped so it doesn't overclaim past `requested`, `Exact` reachability
+   for a non-aligned window fully spanned by data, and zero observed rows.
+   `cargo test -p cubism-datafusion --lib` (30 passed) and `cargo clippy -p
+   cubism-datafusion --all-targets --no-deps -- -D warnings` both clean.
 3. **Performance tests** (generated XUnits/s and peak memory at increasing
    cardinality; spill behavior under a configured memory limit; state-size
    amplification by measure) — the plan's Phase 2 "Performance" test
@@ -258,6 +298,16 @@ silently worked around.
    (see above) means a naive benchmark would currently measure the fallback
    adapter's cost, not the state UDAFs' intrinsic cost — worth resolving
    the accumulator-strategy decision first, or explicitly measuring both.
+   Also unmeasured: `compute_coverage`'s `.cache()` on a windowed build
+   materializes the full states `DataFrame` into an in-memory `MemTable` —
+   unlike the module's own `SELECT DISTINCT` XUnit registry, which the
+   header comment specifically justifies as "spillable, bounded-by-
+   configuration," this path has neither property. A windowed build at
+   Phase 0B's 25M-row scale now holds the whole state table in RAM; an
+   unwindowed build is unaffected (still lazy, no `.cache()`). Chosen
+   deliberately to avoid double-executing the aggregation for the coverage
+   query (see the `coverage` field's doc comment) — worth a real measurement
+   before Phase 3 windowed builds run at that scale.
 4. **Calendar buckets, dense occupancy at temporal scale, and axis-2/3
    distributed builds** remain entirely out of scope, unchanged from
    Phase 0B/1's own deferrals.
