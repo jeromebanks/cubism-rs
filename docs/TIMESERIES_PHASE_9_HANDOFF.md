@@ -165,7 +165,7 @@ Also present, deliberately uncommitted per prior-session convention:
 `cargo test -p cubism-iceberg` reports 22 passed (5 suites): 8 unit
 (`--lib`) + 6 Phase-3 integration (`--test phase3`) + 4 durability
 integration (`--test durability`, +1 this session, was 3) + 4 concurrency
-integration (`--test durability`, unchanged), each isolated and confirmed
+integration (`--test concurrency`, unchanged), each isolated and confirmed
 directly rather than derived by subtraction alone. `cargo test --workspace
 --exclude cubism-py` reports 159 passed, 1 ignored (21 suites) — a +1 from
 Phase 8's 158, matching this session's one new test; `cubism-core`'s 92

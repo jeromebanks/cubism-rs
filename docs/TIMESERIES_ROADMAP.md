@@ -135,9 +135,10 @@ compiles.
 ### Milestone 2 — Formalize `ExpectedRevision`, test it against a correction shape
 
 - **Status:** Done — `docs/TIMESERIES_PHASE_9_HANDOFF.md`.
-- **Target:** `crates/cubism-iceberg/src/durable_control.rs` (the existing
-  `expected_current: Option<WindowRevision>` parameter on
-  `PublicationStore::Sqlite::publish`), plus a new test in
+- **Target:** the existing `expected_current: Option<WindowRevision>`
+  parameter on `PublicationStore::Sqlite::publish`
+  (`crates/cubism-iceberg/src/durable_control.rs:260-339`) — confirmed
+  sufficient as-is, no source change needed — plus a new test in
   `tests/durability.rs`.
 - **What it does:** resolves plan line 660's unresolved decision ("lease
   service versus optimistic expected-revision only") explicitly in favor of

@@ -225,48 +225,56 @@ async fn sqlite_publication_store_cas_survives_reopen_from_a_fresh_handle() {
 /// `stale_publish_cannot_replace_a_newer_revision` exercises a real
 /// superseded revision but only against the in-memory backend. This test is
 /// the intersection: durable backend, genuinely-superseded `expected`, plus
-/// the refresh-and-retry step neither prior test performs. It does not
-/// exercise `LatenessPolicy` or any coordinator/correction-plan machinery —
-/// those don't exist yet (Milestones 3-4) — it only proves the CAS
-/// primitive those milestones will build on already handles this shape.
+/// the refresh-and-retry step neither prior test performs. Like every other
+/// test in this file, the correction's stale belief is carried across a
+/// dropped-and-reopened handle, not just held in one live store's memory —
+/// the shape a coordinator resuming after a restart would actually hit. It
+/// does not exercise `LatenessPolicy` or any coordinator/correction-plan
+/// machinery — those don't exist yet (Milestones 3-4) — it only proves the
+/// CAS primitive those milestones will build on already handles this shape.
 #[tokio::test]
 async fn sqlite_correction_against_a_superseded_revision_is_rejected_then_succeeds_on_retry() {
     let control_dir = TempDir::new().unwrap();
     let control_db = control_dir.path().join("control.sqlite");
     let window_id = WindowId::new("2026-08-12").unwrap();
 
-    let store = PublicationStore::sqlite(&control_db).await.unwrap();
+    {
+        // run-1 publishes first, uncontested: the correction's original
+        // belief. run-2 supersedes it before the correction (run-3) gets to
+        // publish — e.g. a concurrent normal writer closing the same window
+        // again. Both happen on a handle that is then dropped, so run-3
+        // below cannot see either through anything but the database.
+        let store = PublicationStore::sqlite(&control_db).await.unwrap();
+        store.claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1).await.unwrap();
+        store.record_append("run-1", 101).await.unwrap();
+        store.publish("run-1", None).await.unwrap();
 
-    // run-1 publishes first, uncontested: the correction's original belief.
-    store.claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1).await.unwrap();
-    store.record_append("run-1", 101).await.unwrap();
-    store.publish("run-1", None).await.unwrap();
+        store.claim_run(CUBE_ID, &window_id, "run-2", WindowRevision::new(2).unwrap(), 1).await.unwrap();
+        store.record_append("run-2", 102).await.unwrap();
+        store.publish("run-2", Some(WindowRevision::new(1).unwrap())).await.unwrap();
+    }
 
-    // run-2 supersedes it before the correction (run-3) gets to publish —
-    // e.g. a concurrent normal writer closing the same window again.
-    store.claim_run(CUBE_ID, &window_id, "run-2", WindowRevision::new(2).unwrap(), 1).await.unwrap();
-    store.record_append("run-2", 102).await.unwrap();
-    store.publish("run-2", Some(WindowRevision::new(1).unwrap())).await.unwrap();
-
-    // run-3 is the correction: it was computed against revision 1, which was
-    // genuinely current when it started — not a guessed-wrong value like the
-    // reopen test above uses.
-    store.claim_run(CUBE_ID, &window_id, "run-3", WindowRevision::new(3).unwrap(), 1).await.unwrap();
-    store.record_append("run-3", 103).await.unwrap();
-    let stale = store.publish("run-3", Some(WindowRevision::new(1).unwrap())).await;
+    // run-3 is the correction, on a freshly-opened handle: it was computed
+    // against revision 1, which was genuinely current when it started — not
+    // a guessed-wrong value like the reopen test above uses, and not a
+    // belief carried over in this process's memory from the block above.
+    let store_b = PublicationStore::sqlite(&control_db).await.unwrap();
+    store_b.claim_run(CUBE_ID, &window_id, "run-3", WindowRevision::new(3).unwrap(), 1).await.unwrap();
+    store_b.record_append("run-3", 103).await.unwrap();
+    let stale = store_b.publish("run-3", Some(WindowRevision::new(1).unwrap())).await;
     assert!(matches!(stale, Err(CubismIcebergError::StaleRevision { expected: Some(1), actual: Some(2), .. })));
     // The rejected correction must not have moved `current`.
-    assert_eq!(store.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+    assert_eq!(store_b.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
 
     // Refresh-and-retry: the correction re-reads `current`, retries with the
     // refreshed expected revision, and succeeds — the protocol Milestone 4's
     // coordinator will need for a real correction run.
-    let refreshed = store.current(CUBE_ID, &window_id).await.unwrap();
-    store.publish("run-3", refreshed).await.unwrap();
-    assert_eq!(store.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(3).unwrap()));
-
-    // A fresh handle sees the corrected revision too, not just this
-    // process's in-memory belief about its own retry.
-    let store_b = PublicationStore::sqlite(&control_db).await.unwrap();
+    let refreshed = store_b.current(CUBE_ID, &window_id).await.unwrap();
+    store_b.publish("run-3", refreshed).await.unwrap();
     assert_eq!(store_b.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(3).unwrap()));
+
+    // A third, freshly-opened handle sees the corrected revision too, not
+    // just handle B's in-memory belief about its own retry.
+    let store_c = PublicationStore::sqlite(&control_db).await.unwrap();
+    assert_eq!(store_c.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(3).unwrap()));
 }
