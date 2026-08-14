@@ -1,0 +1,306 @@
+//! `CorrectionCoordinator` integration tests (`docs/TIMESERIES_ROADMAP.md`
+//! Milestone 4, narrowed — see `crates/cubism-iceberg/src/coordinator.rs`'s
+//! module doc comment for what "narrowed" means and why).
+//!
+//! This crate never links an aggregation engine (`src/lib.rs`), so there is
+//! no way to hand-write a "clean rebuild from the corrected source" and
+//! independently compute an equal answer — any such comparison here would
+//! be tautological (identical hand-built bytes compared to themselves).
+//! What *is* testable at this layer, and what the test below proves
+//! instead, is **revision isolation**: running a correction through
+//! `CorrectionCoordinator` and reading back the published result must be
+//! indistinguishable from a from-scratch single-revision publish of the
+//! same corrected content — no residue from the superseded revision leaks
+//! into what the reader returns. This does **not** prove that the
+//! corrected content is itself a correct recomputation from source events;
+//! that property belongs to whichever future crate links an aggregation
+//! engine and can build both sides independently.
+
+use std::sync::Arc;
+
+use arrow_array::FixedSizeBinaryArray;
+use arrow_array::{Float64Array, Int64Array, RecordBatch, TimestampMicrosecondArray};
+use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+use chrono::DateTime;
+use cubism_core::AggKind;
+use cubism_core::temporal::{WindowId, WindowRevision};
+use cubism_iceberg::{
+    AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, CorrectionCoordinator,
+    CorrectionRequest, CubismIcebergError, PublicationStore, TemporalTable,
+};
+use iceberg::Catalog;
+use tempfile::TempDir;
+
+const CUBE_ID: &str = "web_analytics";
+
+fn micros(timestamp: &str) -> i64 {
+    DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp_micros()
+}
+
+fn xunit_id(tag: u8) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[0] = tag;
+    bytes
+}
+
+/// Mirrors `tests/phase3.rs`'s schema helper — kept file-local rather than
+/// shared, matching that file's own precedent (it does the same relative to
+/// `cubism_datafusion`, see its top-of-file doc comment).
+fn sample_states_schema() -> ArrowSchema {
+    ArrowSchema::new(vec![
+        Field::new(
+            "bucket_start",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
+            true,
+        ),
+        Field::new("xunit_id", DataType::FixedSizeBinary(32), true),
+        Field::new("count_v1", DataType::Int64, false),
+        Field::new("sum_v1", DataType::Float64, true),
+    ])
+}
+
+fn states_batch(rows: &[(&str, [u8; 32], i64, f64)]) -> RecordBatch {
+    let bucket_start = TimestampMicrosecondArray::from_iter_values(rows.iter().map(|(t, _, _, _)| micros(t)))
+        .with_timezone("+00:00");
+    let xunit_id = FixedSizeBinaryArray::try_from_iter(rows.iter().map(|(_, x, _, _)| *x)).unwrap();
+    let count = Int64Array::from_iter_values(rows.iter().map(|(_, _, c, _)| *c));
+    let sum = Float64Array::from_iter_values(rows.iter().map(|(_, _, _, s)| *s));
+    RecordBatch::try_new(
+        Arc::new(sample_states_schema()),
+        vec![Arc::new(bucket_start), Arc::new(xunit_id), Arc::new(count), Arc::new(sum)],
+    )
+    .unwrap()
+}
+
+fn registry_batch(rows: &[([u8; 32], &[u8])]) -> RecordBatch {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("xunit_id", DataType::FixedSizeBinary(32), false),
+        Field::new("xunit_canonical", DataType::Binary, false),
+    ]));
+    let xunit_id = FixedSizeBinaryArray::try_from_iter(rows.iter().map(|(x, _)| *x)).unwrap();
+    let canonical = arrow_array::BinaryArray::from_iter_values(rows.iter().map(|(_, c)| *c));
+    RecordBatch::try_new(schema, vec![Arc::new(xunit_id), Arc::new(canonical)]).unwrap()
+}
+
+fn total_rows(batches: &[RecordBatch]) -> usize {
+    batches.iter().map(RecordBatch::num_rows).sum()
+}
+
+/// Extracts `(bucket_start_micros, xunit_id, count_v1, sum_v1)` tuples from
+/// a set of read-back batches, sorted, so two independently-produced
+/// batch sets can be compared by domain content while ignoring physical
+/// batch boundaries and the writer's injected `window_id`/`revision`/
+/// `run_id` identity columns (which legitimately differ between the two
+/// paths this test compares).
+fn domain_rows(batches: &[RecordBatch]) -> Vec<(i64, [u8; 32], i64, f64)> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        let bucket_start = batch
+            .column_by_name("bucket_start")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        let xunit_id = batch
+            .column_by_name("xunit_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap();
+        let count = batch
+            .column_by_name("count_v1")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let sum = batch
+            .column_by_name("sum_v1")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            let mut id = [0u8; 32];
+            id.copy_from_slice(xunit_id.value(i));
+            rows.push((bucket_start.value(i), id, count.value(i), sum.value(i)));
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    rows
+}
+
+struct Fixture {
+    _warehouse: TempDir,
+    catalog: Arc<dyn Catalog>,
+    temporal_table: TemporalTable,
+    publications: PublicationStore,
+}
+
+impl Fixture {
+    async fn new() -> Self {
+        let warehouse = TempDir::new().unwrap();
+        let config = CatalogConfig::Memory { warehouse: warehouse.path().to_path_buf() };
+        let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+        let temporal_table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
+            .await
+            .unwrap();
+        Self { _warehouse: warehouse, catalog, temporal_table, publications: PublicationStore::in_memory() }
+    }
+
+    /// Publish `states`/`registry` as a from-scratch first revision — the
+    /// raw claim/append/publish protocol, bypassing the coordinator. Every
+    /// window's initial build goes through this path, never
+    /// `CorrectionCoordinator` (see that module's doc comment on why
+    /// `observed_current` is a required `WindowRevision`, not `Option`).
+    async fn publish_initial(&self, window_id: &WindowId, states: &[RecordBatch], registry: &[RecordBatch]) {
+        let expected_rows: u64 = states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+        let revision = WindowRevision::new(1).unwrap();
+        let claim = self
+            .publications
+            .claim_run(CUBE_ID, window_id, "run-initial", revision, expected_rows)
+            .await
+            .unwrap();
+        assert!(matches!(claim, ClaimResult::New(_)));
+        let result = AggregateWriter::append_window(
+            self.catalog.as_ref(),
+            &self.temporal_table,
+            AppendWindow { window_id, revision, run_id: "run-initial", states, registry },
+        )
+        .await
+        .unwrap();
+        self.publications.record_append("run-initial", result.snapshot_id).await.unwrap();
+        self.publications.publish("run-initial", None).await.unwrap();
+    }
+
+    async fn read(&self, window_id: &WindowId) -> cubism_iceberg::error::Result<Vec<RecordBatch>> {
+        AggregateReader::read_window(self.catalog.as_ref(), &self.temporal_table, &self.publications, window_id).await
+    }
+}
+
+#[tokio::test]
+async fn coordinator_correction_is_revision_isolated_from_a_from_scratch_publish() {
+    let window_id = WindowId::new("2026-08-12").unwrap();
+
+    let corrected_states = vec![states_batch(&[
+        ("2026-08-12T00:10:00Z", xunit_id(1), 3, 9.0),
+        ("2026-08-12T00:20:00Z", xunit_id(2), 5, 11.0),
+    ])];
+    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"US/mobile"), (xunit_id(2), b"EU/desktop")])];
+
+    // Path A: publish a partial (pre-correction) revision, then run
+    // `CorrectionCoordinator` to replace it with the full corrected data.
+    let fixture_a = Fixture::new().await;
+    let partial_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 3, 9.0)])];
+    let partial_registry = vec![registry_batch(&[(xunit_id(1), b"US/mobile")])];
+    fixture_a.publish_initial(&window_id, &partial_states, &partial_registry).await;
+
+    let request = CorrectionRequest {
+        window_id: &window_id,
+        revision: WindowRevision::new(2).unwrap(),
+        run_id: "run-correction",
+        observed_current: WindowRevision::new(1).unwrap(),
+        kinds: &[AggKind::Sum, AggKind::Count],
+        states: &corrected_states,
+        registry: &corrected_registry,
+    };
+    let publication = CorrectionCoordinator::execute(
+        fixture_a.catalog.as_ref(),
+        &fixture_a.temporal_table,
+        &fixture_a.publications,
+        request,
+    )
+    .await
+    .unwrap();
+    assert_eq!(publication.revision, WindowRevision::new(2).unwrap());
+
+    let corrected_read = fixture_a.read(&window_id).await.unwrap();
+    assert_eq!(
+        total_rows(&corrected_read),
+        2,
+        "only the corrected revision's two rows should be visible, not the superseded partial revision's row too"
+    );
+
+    // Path B: a fresh fixture publishes the exact same corrected content
+    // once, from scratch, as revision 1 — no correction involved.
+    let fixture_b = Fixture::new().await;
+    fixture_b.publish_initial(&window_id, &corrected_states, &corrected_registry).await;
+    let clean_read = fixture_b.read(&window_id).await.unwrap();
+
+    assert_eq!(
+        domain_rows(&corrected_read),
+        domain_rows(&clean_read),
+        "a correction's published read must be indistinguishable from a from-scratch publish of the same content"
+    );
+}
+
+#[tokio::test]
+async fn coordinator_rejects_a_correction_planned_against_a_superseded_revision_and_does_not_move_current() {
+    let window_id = WindowId::new("2026-08-12").unwrap();
+    let fixture = Fixture::new().await;
+
+    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
+
+    // A second writer publishes revision 2 directly (not via the
+    // coordinator) before the correction below gets a chance to run —
+    // simulating a concurrent build that moved `current` out from under a
+    // correction that was planned against revision 1.
+    let states_v2 = vec![states_batch(&[("2026-08-12T00:15:00Z", xunit_id(2), 2, 2.0)])];
+    let registry_v2 = vec![registry_batch(&[(xunit_id(2), b"b")])];
+    let claim = fixture
+        .publications
+        .claim_run(CUBE_ID, &window_id, "run-concurrent", WindowRevision::new(2).unwrap(), 1)
+        .await
+        .unwrap();
+    assert!(matches!(claim, ClaimResult::New(_)));
+    let result = AggregateWriter::append_window(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        AppendWindow {
+            window_id: &window_id,
+            revision: WindowRevision::new(2).unwrap(),
+            run_id: "run-concurrent",
+            states: &states_v2,
+            registry: &registry_v2,
+        },
+    )
+    .await
+    .unwrap();
+    fixture.publications.record_append("run-concurrent", result.snapshot_id).await.unwrap();
+    fixture.publications.publish("run-concurrent", Some(WindowRevision::new(1).unwrap())).await.unwrap();
+
+    // The correction below still observed revision 1 as current (planned
+    // before the concurrent write above landed) — the coordinator must
+    // surface the CAS rejection as-is and must not retry it internally
+    // (see `coordinator.rs`'s module doc comment).
+    let corrected_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 9, 9.0)])];
+    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    let request = CorrectionRequest {
+        window_id: &window_id,
+        revision: WindowRevision::new(3).unwrap(),
+        run_id: "run-correction",
+        observed_current: WindowRevision::new(1).unwrap(),
+        kinds: &[AggKind::Sum],
+        states: &corrected_states,
+        registry: &corrected_registry,
+    };
+    let error = CorrectionCoordinator::execute(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        &fixture.publications,
+        request,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CubismIcebergError::StaleRevision { expected: Some(1), actual: Some(2), .. }
+    ));
+
+    assert_eq!(
+        fixture.publications.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(2).unwrap()),
+        "a rejected correction must not move `current`"
+    );
+}

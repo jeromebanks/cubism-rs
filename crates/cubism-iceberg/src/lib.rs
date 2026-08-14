@@ -12,6 +12,7 @@
 
 pub mod config;
 pub mod control;
+pub mod coordinator;
 pub mod correction;
 mod durable_control;
 pub mod error;
@@ -22,6 +23,7 @@ pub mod writer;
 
 pub use config::CatalogConfig;
 pub use control::{ClaimResult, Publication, PublicationStore, RunState};
+pub use coordinator::{CorrectionCoordinator, CorrectionRequest};
 pub use correction::{CorrectionPlan, CorrectionStrategy};
 pub use error::CubismIcebergError;
 pub use reader::AggregateReader;

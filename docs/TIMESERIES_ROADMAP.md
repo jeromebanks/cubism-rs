@@ -221,18 +221,47 @@ compiles.
 
 ### Milestone 4 — Coordinator/job API + late-event rebuild test
 
-- **Status:** Not started.
-- **Target:** new coordinator module in `crates/cubism-iceberg/src`.
-- **What it does:** identifies affected windows from event time, rebuilds
-  them completely using the existing append/publish protocol, and publishes
-  a new revision via the CAS mechanism formalized in Milestone 2.
-- **Test:** plan line 634 — a late-event rebuild produces a state
-  byte-identical (or answer-identical, per whatever equality the aggregate
-  state supports) to a clean rebuild from the corrected source.
+- **Status:** Done (narrowed) — `docs/TIMESERIES_PHASE_11_HANDOFF.md`.
+- **Target:** new coordinator module in `crates/cubism-iceberg/src`
+  (`coordinator.rs`).
+- **What it does:** narrowed from the original wording below — see
+  `crates/cubism-iceberg/src/coordinator.rs`'s module doc comment for the
+  full reasoning. `CorrectionCoordinator::execute` takes a
+  **caller-identified** window plus already-rebuilt corrected
+  states/registry batches (not raw source events), consults
+  `CorrectionPlan::select` (hard-erroring on `AdditiveShortcut`, which no
+  current `AggKind` reaches — matching Milestone 3), appends under the
+  requested revision, and publishes via the CAS mechanism formalized in
+  Milestone 2 against a required `observed_current: WindowRevision` (not
+  `Option`, since a correction only makes sense against an
+  already-published window). It does **not** identify which windows a
+  correction touches from event time — that needs an aggregation engine
+  this crate deliberately does not link (`src/lib.rs`), and is tracked
+  separately as #16, not assigned to a milestone in this roadmap.
+  ~~identifies affected windows from event time, rebuilds them completely
+  using the existing append/publish protocol, and publishes a new revision
+  via the CAS mechanism formalized in Milestone 2~~ (original wording,
+  struck through per this correction).
+- **Test:** narrowed from plan line 634's literal wording — see #16 for why
+  "equals a clean rebuild from the corrected source" isn't provable inside
+  this crate. `coordinator_correction_is_revision_isolated_from_a_from_scratch_publish`
+  proves **revision isolation** instead: a correction's published read is
+  indistinguishable from a from-scratch publish of the same content, with no
+  residue from the superseded revision.
+  `coordinator_rejects_a_correction_planned_against_a_superseded_revision_and_does_not_move_current`
+  proves the coordinator surfaces `StaleRevision` as-is with no internal
+  retry (plan's "losing writers do not republish automatically without
+  rereading source and current state") and does not move `current` on
+  rejection.
 - **Depends on:** Milestone 2 (publishes via expected-revision CAS),
   Milestone 3 (needs a `CorrectionPlan` to execute).
 - **Done when:** the coordinator can run a correction end-to-end for at
-  least one aggregate kind and the rebuild-equality test passes.
+  least one aggregate kind and the rebuild-equality test passes. **Met, for
+  the narrowed scope** — decision and full reasoning recorded in
+  `coordinator.rs`'s module doc comment, full step-4 battery clean
+  (`docs/TIMESERIES_PHASE_11_HANDOFF.md`). The literal "identifies affected
+  windows from event time" and "equals a clean rebuild from the corrected
+  source" halves are deferred to #16, not met by this milestone.
 
 ### Milestone 5 — `ReconciliationRecord` + failure-injection recoverability
 
@@ -289,6 +318,15 @@ Distinct from "every milestone above is done," per plan lines 650-669:
   should confirm whether rollback falls out of the existing CAS/publish
   mechanism already or needs its own bounded milestone (open question,
   flagged here rather than guessed at).
+- Plan line 634's literal wording ("a late-event rebuild equals a clean
+  rebuild from the corrected source") and "identifies affected windows from
+  event time" (plan's Phase 4 "Types and modules" section) are **not** met
+  by Milestone 4 as narrowed — both need an aggregation-engine link this
+  roadmap's home crate (`cubism-iceberg`) deliberately does not have. Not
+  currently assigned to a milestone above; tracked in
+  [#16](https://github.com/jeromebanks/cubism-rs/issues/16), which needs a
+  decision on which crate closes the gap before it can become a milestone
+  here or in a successor roadmap doc.
 
 ## Deferred (not in scope for this roadmap doc)
 

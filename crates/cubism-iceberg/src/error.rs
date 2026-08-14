@@ -51,6 +51,11 @@ pub enum CubismIcebergError {
         revision: u64,
         expected_rows: u64,
     },
+
+    #[error(
+        "correction strategy {0:?} is not yet implemented by CorrectionCoordinator (no current AggKind selects it)"
+    )]
+    UnsupportedCorrectionStrategy(crate::correction::CorrectionStrategy),
 }
 
 pub type Result<T> = std::result::Result<T, CubismIcebergError>;

@@ -20,7 +20,11 @@ Phase 4 is now three milestones into its six-milestone roadmap. See
 `docs/TIMESERIES_ROADMAP.md` for what "Milestone 3" means relative to plan
 phases.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_11_HANDOFF.md`, which lands
+Milestone 4 (narrowed — see that doc for why "identifies affected windows
+from event time" and the literal rebuild-equality test are split out into
+[#16](https://github.com/jeromebanks/cubism-rs/issues/16) rather than
+completed as originally worded).
 
 ## What this session built
 
