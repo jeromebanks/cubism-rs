@@ -134,30 +134,51 @@ compiles.
 
 ### Milestone 2 — Formalize `ExpectedRevision`, test it against a correction shape
 
-- **Status:** Not started.
-- **Target:** `crates/cubism-iceberg/src/control.rs` /
-  `durable_control.rs` (the existing `expected_current: Option<WindowRevision>`
-  parameter), plus a new test.
+- **Status:** Done — `docs/TIMESERIES_PHASE_9_HANDOFF.md`.
+- **Target:** `crates/cubism-iceberg/src/durable_control.rs` (the existing
+  `expected_current: Option<WindowRevision>` parameter on
+  `PublicationStore::Sqlite::publish`), plus a new test in
+  `tests/durability.rs`.
 - **What it does:** resolves plan line 660's unresolved decision ("lease
   service versus optimistic expected-revision only") explicitly in favor of
   the already-built optimistic expected-revision mechanism (no new lease
   service — see "Current state" above for why this is mostly already built),
   and adds the dedicated test plan line 639 asks for, framed around a
-  correction attempt specifically: a stale correction (built against a
-  revision that is no longer current) must be rejected by the existing
-  `StaleRevision` path, distinct from `control.rs`'s existing
-  `stale_publish_cannot_replace_a_newer_revision` test (which races two
-  initial runs, not a correction against a superseded revision).
-- **Test:** `stale_correction_cannot_overwrite_a_newer_revision` (or
-  similar) in `tests/concurrency.rs` or `tests/durability.rs` — publish an
-  initial revision, publish a second revision, then attempt a "correction"
-  publish carrying the first revision as its expected-current and assert
-  `StaleRevision`.
+  correction attempt specifically. **Correction to this entry's original
+  text:** it previously claimed the new test would be "distinct from
+  `control.rs`'s existing `stale_publish_cannot_replace_a_newer_revision`
+  test (which races two initial runs, not a correction against a superseded
+  revision)" — that was wrong. `stale_publish_cannot_replace_a_newer_revision`
+  already *is* step-for-step the superseded-revision shape this milestone
+  describes (publish rev1, publish rev2 against expected=rev1, publish rev3
+  against expected=rev1 → `StaleRevision`); the test that races two initial
+  runs against `expected: None` is `tests/concurrency.rs`'s
+  `two_same_window_writers_produce_exactly_one_published_winner` (lines
+  63/111/115), not that one. The real gap, found via advisor review, was
+  narrower: no existing test (a) ran the superseded-revision CAS shape
+  against the **durable** (SQLite) backend — `durability.rs`'s only CAS-reject
+  test used `Some(99)`, a value that was never valid, not a genuinely
+  superseded one — and (b) followed a rejected correction through
+  refresh-`current`-then-retry to success, the protocol Milestone 4's
+  coordinator will need. The new test fills exactly that intersection; it
+  does not duplicate either existing test.
+- **Test:**
+  `sqlite_correction_against_a_superseded_revision_is_rejected_then_succeeds_on_retry`
+  (`crates/cubism-iceberg/tests/durability.rs`) — publish run-1 (rev1,
+  `expected: None`), publish run-2 (rev2, `expected: Some(rev1)`), then
+  attempt run-3 (the correction) with `expected: Some(rev1)` → asserts
+  `StaleRevision { expected: Some(1), actual: Some(2), .. }` and that
+  `current` did not move; then re-reads `current`, retries run-3's publish
+  with the refreshed expected revision, and asserts it succeeds and is
+  visible from a fresh handle.
 - **Depends on:** nothing structurally new required, but should follow
   Milestone 1 so the test can plausibly describe the corrected write as
-  "late" per that policy.
+  "late" per that policy (framing only, in the test's doc comment — no code
+  dependency on `LatenessPolicy`).
 - **Done when:** the unresolved decision is recorded and the correction-shaped
-  stale-rejection test passes. This closes plan line 639.
+  stale-rejection test passes. This closes plan line 639. **Met** — decision
+  recorded above, full step-4 battery clean
+  (`docs/TIMESERIES_PHASE_9_HANDOFF.md`).
 
 ### Milestone 3 — `CorrectionPlan`
 

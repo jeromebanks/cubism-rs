@@ -22,7 +22,9 @@ is now one milestone into its six-milestone roadmap. See
 `docs/TIMESERIES_ROADMAP.md` for what "Milestone 1" means relative to plan
 phases.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_9_HANDOFF.md`, which landed
+Milestone 2 (deferred item 1 above) and corrected the roadmap's Milestone 2
+test justification along the way.
 
 ## What this session built
 

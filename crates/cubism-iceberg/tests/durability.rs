@@ -212,3 +212,61 @@ async fn sqlite_publication_store_cas_survives_reopen_from_a_fresh_handle() {
     let store_c = PublicationStore::sqlite(&control_db).await.unwrap();
     assert_eq!(store_c.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
 }
+
+/// Roadmap Milestone 2 (`docs/TIMESERIES_ROADMAP.md`): a correction computed
+/// against a revision that *was* current, then superseded by another writer
+/// before the correction could publish, must be rejected via the durable
+/// `StaleRevision` path — and the same run must then be able to refresh its
+/// belief (`current`) and retry successfully. This differs from the two
+/// existing durability/control-store CAS tests in what "expected" holds:
+/// `sqlite_publication_store_cas_survives_reopen_from_a_fresh_handle` above
+/// asserts on an expected revision (99) that was never valid, so it never
+/// exercises recovery from a genuinely superseded belief; `control.rs`'s
+/// `stale_publish_cannot_replace_a_newer_revision` exercises a real
+/// superseded revision but only against the in-memory backend. This test is
+/// the intersection: durable backend, genuinely-superseded `expected`, plus
+/// the refresh-and-retry step neither prior test performs. It does not
+/// exercise `LatenessPolicy` or any coordinator/correction-plan machinery —
+/// those don't exist yet (Milestones 3-4) — it only proves the CAS
+/// primitive those milestones will build on already handles this shape.
+#[tokio::test]
+async fn sqlite_correction_against_a_superseded_revision_is_rejected_then_succeeds_on_retry() {
+    let control_dir = TempDir::new().unwrap();
+    let control_db = control_dir.path().join("control.sqlite");
+    let window_id = WindowId::new("2026-08-12").unwrap();
+
+    let store = PublicationStore::sqlite(&control_db).await.unwrap();
+
+    // run-1 publishes first, uncontested: the correction's original belief.
+    store.claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1).await.unwrap();
+    store.record_append("run-1", 101).await.unwrap();
+    store.publish("run-1", None).await.unwrap();
+
+    // run-2 supersedes it before the correction (run-3) gets to publish —
+    // e.g. a concurrent normal writer closing the same window again.
+    store.claim_run(CUBE_ID, &window_id, "run-2", WindowRevision::new(2).unwrap(), 1).await.unwrap();
+    store.record_append("run-2", 102).await.unwrap();
+    store.publish("run-2", Some(WindowRevision::new(1).unwrap())).await.unwrap();
+
+    // run-3 is the correction: it was computed against revision 1, which was
+    // genuinely current when it started — not a guessed-wrong value like the
+    // reopen test above uses.
+    store.claim_run(CUBE_ID, &window_id, "run-3", WindowRevision::new(3).unwrap(), 1).await.unwrap();
+    store.record_append("run-3", 103).await.unwrap();
+    let stale = store.publish("run-3", Some(WindowRevision::new(1).unwrap())).await;
+    assert!(matches!(stale, Err(CubismIcebergError::StaleRevision { expected: Some(1), actual: Some(2), .. })));
+    // The rejected correction must not have moved `current`.
+    assert_eq!(store.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+
+    // Refresh-and-retry: the correction re-reads `current`, retries with the
+    // refreshed expected revision, and succeeds — the protocol Milestone 4's
+    // coordinator will need for a real correction run.
+    let refreshed = store.current(CUBE_ID, &window_id).await.unwrap();
+    store.publish("run-3", refreshed).await.unwrap();
+    assert_eq!(store.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(3).unwrap()));
+
+    // A fresh handle sees the corrected revision too, not just this
+    // process's in-memory belief about its own retry.
+    let store_b = PublicationStore::sqlite(&control_db).await.unwrap();
+    assert_eq!(store_b.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(3).unwrap()));
+}
