@@ -6,16 +6,18 @@ Branch: `feature/timeseries-phase-0a`
 
 Status: **Milestone 4 (Coordinator/job API) landed, narrowed in scope.** New
 module `crates/cubism-iceberg/src/coordinator.rs` with `CorrectionCoordinator`
-and `CorrectionRequest`, two new integration tests in
-`crates/cubism-iceberg/tests/coordinator.rs`, full step-4 verification
-battery clean. `docs/TIMESERIES_ROADMAP.md` updated: Milestone 4 marked
-`Done (narrowed)`, its "What it does"/"Test"/"Done when" sections narrowed
-in place to describe what was actually built — executing a
-caller-identified correction, not identifying affected windows from event
-time or proving recompute equality from source, both of which need an
-aggregation engine this crate deliberately doesn't link. That gap is filed
-as [#16](https://github.com/jeromebanks/cubism-rs/issues/16). Milestones
-1-3 (already done) untouched; Milestones 5-6 untouched.
+and `CorrectionRequest`, three integration tests in
+`crates/cubism-iceberg/tests/coordinator.rs` (two written during the initial
+pass, a third added during the advisor follow-up pass — see "What this
+session built" below), full step-4 verification battery clean.
+`docs/TIMESERIES_ROADMAP.md` updated: Milestone 4 marked `Done (narrowed)`,
+its "What it does"/"Test"/"Done when" sections narrowed in place to describe
+what was actually built — executing a caller-identified correction, not
+identifying affected windows from event time or proving recompute equality
+from source, both of which need an aggregation engine this crate
+deliberately doesn't link. That gap is filed as
+[#16](https://github.com/jeromebanks/cubism-rs/issues/16). Milestones 1-3
+(already done) untouched; Milestones 5-6 untouched.
 
 (Despite the filename, this doc documents a session slice, not "Phase 11" of
 the implementation plan — same convention every prior handoff in this series
@@ -92,44 +94,94 @@ get wrong without prompting:
   targets an already-published window; a first-time build goes through
   `AggregateWriter`/`PublicationStore` directly, never this coordinator (see
   the module's doc comment, lines 26-33).
-- **`crates/cubism-iceberg/tests/coordinator.rs`** (new): two tests.
+- **`crates/cubism-iceberg/tests/coordinator.rs`** (new): three tests.
   `coordinator_correction_is_revision_isolated_from_a_from_scratch_publish`
   publishes a partial revision directly, runs a correction through
   `CorrectionCoordinator` to replace it with fuller corrected content, and
   compares the coordinator-produced read against a from-scratch publish of
-  the identical content in a fresh fixture — proving revision isolation (no
-  residue from the superseded partial revision leaks through) rather than
-  recompute correctness (see "What was actually verified" below).
+  the identical content in a fresh fixture — checked via a domain-row
+  comparison, not just a row count. The isolation property itself is not
+  new (`tests/phase3.rs:225`'s
+  `publishing_a_new_revision_replaces_visibility_of_the_prior_one` already
+  proves it at the raw protocol level); this test's addition is that the
+  property survives when the corrected revision is produced through
+  `CorrectionCoordinator` specifically (see the test file's module doc
+  comment, added during the advisor follow-up pass below).
   `coordinator_rejects_a_correction_planned_against_a_superseded_revision_and_does_not_move_current`
   publishes revision 2 out from under a correction planned against
   revision 1, asserts the coordinator surfaces `StaleRevision` unchanged,
   and asserts `current` did not move.
+  `coordinator_skips_a_redundant_append_when_the_run_was_already_appended`
+  (added during the advisor follow-up pass — see below) simulates a crash
+  between append and publish by claiming/appending/recording directly, then
+  calls `execute` with identical inputs and asserts the returned
+  `Publication::aggregate_snapshot_id` matches the first append's snapshot
+  ID — proving no second append happened, since a second append would
+  necessarily commit a different snapshot.
 - **`crates/cubism-iceberg/src/lib.rs`** (modified): added `pub mod
   coordinator;` and `pub use coordinator::{CorrectionCoordinator,
   CorrectionRequest};`, following the existing pattern for `correction`.
 - **`crates/cubism-iceberg/src/error.rs`** (modified): added
   `CubismIcebergError::UnsupportedCorrectionStrategy(CorrectionStrategy)`.
 - **`docs/TIMESERIES_ROADMAP.md`** (modified): Milestone 4 marked `Done
-  (narrowed)`; "What it does"/"Test"/"Done when" narrowed in place with the
-  original wording struck through rather than deleted, per this series'
-  additive-correction convention; a new bullet added under "Phase 4 done"
-  pointing at #16 for the un-met literal wording.
+  (narrowed)`; "What it does"/"Test"/"Done when" narrowed in place, with the
+  original wording preserved in a `(Corrected: ...)` parenthetical — matching
+  Milestone 3's own correction device, not a strikethrough (an earlier draft
+  of this doc and of the roadmap edit both claimed a "struck through"
+  convention that doesn't actually exist in this series; fixed during the
+  advisor follow-up pass, see below); a new bullet added under "Phase 4 done"
+  pointing at #16 for the un-met literal wording; Milestone 5's entry gained
+  a note that `execute` has no failure-injection seam yet, so that milestone
+  needs to add one, not just layer `ReconciliationRecord` on top unchanged.
+
+## Advisor follow-up pass
+
+A second advisor call, made after the first commit, caught two overstated
+claims and one factual error, applied here as a separate follow-up commit
+(this series' `c2c92b3`/`d7efc04` pattern):
+
+1. The append-skip branch (`coordinator.rs:99`) was described in this doc's
+   first draft as "skips a redundant append on an idempotent retry," but no
+   test exercised it — added
+   `coordinator_skips_a_redundant_append_when_the_run_was_already_appended`
+   (see "What this session built" above) rather than just softening the
+   claim, since the property is real and cheaply testable.
+2. The revision-isolation test's first draft (and this doc's first draft)
+   implied the isolation property itself was newly proven. It wasn't —
+   `tests/phase3.rs:225`'s
+   `publishing_a_new_revision_replaces_visibility_of_the_prior_one` already
+   proves it at the raw protocol level. Both the test file's module doc
+   comment and this doc now cite that test and state precisely what's
+   additional (the property surviving through `CorrectionCoordinator`).
+3. The roadmap edit's first draft claimed a "struck through... per this
+   series' additive-correction convention" — no such convention exists;
+   Milestone 3's correction used a `(Corrected: ...)` parenthetical. Fixed
+   in the roadmap to match that actual precedent instead.
+
+The battery was re-run in full after these changes; the counts below are
+the final ones.
 
 ## What was actually verified
 
-The new tests prove: (1) running a correction through
-`CorrectionCoordinator` and reading back the published result is
-indistinguishable, row-for-row on the domain columns
-(`bucket_start`/`xunit_id`/`count_v1`/`sum_v1`), from a from-scratch publish
-of the identical corrected content in an unrelated fixture — and,
-concretely, that only the corrected revision's two rows are visible
-afterward, not three (which would mean the superseded partial revision's
-row leaked through); (2) a correction whose `observed_current` no longer
-matches the window's actual current revision is rejected with
-`CubismIcebergError::StaleRevision { expected: Some(1), actual: Some(2), ..
-}` exactly as the raw `PublicationStore::publish` CAS would reject it, with
-no coordinator-side retry, and `current` is left unchanged by the rejected
-attempt.
+The tests prove: (1) running a correction through `CorrectionCoordinator`
+and reading back the published result is indistinguishable, row-for-row on
+the domain columns (`bucket_start`/`xunit_id`/`count_v1`/`sum_v1`), from a
+from-scratch publish of the identical corrected content in an unrelated
+fixture — and, concretely, that only the corrected revision's two rows are
+visible afterward, not three (which would mean the superseded partial
+revision's row leaked through) — building on, not duplicating,
+`tests/phase3.rs:225`'s existing proof that publishing a new revision
+replaces visibility of the prior one at the raw protocol level; (2) a
+correction whose `observed_current` no longer matches the window's actual
+current revision is rejected with `CubismIcebergError::StaleRevision {
+expected: Some(1), actual: Some(2), .. }` exactly as the raw
+`PublicationStore::publish` CAS would reject it, with no coordinator-side
+retry, and `current` is left unchanged by the rejected attempt; (3) a retry
+through the coordinator against a run that was already appended (but not
+yet published — simulating a crash between the two) does not perform a
+second append, verified by the returned `Publication::aggregate_snapshot_id`
+matching the first append's snapshot ID rather than a new one, and by the
+read-back row count staying at 2, not 4.
 
 They do **not** prove that the corrected content is itself a correct
 recomputation from source events — both paths compared in the first test
@@ -137,9 +189,11 @@ hand-build identical batches, so a real aggregation bug in how "corrected
 content" gets produced upstream would not be caught by this test. They also
 do not prove anything about identifying which windows a correction should
 touch from event time (no source events exist in this crate at all), about
-`ReconciliationRecord` or failure-injection recovery (Milestone 5's scope),
-or about a public submit/inspect API (Milestone 6's scope). Both gaps are
-tracked in #16, not silently left implicit.
+`ReconciliationRecord` or failure-injection recovery (Milestone 5's scope —
+and, per the roadmap's now-corrected Milestone 5 entry, `execute` has no
+failure-injection seam yet for that milestone to use), or about a public
+submit/inspect API (Milestone 6's scope). Both gaps are tracked in #16, not
+silently left implicit.
 
 ## GitHub issues touched
 
@@ -178,10 +232,9 @@ the exact hash — this doc deliberately doesn't hardcode it, same convention
 adopted after `docs/TIMESERIES_PHASE_4_HANDOFF.md` needed a follow-up commit
 to fix a self-referential hash). That commit contains:
 
-- New: `crates/cubism-iceberg/src/coordinator.rs` (new module, two tests'
-  worth of production code), `crates/cubism-iceberg/tests/coordinator.rs`
-  (new integration test file, two tests), `docs/TIMESERIES_PHASE_11_HANDOFF.md`
-  (this file).
+- New: `crates/cubism-iceberg/src/coordinator.rs` (new module),
+  `crates/cubism-iceberg/tests/coordinator.rs` (new integration test file,
+  three tests), `docs/TIMESERIES_PHASE_11_HANDOFF.md` (this file).
 - Modified: `crates/cubism-iceberg/src/lib.rs` (module wiring),
   `crates/cubism-iceberg/src/error.rs` (new error variant),
   `docs/TIMESERIES_ROADMAP.md` (Milestone 4 marked done/narrowed, Phase-4-done
@@ -196,19 +249,20 @@ Also present, deliberately uncommitted per prior-session convention:
 `.serena/` (local tooling state), `examples/web_analytics_demo/events.csv`
 (generated demo output).
 
-## Tests (27 in `cubism-iceberg`, +2 this session; 164 in workspace, +2)
+## Tests (28 in `cubism-iceberg`, +3 this session; 165 in workspace, +3)
 
-`cargo test -p cubism-iceberg` reports 27 passed (6 suites): 11 unit
+`cargo test -p cubism-iceberg` reports 28 passed (6 suites): 11 unit
 (`--lib`, unchanged from Phase 10) + 6 Phase-3 integration (`--test
 phase3`, unchanged) + 4 durability integration (`--test durability`,
 unchanged) + 4 concurrency integration (`--test concurrency`, unchanged) +
-2 coordinator integration (`--test coordinator`, new this session). All
-figures were confirmed by running each suite in isolation (`--lib`,
+3 coordinator integration (`--test coordinator`, new this session — two
+from the initial pass, one added during the advisor follow-up pass above).
+All figures were confirmed by running each suite in isolation (`--lib`,
 `--test phase3`, `--test durability`, `--test concurrency`, `--test
 coordinator`, each individually) as well as the full `cargo test -p
 cubism-iceberg` run, not derived by subtraction from the workspace total.
-`cargo test --workspace --exclude cubism-py` reports 164 passed, 1 ignored
-(22 suites) — a +2 from Phase 10's 162, matching this session's two new
+`cargo test --workspace --exclude cubism-py` reports 165 passed, 1 ignored
+(22 suites) — a +3 from Phase 10's 162, matching this session's three new
 tests, and +1 suite (the new `coordinator` integration-test binary);
 `cubism-core`'s 92 tests are untouched (no `cubism-core` source changed
 this session; confirmed via the workspace run's per-suite breakdown: 82
@@ -217,16 +271,16 @@ unit + 3 `phase1_properties` + 7 `properties` = 92).
 ## Verification performed
 
 ```text
-cargo test -p cubism-iceberg                                              # 27 passed (6 suites)
+cargo test -p cubism-iceberg                                              # 28 passed (6 suites)
 cargo test -p cubism-iceberg --lib                                        # 11 passed
 cargo test -p cubism-iceberg --test phase3                                # 6 passed
-cargo test -p cubism-iceberg --test coordinator                           # 2 passed
+cargo test -p cubism-iceberg --test coordinator                           # 3 passed
 cargo test -p cubism-iceberg --test concurrency                           # 4 passed
 cargo test -p cubism-iceberg --test durability                            # 4 passed
 cargo clippy -p cubism-iceberg --all-targets --no-deps -- -D warnings     # clean
 cargo build -p cubism-cli                                                 # clean
 cargo clippy -p cubism-cli --all-targets --no-deps -- -D warnings        # clean
-cargo test --workspace --exclude cubism-py                                # 164 passed, 1 ignored (22 suites; +2 from Phase 10's 162)
+cargo test --workspace --exclude cubism-py                                # 165 passed, 1 ignored (22 suites; +3 from Phase 10's 162)
 cargo clippy --workspace --exclude cubism-py --all-targets --no-deps -- -D warnings  # clean
 ```
 
@@ -235,7 +289,8 @@ cargo clippy --workspace --exclude cubism-py --all-targets --no-deps -- -D warni
 - [`../crates/cubism-iceberg/src/coordinator.rs`](../crates/cubism-iceberg/src/coordinator.rs)
   (new module: `CorrectionCoordinator`, `CorrectionRequest`)
 - [`../crates/cubism-iceberg/tests/coordinator.rs`](../crates/cubism-iceberg/tests/coordinator.rs)
-  (new integration tests: revision isolation, stale-CAS rejection)
+  (new integration tests: revision isolation, stale-CAS rejection,
+  redundant-append skip)
 - [`../crates/cubism-iceberg/src/lib.rs`](../crates/cubism-iceberg/src/lib.rs)
   (module wiring)
 - [`../crates/cubism-iceberg/src/error.rs`](../crates/cubism-iceberg/src/error.rs)

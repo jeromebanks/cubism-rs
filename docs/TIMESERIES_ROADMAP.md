@@ -224,35 +224,51 @@ compiles.
 - **Status:** Done (narrowed) — `docs/TIMESERIES_PHASE_11_HANDOFF.md`.
 - **Target:** new coordinator module in `crates/cubism-iceberg/src`
   (`coordinator.rs`).
-- **What it does:** narrowed from the original wording below — see
+- **What it does:** (Corrected: the original wording here — "identifies
+  affected windows from event time, rebuilds them completely using the
+  existing append/publish protocol, and publishes a new revision via the
+  CAS mechanism formalized in Milestone 2" — assumed an aggregation engine
+  this crate deliberately does not link; see
   `crates/cubism-iceberg/src/coordinator.rs`'s module doc comment for the
-  full reasoning. `CorrectionCoordinator::execute` takes a
+  full reasoning.) `CorrectionCoordinator::execute` takes a
   **caller-identified** window plus already-rebuilt corrected
   states/registry batches (not raw source events), consults
   `CorrectionPlan::select` (hard-erroring on `AdditiveShortcut`, which no
   current `AggKind` reaches — matching Milestone 3), appends under the
-  requested revision, and publishes via the CAS mechanism formalized in
-  Milestone 2 against a required `observed_current: WindowRevision` (not
-  `Option`, since a correction only makes sense against an
-  already-published window). It does **not** identify which windows a
-  correction touches from event time — that needs an aggregation engine
-  this crate deliberately does not link (`src/lib.rs`), and is tracked
-  separately as #16, not assigned to a milestone in this roadmap.
-  ~~identifies affected windows from event time, rebuilds them completely
-  using the existing append/publish protocol, and publishes a new revision
-  via the CAS mechanism formalized in Milestone 2~~ (original wording,
-  struck through per this correction).
+  requested revision (skipping a redundant append if the run was already
+  appended — an idempotent-retry path, not a crash-recovery/reconciliation
+  one; see Milestone 5 below), and publishes via the CAS mechanism
+  formalized in Milestone 2 against a required `observed_current:
+  WindowRevision` (not `Option`, since a correction only makes sense
+  against an already-published window). It does **not** identify which
+  windows a correction touches from event time — that needs an aggregation
+  engine this crate deliberately does not link (`src/lib.rs`), and is
+  tracked separately as #16, not assigned to a milestone in this roadmap.
 - **Test:** narrowed from plan line 634's literal wording — see #16 for why
   "equals a clean rebuild from the corrected source" isn't provable inside
   this crate. `coordinator_correction_is_revision_isolated_from_a_from_scratch_publish`
-  proves **revision isolation** instead: a correction's published read is
-  indistinguishable from a from-scratch publish of the same content, with no
-  residue from the superseded revision.
+  proves **revision isolation survives through the coordinator**: the
+  isolation property itself (publishing revision N+1 fully replaces what a
+  reader sees of revision N) is not new — `tests/phase3.rs`'s
+  `publishing_a_new_revision_replaces_visibility_of_the_prior_one` (line
+  225) already proves it at the raw claim/append/publish protocol level;
+  this test's additional content is that the property holds when the
+  corrected revision is produced through `CorrectionCoordinator`
+  specifically, checked via a cross-fixture domain-row comparison, not just
+  a row count.
   `coordinator_rejects_a_correction_planned_against_a_superseded_revision_and_does_not_move_current`
   proves the coordinator surfaces `StaleRevision` as-is with no internal
   retry (plan's "losing writers do not republish automatically without
   rereading source and current state") and does not move `current` on
   rejection.
+  `coordinator_skips_a_redundant_append_when_the_run_was_already_appended`
+  proves the append-skip branch for an already-`Appended` run actually
+  skips a second append (checked via the returned `Publication`'s
+  `aggregate_snapshot_id` matching the first append's snapshot, not a
+  duplicated commit) rather than merely compiling — this is an
+  idempotent-retry check, not a crash-recovery/reconciliation one (that's
+  Milestone 5's scope, and `execute` has no failure-injection seam yet for
+  it — see Milestone 5 below).
 - **Depends on:** Milestone 2 (publishes via expected-revision CAS),
   Milestone 3 (needs a `CorrectionPlan` to execute).
 - **Done when:** the coordinator can run a correction end-to-end for at
@@ -276,7 +292,12 @@ compiles.
   stage the coordinator passes through, asserting recovery reaches a
   consistent published state (not a partial/corrupt one) in every case.
 - **Depends on:** Milestone 4 (needs the coordinator's stages to inject
-  failures into).
+  failures into). Note for whichever slice picks this up: `execute`
+  (`crates/cubism-iceberg/src/coordinator.rs`) as landed is a single static
+  fn with no injection seam between its claim/append/publish steps — this
+  milestone will need to introduce one (e.g. per-stage hooks or breaking
+  `execute` into resumable steps) before failure injection is possible, not
+  just add `ReconciliationRecord` alongside the existing fn body unchanged.
 - **Done when:** `ReconciliationRecord` exists and the failure-injection
   test passes for every stage the coordinator has.
 

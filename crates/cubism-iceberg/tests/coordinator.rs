@@ -6,7 +6,7 @@
 //! no way to hand-write a "clean rebuild from the corrected source" and
 //! independently compute an equal answer — any such comparison here would
 //! be tautological (identical hand-built bytes compared to themselves).
-//! What *is* testable at this layer, and what the test below proves
+//! What *is* testable at this layer, and what the first test below proves
 //! instead, is **revision isolation**: running a correction through
 //! `CorrectionCoordinator` and reading back the published result must be
 //! indistinguishable from a from-scratch single-revision publish of the
@@ -15,6 +15,16 @@
 //! corrected content is itself a correct recomputation from source events;
 //! that property belongs to whichever future crate links an aggregation
 //! engine and can build both sides independently.
+//!
+//! The isolation property itself — publishing revision 2 fully replaces
+//! what a reader sees of revision 1 — is **not new**: `tests/phase3.rs`'s
+//! `publishing_a_new_revision_replaces_visibility_of_the_prior_one`
+//! (line 225) already proves it at the raw claim/append/publish protocol
+//! level. What the first test below adds is that the property survives
+//! when the corrected revision is produced *through*
+//! `CorrectionCoordinator` specifically, plus a cross-fixture domain-row
+//! comparison (not just a row count) against an independently built
+//! from-scratch publish.
 
 use std::sync::Arc;
 
@@ -303,4 +313,81 @@ async fn coordinator_rejects_a_correction_planned_against_a_superseded_revision_
         Some(WindowRevision::new(2).unwrap()),
         "a rejected correction must not move `current`"
     );
+}
+
+/// Proves `coordinator.rs`'s append-skip branch
+/// (`if matches!(claim.state(), RunState::Claimed { .. })`) actually skips
+/// a redundant append rather than merely compiling: this simulates a crash
+/// between append and publish by claiming/appending/recording directly
+/// (bypassing the coordinator), so a subsequent `execute` with the same
+/// `run_id`/`revision`/content observes `ClaimResult::Existing(RunState::
+/// Appended { .. })` instead of `Claimed`. If `execute` appended a second
+/// time, that would commit a second Iceberg snapshot, so comparing the
+/// returned `Publication::aggregate_snapshot_id` against the snapshot ID
+/// from the first append is a direct, not incidental, check that no second
+/// append occurred — a duplicated-row count would show the same thing more
+/// indirectly.
+#[tokio::test]
+async fn coordinator_skips_a_redundant_append_when_the_run_was_already_appended() {
+    let window_id = WindowId::new("2026-08-12").unwrap();
+    let fixture = Fixture::new().await;
+
+    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
+
+    let corrected_states = vec![states_batch(&[
+        ("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0),
+        ("2026-08-12T00:20:00Z", xunit_id(2), 2, 2.0),
+    ])];
+    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a"), (xunit_id(2), b"b")])];
+    let expected_rows: u64 = corrected_states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let revision = WindowRevision::new(2).unwrap();
+
+    let claim = fixture
+        .publications
+        .claim_run(CUBE_ID, &window_id, "run-correction", revision, expected_rows)
+        .await
+        .unwrap();
+    assert!(matches!(claim, ClaimResult::New(_)));
+    let first_append = AggregateWriter::append_window(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        AppendWindow {
+            window_id: &window_id,
+            revision,
+            run_id: "run-correction",
+            states: &corrected_states,
+            registry: &corrected_registry,
+        },
+    )
+    .await
+    .unwrap();
+    fixture.publications.record_append("run-correction", first_append.snapshot_id).await.unwrap();
+
+    let request = CorrectionRequest {
+        window_id: &window_id,
+        revision,
+        run_id: "run-correction",
+        observed_current: WindowRevision::new(1).unwrap(),
+        kinds: &[AggKind::Sum, AggKind::Count],
+        states: &corrected_states,
+        registry: &corrected_registry,
+    };
+    let publication = CorrectionCoordinator::execute(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        &fixture.publications,
+        request,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        publication.aggregate_snapshot_id, first_append.snapshot_id,
+        "a retry through the coordinator must not perform a second append \
+         (a second append would commit a different snapshot)"
+    );
+
+    let read = fixture.read(&window_id).await.unwrap();
+    assert_eq!(total_rows(&read), 2, "a retried append-skip path must not duplicate rows");
 }
