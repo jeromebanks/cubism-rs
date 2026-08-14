@@ -22,7 +22,9 @@ is now two milestones into its six-milestone roadmap. See
 `docs/TIMESERIES_ROADMAP.md` for what "Milestone 2" means relative to plan
 phases.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_10_HANDOFF.md`, which picked up
+this doc's deferred item 1 (Milestone 3, `CorrectionPlan`) as its own code
+slice.
 
 ## What this session built
 

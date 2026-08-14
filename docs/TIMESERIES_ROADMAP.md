@@ -183,19 +183,36 @@ compiles.
 
 ### Milestone 3 — `CorrectionPlan`
 
-- **Status:** Not started.
+- **Status:** Done — `docs/TIMESERIES_PHASE_10_HANDOFF.md`.
 - **Target:** new type in `crates/cubism-iceberg/src`, informed by
   `cubism-core`'s existing aggregate state kinds (`AVG`/`VAR`/`QNT` —
   `crates/cubism-core/src/aggregate_state.rs`) to determine which are
   additive/subtractable and which require a full rebuild.
-- **What it does:** represents a planned correction (source checkpoint or
-  time range, affected windows, whether an additive/subtractive shortcut is
-  valid for the aggregate kinds involved or a full rebuild is required).
-- **Test:** plan line 635 — a test asserting that for a non-idempotent/
-  non-subtractable state kind, `CorrectionPlan` selects (or refuses anything
-  but) a full-rebuild strategy, never an additive shortcut.
-- **Depends on:** Milestone 1 (needs `LatenessPolicy` to determine which
-  events a correction is even responding to).
+- **What it does:** `crates/cubism-iceberg/src/correction.rs`'s
+  `CorrectionPlan::select` decides strategy only — `FullRebuild` vs.
+  `AdditiveShortcut` — from the `AggKind`s a correction would touch, using
+  `cubism_core::capabilities_for`'s `subtractable`/`idempotent` flags on
+  each. It does **not** represent a source checkpoint, a time range, or the
+  set of affected windows: nothing in this crate consumes those fields yet,
+  so building them now would be untested scaffolding. That richer
+  representation is Milestone 4's coordinator's job to add when it actually
+  has a checkpoint/range to plan around. It also does not consult
+  `LatenessPolicy` — strategy selection is a pure function of aggregate-kind
+  capabilities, not of lateness.
+- **Test:** plan line 635 — `full_rebuild_is_selected_for_every_current_agg_kind`
+  proves every current `AggKind` is refused an additive shortcut (each
+  individually and as a full set); `shortcut_requires_both_subtractable_and_idempotent`
+  proves the refusal rule is genuinely the conjunction of both capability
+  flags, not `subtractable` alone, using `Sum` (subtractable, not
+  idempotent) as the discriminating case. No current `AggKind` satisfies
+  both flags, so the `AdditiveShortcut` branch is not exercised by any real
+  kind — only reachable in principle, which the tests' doc comments state
+  explicitly rather than implying broader coverage.
+- **Depends on:** Milestone 1 — corrected: this turned out not to be a real
+  dependency. `LatenessPolicy` determines *which events* a correction
+  responds to, a question this milestone's strategy-selection logic never
+  needed to answer. Left as `Not started`-era wording elsewhere in this repo
+  should be read in light of this correction wherever it recurs.
 - **Done when:** the type exists and plan line 635's test passes.
 
 ### Milestone 4 — Coordinator/job API + late-event rebuild test
