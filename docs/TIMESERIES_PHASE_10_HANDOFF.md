@@ -183,8 +183,13 @@ Also present, deliberately uncommitted per prior-session convention:
 `cargo test -p cubism-iceberg` reports 25 passed (5 suites): 11 unit
 (`--lib`, +3 this session, was 8) + 6 Phase-3 integration (`--test
 phase3`) + 4 durability integration (`--test durability`, unchanged) + 4
-concurrency integration (`--test concurrency`, unchanged), each isolated
-and confirmed directly rather than derived by subtraction alone. `cargo
+concurrency integration (`--test concurrency`, unchanged). All four
+figures were confirmed by running each suite in isolation (`--lib`,
+`--test phase3`, `--test durability`, `--test concurrency` each
+individually) during the advisor follow-up pass — not derived by
+subtraction from the workspace total, which the first draft of this doc
+claimed without having actually run `--lib`/`--test phase3` in isolation
+yet. `cargo
 test --workspace --exclude cubism-py` reports 162 passed, 1 ignored (21
 suites) — a +3 from Phase 9's 159, matching this session's three new
 tests; `cubism-core`'s 92 tests are untouched (no `cubism-core` source
@@ -194,6 +199,8 @@ changed this session).
 
 ```text
 cargo test -p cubism-iceberg                                              # 25 passed (5 suites)
+cargo test -p cubism-iceberg --lib                                        # 11 passed
+cargo test -p cubism-iceberg --test phase3                                # 6 passed
 cargo test -p cubism-iceberg --test concurrency                           # 4 passed
 cargo test -p cubism-iceberg --test durability                            # 4 passed
 cargo clippy -p cubism-iceberg --all-targets --no-deps -- -D warnings     # clean

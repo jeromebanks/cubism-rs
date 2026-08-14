@@ -185,9 +185,13 @@ compiles.
 
 - **Status:** Done — `docs/TIMESERIES_PHASE_10_HANDOFF.md`.
 - **Target:** new type in `crates/cubism-iceberg/src`, informed by
-  `cubism-core`'s existing aggregate state kinds (`AVG`/`VAR`/`QNT` —
-  `crates/cubism-core/src/aggregate_state.rs`) to determine which are
-  additive/subtractable and which require a full rebuild.
+  `cubism-core`'s existing per-`AggKind` capability declarations
+  (`capabilities_for`, `crates/cubism-core/src/aggregate_state.rs:109-160`)
+  to determine which are additive/subtractable and which require a full
+  rebuild. (Corrected: the original wording here named `AVG`/`VAR`/`QNT`,
+  which are the wire-format magic constants for three specific state
+  encodings, not the `subtractable`/`idempotent` capability flags the
+  landed code actually reads across all eleven `AggKind` variants.)
 - **What it does:** `crates/cubism-iceberg/src/correction.rs`'s
   `CorrectionPlan::select` decides strategy only — `FullRebuild` vs.
   `AdditiveShortcut` — from the `AggKind`s a correction would touch, using

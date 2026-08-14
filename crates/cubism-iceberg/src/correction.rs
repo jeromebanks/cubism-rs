@@ -39,6 +39,11 @@ pub enum CorrectionStrategy {
 /// `subtractable` because a correction shortcut both removes a stale
 /// contribution and re-applies a corrected one; if the state is not also
 /// idempotent, a retried removal/re-application is not safe to repeat.
+/// `associative` and `commutative` are two more flags that same doc comment
+/// covers, but this rule does not consult them: a subtract-then-reapply
+/// shortcut neither reorders nor re-partitions the merge tree, so those two
+/// laws are not what a correction shortcut relies on the way
+/// `subtractable`/`idempotent` are.
 ///
 /// [`AggregateCapabilities`]: cubism_core::AggregateCapabilities
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +135,9 @@ mod tests {
         );
     }
 
+    /// Proves the vacuous-`all()` edge case is handled explicitly: an empty
+    /// `kinds` slice does not fall through `Iterator::all`'s vacuous-true
+    /// default into a spurious `AdditiveShortcut`.
     #[test]
     fn empty_kind_list_selects_full_rebuild() {
         let plan = CorrectionPlan::select(&[]);
