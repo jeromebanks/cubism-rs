@@ -568,9 +568,9 @@ into an observed one before Milestones 8-10 build on it.
 ### Milestone 8 — `TemporalQuery` (request shape + validation)
 
 - **Status:** Done — `docs/TIMESERIES_PHASE_18_HANDOFF.md`. Landed as
-  `crates/cubism-datafusion/src/range_query.rs:54-63`
-  (`TemporalQuery`) and `:42-49` (`GapPolicy`), with `TemporalQuery::new`
-  at `:67-101`. Two deviations from this milestone's original text,
+  `crates/cubism-datafusion/src/range_query.rs:60-69`
+  (`TemporalQuery`) and `:48-53` (`GapPolicy`), with `TemporalQuery::new`
+  at `:77-114`. Two deviations from this milestone's original text,
   both advisor-confirmed before writing: (1) the struct holds `cube:
   String` (an identifier), not the `cube/spec` `TemporalSpec` itself —
   Milestone 9's own text takes a `TemporalQuery` **and** a `TemporalSpec`
@@ -596,7 +596,7 @@ into an observed one before Milestones 8-10 build on it.
   execution types, so it doesn't depend on Milestone 7.
 - **Test:** unit tests for valid construction plus at least one rejection
   case (`start >= end`; an unsupported resolution for the cube). Landed as
-  four tests, `range_query.rs:134-204`: two valid-construction cases
+  four tests, `range_query.rs:144-215`: two valid-construction cases
   (explicit supported resolution, and `None`/auto) and the two required
   rejections.
 - **Depends on:** nothing new.

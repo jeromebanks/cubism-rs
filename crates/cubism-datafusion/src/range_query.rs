@@ -6,7 +6,7 @@
 //! `cubism-iceberg` I/O. `TemporalQuery::new` validates against a caller-
 //! supplied `&TemporalSpec` but does not retain it: Milestone 9's
 //! `ResolutionPlan` construction takes both a `TemporalQuery` and the spec
-//! separately (`docs/TIMESERIES_ROADMAP.md:591`), so storing the spec here
+//! separately (`docs/TIMESERIES_ROADMAP.md:610`), so storing the spec here
 //! would make that signature redundant.
 //!
 //! Two validations run at construction time:
@@ -37,7 +37,13 @@ use cubism_core::{CubismError, EventTime, Resolution, TemporalSpec, TimeRange, X
 
 /// How a segment with no backing data should be reported. Forwarded to
 /// later milestones (`ResolutionPlan`/`CoveragePlan`); not exercised by any
-/// logic in this module beyond being a plain field.
+/// logic in this module beyond being a plain field. Named after
+/// `cubism_core::BucketValue`'s `Missing` variant (`crates/cubism-core/src/temporal.rs:523`)
+/// deliberately: `BucketValue<T>` is the per-bucket *result* type
+/// distinguishing an absent bucket from a present zero, and this policy is
+/// what a later milestone reads to decide which of the two to construct.
+/// Not `BucketValue` itself — that type is generic over a present value
+/// `T` this request-shape struct has no reason to carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GapPolicy {
     /// Report the segment as `missing` rather than filling a value.
@@ -63,6 +69,10 @@ pub struct TemporalQuery {
 }
 
 impl TemporalQuery {
+    /// A builder was deliberately not introduced for the 9-argument
+    /// constructor below — out of scope for a request-shape-only
+    /// milestone — so `cargo clippy`'s `too_many_arguments` lint is
+    /// suppressed here rather than worked around.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         cube: impl Into<String>,

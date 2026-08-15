@@ -54,7 +54,7 @@ written:
   milestone's own rejection test for that case. Taking raw bounds and
   building `TimeRange::new(start, end)?` inside `TemporalQuery::new`
   means the rejection genuinely flows through this constructor (proven by
-  `rejects_start_not_before_end`, `range_query.rs:171-186`) without
+  `rejects_start_not_before_end`, `range_query.rs:181-196`) without
   duplicating the invariant — the module doc comment says explicitly that
   the check is delegated.
 - **`resolution: Option<Resolution>`**, `None` = auto. The membership
@@ -96,13 +96,20 @@ duplicate filed (see "GitHub issues touched").
 
 Primary files changed:
 
-- **`crates/cubism-datafusion/src/range_query.rs`** (new, 206 lines): the
-  `GapPolicy` enum (lines 42-49), `TemporalQuery` struct (lines 54-63),
-  `TemporalQuery::new` (lines 67-101), and four unit tests (lines
-  108-205) — plus a module doc comment (lines 1-27) stating exactly what
+- **`crates/cubism-datafusion/src/range_query.rs`** (new, 216 lines): the
+  `GapPolicy` enum (lines 48-53), `TemporalQuery` struct (lines 60-69),
+  `TemporalQuery::new` (lines 77-114), and four unit tests (lines
+  118-216) — plus a module doc comment (lines 1-34) stating exactly what
   construction does and does not validate, this series' standing
   convention for a new module making a claim about a request-shape
-  contract.
+  contract. `GapPolicy`'s own doc comment (lines 38-46) cross-references
+  `cubism_core::BucketValue` (`crates/cubism-core/src/temporal.rs:523`) —
+  checked this session (`rtk proxy grep -rn "Gap\|gap\|Missing"
+  crates/cubism-core/src/`) to confirm no existing type already covers
+  this policy before adding a new one beside it. `TemporalQuery::new`
+  carries `#[allow(clippy::too_many_arguments)]` (9 parameters), disclosed
+  in a doc comment immediately above it rather than worked around with a
+  builder — out of scope for a request-shape-only milestone.
 - **`crates/cubism-datafusion/src/lib.rs`** (modified, +2 lines): added
   `pub mod range_query;` (line 8) and re-exported `GapPolicy`,
   `TemporalQuery` (line 17).
@@ -121,16 +128,18 @@ a normal (non-dev) dependency of `cubism-datafusion`.
 That `TemporalQuery::new` constructs successfully for two valid shapes —
 an explicit resolution that is one of the spec's rollups
 (`valid_construction_with_explicit_supported_resolution`,
-`range_query.rs:134-151`), and `resolution: None` with no membership check
+`range_query.rs:144-160`), and `resolution: None` with no membership check
 run at all (`valid_construction_with_auto_resolution`,
-`range_query.rs:153-169`) — and rejects both required cases with
+`range_query.rs:163-178`) — and rejects both required cases with
 `CubismError::Temporal`: `start == end`
-(`rejects_start_not_before_end`, `range_query.rs:171-186`) and a
+(`rejects_start_not_before_end`, `range_query.rs:181-196`) and a
 resolution that is neither the base resolution nor a rollup
-(`rejects_resolution_not_in_base_or_rollups`, `range_query.rs:189-204`,
+(`rejects_resolution_not_in_base_or_rollups`, `range_query.rs:199-215`,
 using a day resolution against a minute-base/hour-rollup spec). That the
-full step-4 verification battery is clean with this change in place, run
-fresh this session (see "Tests" below).
+full step-4 verification battery — including `cargo clippy … -D
+warnings`, clean with `TemporalQuery::new`'s `#[allow(clippy::too_many_arguments)]`
+in place — is clean with this change in place, run fresh this session
+(see "Tests" below).
 
 It does **not** prove: anything about resolution *selection* — `None`
 constructs without error, but nothing here chooses a concrete resolution
@@ -161,11 +170,11 @@ Milestone 8 is request-shape-only, consistent with the roadmap's own
 
 1. **Milestone 9 (`ResolutionPlan`, non-overlapping segment selection)**
    — the roadmap's next Phase 5 milestone
-   (`docs/TIMESERIES_ROADMAP.md:587-602`, pre-edit line numbers,
-   unaffected by this session's Milestone 8 edit above them). Depends on
-   Milestone 8, now done. Natural next slice — it's the first thing that
-   actually *uses* the resolution-membership premise Milestone 8 just
-   validated.
+   (`docs/TIMESERIES_ROADMAP.md:606-621`, post-edit: this session's
+   Milestone 8 edit added lines above it, shifting it down from its
+   pre-edit 587-602). Depends on Milestone 8, now done. Natural next
+   slice — it's the first thing that actually *uses* the
+   resolution-membership premise Milestone 8 just validated.
 2. **Milestone 10 (`CoveragePlan`/`SeriesResponse`)** — depends on
    Milestones 8 (done) and 9 (not started); unstarted.
 3. **`TemporalQuery`'s omitted timezone/display-options field** — not
