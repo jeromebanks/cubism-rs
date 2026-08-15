@@ -33,7 +33,13 @@ Phase 4 (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:582-670`) is now at every
 roadmap milestone done, but Phase 4 itself is not fully done — see
 `docs/TIMESERIES_ROADMAP.md`'s "Phase 4 done" section for what remains.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`docs/TIMESERIES_PHASE_15_HANDOFF.md`](TIMESERIES_PHASE_15_HANDOFF.md)
+— with every roadmap milestone above already `Done`, that session fell back
+to this handoff's deferred list and picked up
+[#14](https://github.com/jeromebanks/cubism-rs/issues/14) (retry-loop CI
+coverage), and in the process found and fixed a real bug in
+`with_immediate_tx`'s retry loop that this handoff's own "Deferred" section
+did not know was there.
 
 ## What this session built
 

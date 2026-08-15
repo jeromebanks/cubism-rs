@@ -60,6 +60,25 @@
 //! genuine protocol conflict (`RunConflict`, `StaleRevision`, ...) is never
 //! retried and is returned immediately.
 //!
+//! **Correction: the paragraph above understated the gap.** Filling it
+//! (`tests/concurrency.rs`'s
+//! `retry_loop_resolves_a_write_lock_held_past_busy_timeout`, forcing a
+//! `BEGIN IMMEDIATE` past `busy_timeout`'s 5s window) found this path did
+//! not merely lack a test — it did not work at all as shipped. Observed
+//! directly, not read off SQLite's documentation: a `BEGIN IMMEDIATE` that
+//! fails with `SQLITE_BUSY` still leaves the connection internally marked
+//! as "in a transaction," even though the write lock was never acquired.
+//! The retryable-BEGIN-failure branch dropped that connection back into the
+//! pool without a `ROLLBACK` first; with `max_connections(1)`, the very
+//! next attempt reacquired the same poisoned connection and its own `BEGIN
+//! IMMEDIATE` failed immediately with an unrelated, non-retryable
+//! "cannot start a transaction within a transaction" error — so any real
+//! contention past 5s made `with_immediate_tx` fail permanently instead of
+//! retrying. Fixed by rolling back on every exit from a failed `BEGIN`, not
+//! just the ones this session's test happened to force. See the retry
+//! branch below and the cited test's doc comment for the exact before/after
+//! error sequence.
+//!
 //! A single handle's own single-connection pool (`max_connections(1)`,
 //! below) already serializes that handle's own operations, so this
 //! contention is only ever between two *different* handles (two OS
@@ -376,6 +395,17 @@ impl SqliteStore {
 
             if let Err(err) = sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await {
                 let err = CubismIcebergError::from(err);
+                // A failed `BEGIN IMMEDIATE` (e.g. SQLITE_BUSY) still leaves
+                // this connection internally marked as "in a transaction"
+                // even though the write lock was never acquired -- observed
+                // directly (see `tests/concurrency.rs`'s
+                // retry_loop_resolves_a_write_lock_held_past_busy_timeout doc
+                // comment for the exact error sequence), not read off
+                // SQLite's docs. Roll back before returning the connection to
+                // the pool on every exit from this branch, retryable or not
+                // -- `max_connections(1)` means a poisoned connection here
+                // breaks every later call on this handle, not just this one.
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
                 if attempt < MAX_TX_ATTEMPTS && is_retryable(&err) {
                     drop(conn);
                     backoff(attempt).await;
