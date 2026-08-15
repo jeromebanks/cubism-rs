@@ -35,7 +35,8 @@ phases.)
 
 Read `docs/TIMESERIES_PHASE_11_HANDOFF.md` and `docs/TIMESERIES_ROADMAP.md`,
 confirmed the branch in sync with `origin` (`git rev-list --left-right
---count` reported `0 0`), and read all 16 open issues. Per the roadmap's
+--count` reported `0 0`), and listed all 16 open issues (titles only — read
+the full bodies of #13, #14, and #16 later, before filing #17). Per the roadmap's
 step-1 instructions, checked the milestone list first: Milestones 1-4 were
 already done, Milestone 5 was the first not-done milestone with its listed
 dependency (Milestone 4) done — the unambiguous pick.
@@ -135,10 +136,14 @@ The tests prove: (1) `ReconciliationRecord::classify` correctly maps
 carrying through the right `revision`/`aggregate_snapshot_id` fields —
 proven directly against hand-built `RunState` values, not indirectly
 through the coordinator; (2) a correction claimed but never attempted (an
-unambiguous `AwaitingAppend`) is recovered correctly by `execute` on a
-freshly opened catalog and control-store handle — exactly one append
-happens (2 rows visible after recovery, not a partial or duplicated set),
-and the run classifies as `Published` afterward; (3) replaying that same
+unambiguous `AwaitingAppend`) genuinely survives a restart — asserted via
+`ReconciliationRecord::classify` on the fresh handle's own `run_state`
+lookup, before `execute` is even called, so the test does not merely assert
+outcomes consistent with either a real restart or a fresh claim — and is
+then recovered correctly by `execute` on that same freshly opened catalog
+and control-store handle: exactly one append happens (2 rows visible after
+recovery, not a partial or duplicated set), and the run classifies as
+`Published` afterward; (3) replaying that same
 completed correction through `execute` again, on yet another freshly
 opened handle, returns the identical `Publication` (not a new one, not
 `StaleRevision`) and does not duplicate rows (still 2, not 4) — proving

@@ -65,7 +65,17 @@ use crate::writer::{AggregateWriter, AppendWindow};
 ///
 /// - [`Self::NotStarted`]: no run with this ID has ever been claimed (or
 ///   the run ID is unknown to this control store). Recovery: run `execute`
-///   from scratch.
+///   from scratch. No production code path in this crate reaches this
+///   variant today — `execute` only ever calls `classify` with
+///   `Some(claim.state())`, since `claim_run` always returns a `RunState`.
+///   It exists because `classify` takes `Option<&RunState>` to match
+///   `PublicationStore::run_state`'s own return type, for a caller
+///   inspecting a run's status before deciding whether to call `execute` at
+///   all. This module's own `classify_maps_every_run_state_stage_to_its_reconciliation_record`
+///   unit test exercises it directly (`classify(None)`); no integration
+///   test reaches it through `execute`, matching Milestone 3's own
+///   admission that its `AdditiveShortcut` arm is reachable only in
+///   principle, not by any end-to-end test today.
 /// - [`Self::AwaitingAppend`]: the run was claimed but the control store
 ///   has no append recorded. Recovery: run `execute`, which appends and
 ///   publishes. **Important caveat, not fully resolved by this milestone:**

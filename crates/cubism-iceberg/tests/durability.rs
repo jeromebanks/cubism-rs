@@ -301,7 +301,13 @@ async fn sqlite_correction_against_a_superseded_revision_is_rejected_then_succee
 /// filters by `(window_id, revision)`, not by snapshot ID, so a second
 /// append would duplicate visible rows). That gap is filed as
 /// [issue #17](https://github.com/jeromebanks/cubism-rs/issues/17), not
-/// silently assumed safe.
+/// silently assumed safe. Before calling `execute`, leg 1 asserts
+/// `ReconciliationRecord::classify` on the fresh handle's own
+/// `run_state("run-correction")` reports `AwaitingAppend` — without that
+/// assertion, the claim block above would be a barrier that does no
+/// discriminating work: `execute` would pass identically whether or not the
+/// claim actually persisted across the restart, since it would just claim
+/// fresh either way.
 ///
 /// Leg 2 proves recovery from `ReconciliationRecord::Published`: replaying
 /// the identical correction request after the first attempt already
@@ -390,6 +396,18 @@ async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a
     let catalog_b = cubism_iceberg::config::open_catalog(&config).await.unwrap();
     let table_b = TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
     let publications_b = PublicationStore::sqlite(&control_db).await.unwrap();
+
+    // Confirm the claim actually survived the restart, observed through
+    // this fresh handle — without this, `execute` below would just claim
+    // fresh, append, and publish, and the assertions after it would pass
+    // identically whether or not the earlier block's claim persisted.
+    let recovered = publications_b.run_state("run-correction").await.unwrap();
+    assert_eq!(
+        ReconciliationRecord::classify(recovered.as_ref()),
+        ReconciliationRecord::AwaitingAppend { revision: WindowRevision::new(2).unwrap() },
+        "the claim must survive the restart as AwaitingAppend, observed through a fresh handle"
+    );
+
     let first_publication =
         CorrectionCoordinator::execute(catalog_b.as_ref(), &table_b, &publications_b, request).await.unwrap();
     assert_eq!(first_publication.revision, WindowRevision::new(2).unwrap());
