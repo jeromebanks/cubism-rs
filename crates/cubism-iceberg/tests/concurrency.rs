@@ -385,14 +385,18 @@ async fn publish_waits_for_a_concurrently_held_write_lock_then_succeeds() {
 ///
 /// The bug lived in `with_immediate_tx` itself, so it was not
 /// `publish`-specific — `claim_run` and `record_append` share the same
-/// retry loop and were equally exposed to it. Read off the code, not
-/// independently observed by a test: the same missing-`ROLLBACK` gap also
-/// exists on the final-attempt `return Err(err)` path a few lines below
-/// (durable_control.rs, the non-retryable/exhausted-attempts case) — a
-/// handle that hits *that* path would stay poisoned for every subsequent
-/// call on it, not just the one that failed. This test's fix only covers
-/// the retryable-and-continuing branch; the terminal branch's equivalent
-/// gap is not exercised or fixed here.
+/// retry loop and were equally exposed to it. The fix (`durable_control.rs`)
+/// places the `ROLLBACK` before the retryable/non-retryable branch, so it
+/// covers the final-attempt `return Err(err)` exit (the non-retryable/
+/// exhausted-attempts case, which would otherwise leave a handle poisoned
+/// for every subsequent call, not just the one that failed) as well as the
+/// retry-and-continue exit this test forces. Only the retry-and-continue
+/// exit is independently exercised by a test, here; the terminal exit's fix
+/// is reasoned from the identical root cause and the file's own
+/// established `ROLLBACK`-before-return pattern (used twice elsewhere in
+/// the same function), not separately proven — doing so would need
+/// `MAX_TX_ATTEMPTS` (8) actually exhausted under sustained contention,
+/// each attempt up to 5s, well past this test's budget.
 ///
 /// To actually discriminate "the retry loop resolved it" from "the test
 /// timing let `publish` through some other way" — rather than asserting

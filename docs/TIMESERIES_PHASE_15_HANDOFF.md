@@ -97,7 +97,7 @@ verification could be trusted:
   untested-but-present backstop ("a gap, not a claim of coverage"); the
   truth was stronger and worse (it did not work at all for the `BEGIN`
   path, as shipped). Added a correction paragraph
-  (`durable_control.rs:63-79`) rather than editing the original claim in
+  (`durable_control.rs:63-80`) rather than editing the original claim in
   place, matching this series' additive-correction convention.
 - **The "poisoned for every subsequent call" claim about the sibling
   `return Err(err)` branch is reasoned from the code, not independently
@@ -110,16 +110,16 @@ verification could be trusted:
 Primary files changed:
 
 - **`crates/cubism-iceberg/src/durable_control.rs`** (modified): the
-  `with_immediate_tx` retry loop's failed-`BEGIN IMMEDIATE` branch now
-  issues a `ROLLBACK` before returning the connection to the pool, on
-  *both* exits from that branch (`durable_control.rs:408`, the
-  retry-and-continue exit, and covering the `return Err(err)` exit at
-  `durable_control.rs:414` by the same `ROLLBACK` call placed before the
-  branch — see the branch itself for the exact placement) — not just the
-  retryable case the new test happens to force, since the same
-  connection-poisoning mechanism applies to the terminal case too. Added a
-  correction paragraph to the module doc comment
-  (`durable_control.rs:63-79`) recording the observed bug and fix in place
+  `with_immediate_tx` retry loop's failed-`BEGIN IMMEDIATE` branch
+  (`durable_control.rs:396-415`) now issues a single `ROLLBACK`
+  (`durable_control.rs:408`) before the retryable/non-retryable check, so
+  it covers *both* exits from that branch — the retry-and-continue exit
+  (`durable_control.rs:412`) and the terminal `return Err(err)` exit
+  (`durable_control.rs:414`) — not just the retryable case the new test
+  happens to force, since the same connection-poisoning mechanism applies
+  to the terminal case too. Added a correction paragraph to the module doc
+  comment
+  (`durable_control.rs:63-80`) recording the observed bug and fix in place
   of editing the prior (now-inaccurate) claim that this path was merely
   untested.
 - **`crates/cubism-iceberg/tests/concurrency.rs`** (modified): new test
@@ -228,8 +228,7 @@ Also present, deliberately uncommitted per prior-session convention:
 `.serena/` (local tooling state), `examples/web_analytics_demo/events.csv`
 (generated demo output).
 
-## Tests (33 in `cubism-iceberg`, +1 ignored this session; 170 passed / 2
-ignored in workspace, +1 ignored)
+## Tests (33 passed + 1 ignored in `cubism-iceberg`; 170 passed / 2 ignored in workspace)
 
 `cargo test -p cubism-iceberg` reports 33 passed, 1 ignored (6 suites): 13
 unit (`--lib`, unchanged) + 6 Phase-3 integration (`--test phase3`,
@@ -273,7 +272,7 @@ cargo test -p cubism-core                                                 # 92 p
 
 - [`../crates/cubism-iceberg/src/durable_control.rs`](../crates/cubism-iceberg/src/durable_control.rs)
   (`with_immediate_tx`'s `ROLLBACK` fix on the failed-`BEGIN IMMEDIATE`
-  branch, module doc correction paragraph at lines 63-79)
+  branch, module doc correction paragraph at lines 63-80)
 - [`../crates/cubism-iceberg/tests/concurrency.rs`](../crates/cubism-iceberg/tests/concurrency.rs)
   (new `retry_loop_resolves_a_write_lock_held_past_busy_timeout` test,
   module doc update)
