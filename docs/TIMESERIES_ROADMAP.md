@@ -532,7 +532,15 @@ into an observed one before Milestones 8-10 build on it.
 
 ### Milestone 7 — Spike: `RecordBatch` from `cubism-iceberg` into a DF54 `SessionContext`
 
-- **Status:** Not started.
+- **Status:** Done — `docs/TIMESERIES_PHASE_17_HANDOFF.md`. The spike
+  landed as a `[dev-dependencies]` entry, not the plain `[dependencies]`
+  this milestone's text originally called for (advisor-flagged deviation,
+  see that handoff): Milestone 7's only consumer is
+  `tests/iceberg_bridge.rs`, and a regular dependency would have
+  permanently pulled `iceberg`/`sqlx`/`iceberg-catalog-sql` into
+  `cubism-datafusion`'s shipped dependency graph to serve a spike.
+  Milestone 10 promotes it to a normal dependency in one line when it
+  needs `cubism-iceberg` from `src/`.
 - **Target:** new integration test in `crates/cubism-datafusion` (e.g.
   `tests/iceberg_bridge.rs`), plus adding `cubism-iceberg` as a plain path
   dependency of `cubism-datafusion`'s `Cargo.toml` (not currently a

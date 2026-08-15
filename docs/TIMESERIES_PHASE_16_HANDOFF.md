@@ -27,7 +27,11 @@ plan's Phase 4 (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:582-670`) has every
 fully done — see that roadmap's "Phase 4 done" section, unchanged by this
 session, for what remains.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_17_HANDOFF.md`, which landed
+this doc's deferred item 1 (Milestone 7, the `RecordBatch`/DF54 spike),
+flipping it to `Done` in the roadmap and empirically confirming the
+`cargo tree`-reasoned premise this session's own second advisor pass
+established.
 
 ## What this session built
 

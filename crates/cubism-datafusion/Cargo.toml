@@ -15,4 +15,9 @@ serde_json.workspace = true
 [dev-dependencies]
 proptest = { workspace = true }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
+cubism-iceberg = { path = "../cubism-iceberg" }
+tempfile = "3"
 # DataFusion dependency lands in M2 with the XUnitExplode stream adapter.
+# cubism-iceberg is a dev-dependency only (Milestone 7 spike test), not a
+# regular dependency: nothing in src/ touches it until Milestone 10. See
+# docs/TIMESERIES_ROADMAP.md's Milestone 7.
