@@ -38,67 +38,49 @@ then listed all open issues (`#1`-`#18`, unchanged from Phase 16). Phase
 its own advisor review landed, and the roadmap's step-1 instructions say
 to check the roadmap before falling back to an ad hoc scan — Milestone 7
 was `Not started` with "Depends on: nothing new," so this session read
-its full spec (`docs/TIMESERIES_ROADMAP.md:533-559`) and confirmed it with
+its full spec (`docs/TIMESERIES_ROADMAP.md:533-566`) and confirmed it with
 the advisor before writing anything, per the skill's step 1.
 
-The advisor confirmed Milestone 7 as the right slice and flagged nine
-things worth acting on beyond the roadmap's own text:
+The advisor confirmed Milestone 7 as the right slice and flagged several
+implementation details worth deviating on. `cubism-iceberg` landed in
+`cubism-datafusion`'s `[dev-dependencies]`, not the plain `[dependencies]`
+the roadmap's text originally called for: the only consumer is
+`tests/iceberg_bridge.rs`, and a regular dependency would have
+permanently pulled `iceberg`/`sqlx`/`iceberg-catalog-sql` into
+`cubism-datafusion`'s shipped graph to serve a spike (recorded as a
+deviation in the roadmap's Milestone 7 entry; Milestone 10 promotes it in
+one line once `src/` actually needs it). The test builds and consumes
+every batch through `datafusion::arrow::*` only — no separately declared
+`arrow-array`/`arrow-schema` dev-dependency — so there's no adapter code
+anywhere in the test, consistent with the single unified `arrow` 58.3.0
+`cargo tree -i arrow --workspace` already showed feeding both the DF53
+and DF54 subgraphs. `cubism-iceberg/src/lib.rs` turned out not to
+re-export `iceberg::Catalog` (its `pub use` list, lines 24-32, has no
+`Catalog`); resolved by never naming the type explicitly — `open_catalog`
+returns `Arc<dyn Catalog>` and `.as_ref()` is called on it without
+importing the trait, so inference carries the whole test without an
+`iceberg` dev-dependency at all. `read_window` rejects an
+appended-but-unpublished revision with `UnpublishedWindow`
+(`tests/phase3.rs:213-222` proves the same failure mode), so the test
+publishes before reading. `SessionContext::read_batches`'s actual
+signature was read directly from the DF54 source
+(`~/.cargo/registry/src/.../datafusion-54.0.0/src/execution/context/mod.rs:1785-1806`)
+rather than trusted from the roadmap's parenthetical — it takes `impl
+IntoIterator<Item = RecordBatch>` and returns `Result<DataFrame>`,
+matching that parenthetical exactly, so no `MemTable`/`register_table`
+fallback was needed. Finally, a bare `SELECT count(*)`-style row count
+would pass on a schema-only round trip without decoding any column data,
+so the test also sums `count_v1` (plain `Int64`) across the collected
+batches via `.downcast_ref::<Int64Array>()` — the same manual-downcast
+pattern `crates/cubism-datafusion/src/build.rs`'s existing tests already
+use (e.g. `build.rs:224-226`), kept consistent with this crate's own
+convention.
 
-1. **`[dev-dependencies]`, not `[dependencies]`.** The roadmap's "plain
-   path dependency" wording would have pulled `iceberg`/`sqlx`/
-   `iceberg-catalog-sql` into `cubism-datafusion`'s shipped dependency
-   graph (and everything downstream of it) permanently, to serve a spike
-   whose only consumer is `tests/iceberg_bridge.rs` — nothing in `src/`
-   needs `cubism-iceberg` until Milestone 10. Landed as a dev-dependency
-   instead (`crates/cubism-datafusion/Cargo.toml:18`); Milestone 10 can
-   promote it in one line. Recorded as a deviation in the roadmap's
-   Milestone 7 entry.
-2. **No separate `arrow-array`/`arrow-schema` dev-deps** — build and
-   consume batches through `datafusion::arrow::*` only, so the *compile
-   succeeding* is the seam proof, not a coincidence of two independently
-   declared `arrow` deps happening to resolve to the same version.
-   `crates/cubism-datafusion/tests/iceberg_bridge.rs` never imports
-   `arrow_array`/`arrow_schema` directly.
-3. **Cargo/type friction check before writing the test:**
-   `cubism-iceberg/src/lib.rs` does not re-export `iceberg::Catalog`
-   (confirmed: its `pub use` list at lines 24-32 has no `Catalog`).
-   Resolved by never naming the type explicitly — `open_catalog` returns
-   `Arc<dyn Catalog>` and `.as_ref()` is called on it without importing
-   the trait, so type inference carries the whole test without an
-   `iceberg` dev-dependency at all.
-4. **Publish before reading** — `read_window` rejects an
-   appended-but-unpublished revision with `UnpublishedWindow`
-   (`tests/phase3.rs:213-222` proves the same failure mode). The test
-   calls `publications.publish("run-1", None)` before `read_window`.
-5. **Verify the DF54 API rather than trust the roadmap's parenthetical.**
-   Read `SessionContext::read_batches`'s actual source
-   (`~/.cargo/registry/src/.../datafusion-54.0.0/src/execution/context/mod.rs:1785-1806`,
-   confirmed via `Read` at that offset, not approximated) before writing
-   against it — it takes `impl IntoIterator<Item = RecordBatch>` and
-   returns `Result<DataFrame>`, matching the roadmap's `e.g.` usage
-   exactly, so no `MemTable`/`register_table` fallback was needed.
-6. **Sharper assertion than a bare `SELECT count(*)`.** `count(*)` over an
-   in-memory table can be satisfied from row counts without decoding
-   column data. The test asserts total row count *and* sums `count_v1`
-   (plain `Int64`) across the collected batches via
-   `.downcast_ref::<Int64Array>()` — the same manual-downcast pattern
-   `crates/cubism-datafusion/src/build.rs`'s existing tests already use
-   (e.g. `build.rs:224-226`), kept consistent with this crate's own
-   convention rather than introducing a new SQL-string-based assertion
-   style.
-7. **Counts move, and not where Phase 16's numbers were.**
-   `cubism-iceberg` stays 33 passed/1 ignored (unchanged — no source in
-   that crate was touched); `cubism-datafusion` gains one suite
-   (`iceberg_bridge`) and the workspace total moves 170→171 passed,
-   22→23 suites. See "Tests" below for the fresh-run numbers.
-8. **Bookkeeping beyond the skill's standard steps:** flip Milestone 7 to
-   `Done` in the roadmap (done — `docs/TIMESERIES_ROADMAP.md:535-543`);
-   comment on #8 with the empirical result (done —
-   [comment](https://github.com/jeromebanks/cubism-rs/issues/8#issuecomment-5304417062)).
-9. **A failing/non-compiling test would have been a legitimate landing
-   outcome, not something to force green.** Not needed this session — the
-   test compiled and passed on the first run
-   (`cargo test -p cubism-datafusion --test iceberg_bridge`).
+Bookkeeping beyond the skill's standard steps: flipped Milestone 7 to
+`Done` in the roadmap (`docs/TIMESERIES_ROADMAP.md:535-543`) and commented
+on #8 with the empirical result
+([comment](https://github.com/jeromebanks/cubism-rs/issues/8#issuecomment-5304417062)),
+narrowed by a same-day follow-up comment (see "GitHub issues touched").
 
 Primary files changed:
 
@@ -109,7 +91,7 @@ Primary files changed:
 - **`crates/cubism-datafusion/tests/iceberg_bridge.rs`** (new, 155 lines):
   the Milestone 7 spike test,
   `record_batch_from_read_window_round_trips_through_a_df54_session_context`
-  (line 89), plus its doc comment (lines 1-20) stating what the test
+  (line 89), plus its doc comment (lines 1-21) stating what the test
   proves and does not prove — this series' standing convention for new
   tests, especially ones making a claim about a version/type seam that's
   easy to overstate.
@@ -121,23 +103,29 @@ Primary files changed:
 
 ## What was actually verified
 
-That a `Vec<RecordBatch>` read back from `cubism-iceberg`'s
-`AggregateReader::read_window` — built and appended entirely through
-`cubism-iceberg`'s own `arrow_array`/`arrow_schema` (DF53-era, `iceberg
-0.10`'s dependency tree) — compiles and runs against a DataFusion 54
-`SessionContext::read_batches` call with zero conversion code, using
-exclusively `datafusion::arrow::*` types on the consuming side. Two rows
-round-trip (`total_rows == 2`), and one column's actual values decode
-correctly post-round-trip (`total_count_v1 == 8`, summed via
-`Int64Array::downcast_ref`), not just the row count. That the full step-4
-verification battery is clean with this change in place, re-run fresh this
-session (see "Tests" below). That `cubism-iceberg` is reachable from
-`cubism-datafusion`'s test binary only via `[dev-dependencies]`, not
-`[dependencies]` (`cargo tree -p cubism-datafusion -e dev` shows the edge;
-`cargo tree -p cubism-datafusion -e normal` does not). That `arrow`
-58.3.0 is still unified across the DF53/DF54 split after this session's
-`Cargo.toml` change (`cargo tree -i arrow --workspace`, re-run fresh this
-session, not carried forward from Phase 16's pre-change resolution).
+That a batch built with `datafusion::arrow::*` types survives the full
+runtime round trip: written through `cubism-iceberg`'s
+`AggregateWriter::append_window`, committed to Parquet, scanned back out
+by `AggregateReader::read_window`, and handed straight to a DataFusion 54
+`SessionContext::read_batches` call with zero conversion code. `cargo
+tree -i arrow --workspace` already showed one unified `arrow` 58.3.0
+feeding both the DF53 and DF54 subgraphs before this session — that
+static resolution means type-identity failing to *compile* was never the
+real risk, so the compile succeeding is not itself new evidence. What the
+test actually retires is the risk `cargo tree`'s static resolution can't
+see: a runtime ABI mismatch or feature-flag divergence somewhere in the
+write → Parquet → scan → decode path. Two rows round-trip (`total_rows ==
+2`), and one column's actual values decode correctly post-round-trip
+(`total_count_v1 == 8`, summed via `Int64Array::downcast_ref`), not just
+the row count. That the full step-4 verification battery is clean with
+this change in place, re-run fresh this session (see "Tests" below). That
+`cubism-iceberg` is reachable from `cubism-datafusion`'s test binary only
+via `[dev-dependencies]`, not `[dependencies]` (`cargo tree -p
+cubism-datafusion -e dev` shows the edge; `cargo tree -p cubism-datafusion
+-e normal` does not). That `arrow` 58.3.0 is still unified across the
+DF53/DF54 split after this session's `Cargo.toml` change (`cargo tree -i
+arrow --workspace`, re-run fresh this session, not carried forward from
+Phase 16's pre-change resolution).
 
 It does **not** prove: anything about `iceberg-datafusion`'s DF53
 `TableProvider` / SQL-level predicate pushdown — that's still `#8`'s
@@ -147,17 +135,26 @@ decode correctly through DataFusion — only `count_v1` (plain `Int64`) is
 asserted on beyond schema acceptance; the test's own doc comment says this
 explicitly. It does not prove `read_window`'s single-window predicate can
 be extended to a multi-window semijoin (`plan completion-criterion 774`,
-still gated). It does not build any of Milestones 8-10's actual types —
-Milestone 7 was a premise check, not `TemporalQuery`/`ResolutionPlan`/
-`CoveragePlan` construction.
+still gated). It does not exercise `state_udaf.rs`'s
+`AggregateState::decode`/`merge` machinery at all — the test reads plain
+`Int64`/`Float64` columns, not an encoded state blob, so the merge half
+of the direct-call path is still reasoned, not observed (see the #8
+follow-up comment below). It does not build any of Milestones 8-10's
+actual types — Milestone 7 was a premise check, not
+`TemporalQuery`/`ResolutionPlan`/`CoveragePlan` construction.
 
 ## GitHub issues touched
 
 - [#8](https://github.com/jeromebanks/cubism-rs/issues/8) — commented
-  with Milestone 7's empirical result: the direct-call functional path is
-  now observed clear of the DF53/DF54 seam, not just reasoned from
-  `cargo tree`. Left open — the SQL/pushdown half (criterion 774) is
-  still real and still gated on this issue.
+  with Milestone 7's empirical result, then a same-day
+  [follow-up](https://github.com/jeromebanks/cubism-rs/issues/8#issuecomment-5304437066)
+  narrowing that first comment: the *read* half of the direct-call path
+  (`read_window`'s output surviving a DF54 `SessionContext`) is now
+  observed clear of the DF53/DF54 seam, not just reasoned from `cargo
+  tree` — but the test never calls `state_udaf.rs`'s
+  `AggregateState::decode`/`merge`, so the *merge* half of that path is
+  still reasoned, not observed. Left open — the SQL/pushdown half
+  (criterion 774) is still real and still gated on this issue.
 - No new issues filed. The advisor's slice-selection pass did not surface
   any deferred item newly sized to a bounded slice beyond Milestone 7
   itself.
@@ -165,7 +162,7 @@ Milestone 7 was a premise check, not `TemporalQuery`/`ResolutionPlan`/
 ## Deferred / not done this session
 
 1. **Milestone 8 (`TemporalQuery` request shape + validation)** — the
-   roadmap's next Phase 5 milestone (`docs/TIMESERIES_ROADMAP.md:560-577`).
+   roadmap's next Phase 5 milestone (`docs/TIMESERIES_ROADMAP.md:568-585`).
    Its "Depends on: nothing new" and it's pure request-shape logic
    touching no DataFusion execution types, so it doesn't depend on
    Milestone 7 having landed — but Milestone 7 landing first keeps the
@@ -256,7 +253,7 @@ cargo tree -p cubism-datafusion -e normal                                 # conf
 - [`../crates/cubism-datafusion/Cargo.toml`](../crates/cubism-datafusion/Cargo.toml)
   (`cubism-iceberg`/`tempfile` dev-dependencies, lines 15-23)
 - [`../docs/TIMESERIES_ROADMAP.md`](TIMESERIES_ROADMAP.md) (Milestone 7,
-  lines 533-559; Milestone 8 is the natural next slice)
+  lines 533-566; Milestone 8 is the natural next slice)
 - [`TIMESERIES_PHASE_16_HANDOFF.md`](TIMESERIES_PHASE_16_HANDOFF.md) (prior
   handoff, superseded by this one)
 - GitHub issue [`#8`](https://github.com/jeromebanks/cubism-rs/issues/8)

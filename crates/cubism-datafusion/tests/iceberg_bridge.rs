@@ -1,15 +1,18 @@
-//! Milestone 7 spike (`docs/TIMESERIES_ROADMAP.md`): proves — by compiling
-//! and running, not by reasoning from `cargo tree` — that a `RecordBatch`
-//! read back from `cubism-iceberg`'s `AggregateReader::read_window` can be
-//! handed straight to a DataFusion 54 `SessionContext` with **no**
+//! Milestone 7 spike (`docs/TIMESERIES_ROADMAP.md`): proves at runtime,
+//! not just via `cargo tree`'s static resolution, that a batch built with
+//! `datafusion::arrow::*` types survives a full round trip — written
+//! through `cubism-iceberg`'s `AggregateWriter::append_window`, committed
+//! to Parquet, scanned back out by `AggregateReader::read_window`, and
+//! handed straight to a DataFusion 54 `SessionContext` — with **no**
 //! `iceberg-datafusion` dependency anywhere in the call path and no
-//! conversion step. Every array/schema type here comes from
-//! `datafusion::arrow::*` (DF54's own re-export), never a separately
-//! declared `arrow-array`/`arrow-schema` crate; if `arrow` were not unified
-//! across `cubism-iceberg`'s DF53-era `iceberg` dependency and this crate's
-//! DF54, `AggregateWriter::append_window`/`AggregateReader::read_window`
-//! below would fail to compile against these types. The compile succeeding
-//! *is* the assertion this milestone exists to make.
+//! conversion step. `cargo tree -i arrow --workspace` already showed one
+//! unified `arrow` 58.3.0 feeding both the DF53 and DF54 subgraphs, so
+//! type-identity failing to compile was never the real risk; what that
+//! static resolution *can't* see is a runtime ABI mismatch or a
+//! feature-flag divergence surfacing somewhere in the write → Parquet →
+//! scan → decode path. This test exercises that whole path and it works.
+//! That no conversion code exists on either side is a consequence of the
+//! already-known single-`arrow` resolution, not a new finding by itself.
 //!
 //! What this test does **not** prove: it says nothing about
 //! `iceberg-datafusion`/DF53 `TableProvider` registration (still gated on
