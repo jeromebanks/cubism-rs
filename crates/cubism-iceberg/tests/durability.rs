@@ -22,7 +22,8 @@ use cubism_core::AggKind;
 use cubism_core::temporal::{WindowId, WindowRevision};
 use cubism_iceberg::{
     AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, CorrectionCoordinator,
-    CorrectionRequest, CubismIcebergError, PublicationStore, ReconciliationRecord, TemporalTable,
+    CorrectionRequest, CubismIcebergError, PublicationStore, ReconciliationRecord, RevisionStatus, RunInspection,
+    TemporalTable,
 };
 use tempfile::TempDir;
 
@@ -617,5 +618,106 @@ async fn publish_repoints_a_window_to_a_prior_published_revision_via_the_existin
             aggregate_snapshot_id: corrected_snapshot_id
         },
         "a rolled-back-past run still classifies as Published — see #18"
+    );
+}
+
+/// Milestone 6 (narrowed — inspection only, `docs/TIMESERIES_ROADMAP.md`):
+/// `RunInspection::inspect` against the **durable SQLite backend**, from a
+/// fresh third handle, replaying the same rollback shape as the test above.
+/// The prior test proves `ReconciliationRecord::classify` alone still reads
+/// `Published` for a rolled-back-past run; this test proves the live
+/// `current`-cross-check `RunInspection` adds actually distinguishes the
+/// two runs through the real durable store, not just in-memory (that's
+/// `coordinator.rs`'s
+/// `run_inspection_pairs_reconciliation_stage_with_a_live_current_check`).
+#[tokio::test]
+async fn run_inspection_distinguishes_the_rolled_back_to_run_from_the_rolled_back_past_run() {
+    let warehouse = TempDir::new().unwrap();
+    let catalog_dir = TempDir::new().unwrap();
+    let catalog_db = catalog_dir.path().join("catalog.sqlite");
+    let control_dir = TempDir::new().unwrap();
+    let control_db = control_dir.path().join("control.sqlite");
+    let config = CatalogConfig::Sqlite { warehouse: warehouse.path().to_path_buf(), catalog_db: catalog_db.clone() };
+    let window_id = WindowId::new("2026-08-12").unwrap();
+
+    let original_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let original_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    let corrected_states = vec![states_batch(&[
+        ("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0),
+        ("2026-08-12T00:20:00Z", xunit_id(2), 2, 2.0),
+    ])];
+    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a"), (xunit_id(2), b"b")])];
+
+    // One handle: publish revision 1 (run-1), revision 2 as a correction
+    // (run-2), then roll back to run-1's revision. Dropped before
+    // inspecting below, so inspection below sees only what the database
+    // holds.
+    {
+        let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+        let publications = PublicationStore::sqlite(&control_db).await.unwrap();
+
+        publications
+            .claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1)
+            .await
+            .unwrap();
+        let result = AggregateWriter::append_window(
+            catalog.as_ref(),
+            &table,
+            AppendWindow {
+                window_id: &window_id,
+                revision: WindowRevision::new(1).unwrap(),
+                run_id: "run-1",
+                states: &original_states,
+                registry: &original_registry,
+            },
+        )
+        .await
+        .unwrap();
+        publications.record_append("run-1", result.snapshot_id).await.unwrap();
+        publications.publish("run-1", None).await.unwrap();
+
+        publications
+            .claim_run(CUBE_ID, &window_id, "run-2", WindowRevision::new(2).unwrap(), 2)
+            .await
+            .unwrap();
+        let result2 = AggregateWriter::append_window(
+            catalog.as_ref(),
+            &table,
+            AppendWindow {
+                window_id: &window_id,
+                revision: WindowRevision::new(2).unwrap(),
+                run_id: "run-2",
+                states: &corrected_states,
+                registry: &corrected_registry,
+            },
+        )
+        .await
+        .unwrap();
+        publications.record_append("run-2", result2.snapshot_id).await.unwrap();
+        publications.publish("run-2", Some(WindowRevision::new(1).unwrap())).await.unwrap();
+
+        publications.publish("run-1", Some(WindowRevision::new(2).unwrap())).await.unwrap();
+    }
+
+    // A fresh handle inspects both runs.
+    let publications_b = PublicationStore::sqlite(&control_db).await.unwrap();
+
+    let run1 = RunInspection::inspect(&publications_b, CUBE_ID, &window_id, "run-1").await.unwrap();
+    assert!(matches!(
+        run1.record,
+        ReconciliationRecord::Published { revision, .. } if revision == WindowRevision::new(1).unwrap()
+    ));
+    assert_eq!(run1.revision_status, Some(RevisionStatus::Current), "run-1 was rolled back to; it is current");
+
+    let run2 = RunInspection::inspect(&publications_b, CUBE_ID, &window_id, "run-2").await.unwrap();
+    assert!(matches!(
+        run2.record,
+        ReconciliationRecord::Published { revision, .. } if revision == WindowRevision::new(2).unwrap()
+    ));
+    assert_eq!(
+        run2.revision_status,
+        Some(RevisionStatus::NotCurrent),
+        "run-2's RunState still says Published but it was rolled back past — see #18"
     );
 }

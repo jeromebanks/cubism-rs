@@ -339,20 +339,49 @@ compiles.
 
 ### Milestone 6 — Public correction API
 
-- **Status:** Not started.
+- **Status:** Done (narrowed) — `docs/TIMESERIES_PHASE_14_HANDOFF.md`.
 - **Target:** public API surface in `crates/cubism-iceberg/src` (library
   level — plan's "Public API changes"; a CLI surface for this is explicitly
   #11's scope, not this milestone's).
-- **What it does:** submit/schedule a correction by source checkpoint or
-  time range; inspect current/superseded revisions and reconciliation state.
-- **Test:** an integration test exercising submit → coordinator runs →
-  inspect reconciliation state, using Milestones 3-5's types together.
-- **Depends on:** Milestones 3, 4, 5.
+- **What it does:** (Corrected: the original wording bundled two things —
+  "submit/schedule a correction by source checkpoint or time range" and
+  "inspect current/superseded revisions and reconciliation state." Only the
+  second is built. The submit/schedule half needs the same event-time-to-
+  window mapping Milestone 4 already found this crate cannot do without an
+  aggregation engine — narrowed to "caller-identified window" the way
+  `CorrectionCoordinator::execute` already is, it would be a zero-behavior
+  wrapper over `execute`, the same untested-scaffolding refusal Milestones 3
+  and 5 already made. Recorded as a non-goal, cross-linked to
+  [#16](https://github.com/jeromebanks/cubism-rs/issues/16), not filed as a
+  new issue.) `RunInspection::inspect`
+  (`crates/cubism-iceberg/src/coordinator.rs`) pairs
+  `ReconciliationRecord::classify` (Milestone 5, pure, no I/O) with a live
+  read of `PublicationStore::current`, returning `RevisionStatus::Current`
+  or `RevisionStatus::NotCurrent`. This is
+  [#18](https://github.com/jeromebanks/cubism-rs/issues/18)'s option 1,
+  implemented: a `Published` run's `RunState` alone cannot say whether its
+  revision is still current post-rollback (`docs/TIMESERIES_PHASE_13_HANDOFF.md`),
+  so inspection cross-checks `current` live instead of trusting the cached
+  stage. Deliberately not phrased as "superseded/not superseded" — after a
+  rollback, a not-current revision can be numerically *higher* than
+  current, so "superseded" would misdescribe it; see `RevisionStatus`'s doc
+  comment.
+- **Test:** (Corrected: narrowed from "submit → coordinator runs → inspect"
+  since submit is a non-goal — see above.)
+  `run_inspection_pairs_reconciliation_stage_with_a_live_current_check`
+  (`crates/cubism-iceberg/src/coordinator.rs`, unit, in-memory store) proves
+  the pairing itself: no revision status before publish, `Current` for the
+  run holding `current`, `NotCurrent` for a run rolled back past, replaying
+  Phase 13's rollback shape.
+  `run_inspection_distinguishes_the_rolled_back_to_run_from_the_rolled_back_past_run`
+  (`crates/cubism-iceberg/tests/durability.rs`) proves the same distinction
+  through the **durable SQLite backend**, from a fresh handle.
+- **Depends on:** Milestones 3, 4, 5. Met.
 - **Done when:** the public API is callable end-to-end with a passing
-  integration test. **This closes Phase 4's #13 scope** (modulo the
-  "Unresolved decisions" and "Rollback point" items below, which are
-  design/ops concerns rather than a coded milestone — see "Phase 4 done"
-  below).
+  integration test. **Met, for the narrowed (inspection-only) scope** — see
+  "Phase 4 done" below for why this does **not** by itself close Phase 4's
+  #13 scope; the plan's four completion criteria are walked individually
+  there rather than assumed met from "Milestone 6 done."
 
 ## Phase 4 "done" condition
 
@@ -362,10 +391,35 @@ Distinct from "every milestone above is done," per plan lines 650-669:
   by Milestones 1-6 above (634, 635, 638, 639 plus 636/637 already closed);
   the remaining two (640 compaction, 641 retention) are #10's scope, not
   this roadmap's.
-- Plan's four completion criteria (lines 651-655) hold, verified explicitly
-  in the handoff that closes Milestone 6 — don't just assert "milestones
-  done, therefore criteria met" without checking each one against what was
-  actually built.
+- Plan's four completion criteria (lines 651-655), walked individually now
+  that Milestone 6 (narrowed) is done — not assumed met from "milestones
+  done, therefore criteria met":
+  1. *"Late data produces a full, atomically published replacement."* Met —
+     `CorrectionCoordinator::execute` (Milestone 4) appends under the
+     requested revision and publishes via CAS; `tests/phase3.rs`'s
+     `publishing_a_new_revision_replaces_visibility_of_the_prior_one` and
+     Milestone 4's own revision-isolation test both prove the replacement
+     is atomic and complete from the reader's view.
+  2. *"A deterministic recovery run classifies and reconciles every
+     interrupted job."* **Not** met as literally worded — Milestone 5
+     (narrowed) recovers three of the four stages a correction can be
+     interrupted at; the fourth (`AwaitingAppend`'s ambiguous case — append
+     committed but not yet recorded) is not safely recoverable by a naive
+     retry, tracked in
+     [#17](https://github.com/jeromebanks/cubism-rs/issues/17), not fixed
+     by any milestone above.
+  3. *"Compaction and retention SLOs are documented and observable."*
+     **Not** met — no compaction or retention exists in this roadmap's
+     scope at all, by design (this roadmap's "Scope" section above excludes
+     it, tracked entirely in
+     [#10](https://github.com/jeromebanks/cubism-rs/issues/10)).
+  4. *"No maintenance path changes aggregate answers."* Not applicable yet
+     — there is no maintenance path (compaction/retention) to check against,
+     for the same reason as (3).
+  Net: only criterion 1 is fully met; 2 is partially met (#17); 3 and 4 are
+  out of this roadmap's scope entirely (#10). Phase 4 as this roadmap
+  defines it (excluding #10) is therefore **not** done purely because
+  Milestone 6 closed — #17 remains a real gap in criterion 2.
 - Plan's "Unresolved decisions" (lines 658-663) are each either resolved (as
   Milestones 1 and 2 do for two of them) or explicitly deferred with a
   reason, not silently dropped.
@@ -386,8 +440,14 @@ Distinct from "every milestone above is done," per plan lines 650-669:
   scope) are not. The rollback also leaves the superseded run's own
   `RunState` reporting `Published` (`ReconciliationRecord::classify` cannot
   tell it's now stale) — tracked in
-  [#18](https://github.com/jeromebanks/cubism-rs/issues/18), a real
-  consequence of this finding, not resolved by it.
+  [#18](https://github.com/jeromebanks/cubism-rs/issues/18). (Corrected:
+  #18 is resolved as of `docs/TIMESERIES_PHASE_14_HANDOFF.md` — Milestone
+  6's `RunInspection::inspect` cross-checks a `Published` run's revision
+  against live `PublicationStore::current` rather than trusting the cached
+  `RunState` stage, #18's own suggested option 1. The raw `RunState` row
+  itself is still unchanged by rollback, as expected; the gap #18 tracked
+  was that nothing *answered* the "is this still current" question
+  correctly, and now something does.)
 - Plan line 634's literal wording ("a late-event rebuild equals a clean
   rebuild from the corrected source") and "identifies affected windows from
   event time" (plan's Phase 4 "Types and modules" section) are **not** met

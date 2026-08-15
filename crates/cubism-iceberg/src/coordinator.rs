@@ -36,6 +36,23 @@
 //! from the durable [`RunState`] the control store already tracks — see its
 //! own doc comment for what each stage does and does not prove is safe to
 //! recover from a restart.
+//!
+//! [`RunInspection`] (Milestone 6, narrowed) is this crate's inspection
+//! half of the plan's "submit or schedule a correction by source
+//! checkpoint/time range; inspect current/superseded revisions and
+//! reconciliation state" (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:603-604`).
+//! Only the inspection half is built: a submit/schedule-by-checkpoint-or-
+//! range facade needs the same event-time-to-window mapping Milestone 4
+//! already found this crate cannot do without an aggregation engine
+//! (tracked as #16, not this milestone) — narrowed to "caller-identified
+//! window" the way `CorrectionCoordinator::execute` already is, such a
+//! facade would be a zero-behavior wrapper over `execute`, the same
+//! untested-scaffolding refusal Milestones 3 and 5 already made for unused
+//! fields and a redundant persisted record. `RunInspection::inspect` pairs
+//! [`ReconciliationRecord::classify`] with a live
+//! [`crate::control::PublicationStore::current`] read, which is what makes
+//! "superseded" answerable at all post-rollback — see
+//! [`RevisionStatus`]'s doc comment for why that word itself is avoided.
 
 use arrow_array::RecordBatch;
 use cubism_core::AggKind;
@@ -106,6 +123,16 @@ use crate::writer::{AggregateWriter, AppendWindow};
 ///   — see `PublicationStore::publish`'s early return when the requested
 ///   revision is already current, which both the in-memory and SQLite
 ///   backends implement identically ahead of the CAS comparison.
+///   **Caveat added by Milestone 6:** this variant alone does not mean the
+///   run's revision is still the window's *current* one. After a rollback
+///   (`docs/TIMESERIES_PHASE_13_HANDOFF.md` — repointing `current` back to
+///   an earlier run via the same CAS `publish` call) a differently-run
+///   revision can retake `current` while this run's own `RunState` still
+///   reads `Published`, unchanged, because rollback never touches the
+///   run it rolls back past
+///   ([issue #18](https://github.com/jeromebanks/cubism-rs/issues/18)). Use
+///   [`RunInspection::inspect`] for a live cross-check against `current`
+///   rather than trusting this variant standalone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconciliationRecord {
     NotStarted,
@@ -129,6 +156,71 @@ impl ReconciliationRecord {
                 Self::Published { revision: *revision, aggregate_snapshot_id: *aggregate_snapshot_id }
             }
         }
+    }
+}
+
+/// Whether a run's own revision is the window's *current* revision, per a
+/// live read of [`PublicationStore::current`] — Milestone 6's inspection
+/// API (`docs/TIMESERIES_ROADMAP.md`), resolving
+/// [issue #18](https://github.com/jeromebanks/cubism-rs/issues/18)'s option
+/// 1: a live cross-check, not a trusted [`ReconciliationRecord::Published`]
+/// read in isolation (the roadmap's precedent, from Milestones 3 and 5, is
+/// to prefer this over #18's option 2 — a new durable rollback record —
+/// absent a concrete need for queryable rollback history).
+///
+/// Deliberately not named `Superseded`/`NotSuperseded`: after a rollback
+/// (`docs/TIMESERIES_PHASE_13_HANDOFF.md`), a not-current revision can be
+/// numerically *higher* than the window's current one, so "superseded"
+/// (which implies "replaced by something newer") would be misleading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionStatus {
+    /// This run's revision equals `PublicationStore::current` for its
+    /// window.
+    Current,
+    /// This run's revision is not `PublicationStore::current` for its
+    /// window. This alone does not say *why* — a later correction, a
+    /// rollback past this run, or (if the run's own revision was never
+    /// published) nothing having happened yet. `control_runs` has no
+    /// record ordering revisions or distinguishing those cases; see #18.
+    NotCurrent,
+}
+
+/// A run's reconciliation stage plus, when that stage is
+/// [`ReconciliationRecord::Published`], whether its revision is still the
+/// window's current one. Pairing these is Milestone 6's inspection API:
+/// [`ReconciliationRecord::classify`] alone is a pure projection of
+/// [`RunState`] with no I/O; knowing whether a `Published` run is still
+/// current requires reading [`PublicationStore::current`] too, which
+/// [`Self::inspect`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunInspection {
+    pub record: ReconciliationRecord,
+    /// `Some` only when `record` is [`ReconciliationRecord::Published`] —
+    /// every other stage has no window revision yet to compare against
+    /// `current`.
+    pub revision_status: Option<RevisionStatus>,
+}
+
+impl RunInspection {
+    /// Inspect one run: classify its [`RunState`] and, if
+    /// [`ReconciliationRecord::Published`], cross-check its revision
+    /// against the window's live [`PublicationStore::current`] value.
+    pub async fn inspect(
+        publications: &PublicationStore,
+        cube_id: &str,
+        window_id: &WindowId,
+        run_id: &str,
+    ) -> Result<Self> {
+        let run_state = publications.run_state(run_id).await?;
+        let record = ReconciliationRecord::classify(run_state.as_ref());
+        let revision_status = match &record {
+            ReconciliationRecord::Published { revision, .. } => {
+                let current = publications.current(cube_id, window_id).await?;
+                Some(if current == Some(*revision) { RevisionStatus::Current } else { RevisionStatus::NotCurrent })
+            }
+            _ => None,
+        };
+        Ok(Self { record, revision_status })
     }
 }
 
@@ -247,6 +339,58 @@ mod tests {
         assert_eq!(
             ReconciliationRecord::classify(Some(&published)),
             ReconciliationRecord::Published { revision: revision(2), aggregate_snapshot_id: 101 }
+        );
+    }
+
+    /// Proves `RunInspection::inspect` (Milestone 6): no revision status
+    /// before a run is published, `Current` for the run holding a window's
+    /// live `current` revision, and — replaying the exact rollback shape
+    /// `docs/TIMESERIES_PHASE_13_HANDOFF.md` proved — `NotCurrent` for a
+    /// run whose own `RunState` still reads `Published` after a later
+    /// rollback repointed `current` away from it. Uses
+    /// `PublicationStore::in_memory()` only (no Iceberg catalog): `publish`
+    /// requires a prior `record_append` but not a real Iceberg commit, so
+    /// this test proves the inspection pairing itself, not the durable
+    /// SQLite backend or reader-visibility — those are `tests/durability.rs`'s
+    /// job.
+    #[tokio::test]
+    async fn run_inspection_pairs_reconciliation_stage_with_a_live_current_check() {
+        let store = PublicationStore::in_memory();
+        let w = WindowId::new("2026-08-12").unwrap();
+
+        store.claim_run("cube", &w, "run-1", revision(1), 1).await.unwrap();
+        let claimed = RunInspection::inspect(&store, "cube", &w, "run-1").await.unwrap();
+        assert_eq!(claimed.record, ReconciliationRecord::AwaitingAppend { revision: revision(1) });
+        assert_eq!(claimed.revision_status, None, "no revision to compare against `current` before publish");
+
+        store.record_append("run-1", 101).await.unwrap();
+        store.publish("run-1", None).await.unwrap();
+
+        store.claim_run("cube", &w, "run-2", revision(2), 2).await.unwrap();
+        store.record_append("run-2", 102).await.unwrap();
+        store.publish("run-2", Some(revision(1))).await.unwrap();
+
+        // Rollback: republish run-1's own fixed revision against the
+        // window's actual current (2) — the mechanism proven in
+        // `docs/TIMESERIES_PHASE_13_HANDOFF.md`.
+        store.publish("run-1", Some(revision(2))).await.unwrap();
+
+        let run1 = RunInspection::inspect(&store, "cube", &w, "run-1").await.unwrap();
+        assert_eq!(
+            run1.record,
+            ReconciliationRecord::Published { revision: revision(1), aggregate_snapshot_id: 101 }
+        );
+        assert_eq!(run1.revision_status, Some(RevisionStatus::Current));
+
+        let run2 = RunInspection::inspect(&store, "cube", &w, "run-2").await.unwrap();
+        assert_eq!(
+            run2.record,
+            ReconciliationRecord::Published { revision: revision(2), aggregate_snapshot_id: 102 }
+        );
+        assert_eq!(
+            run2.revision_status,
+            Some(RevisionStatus::NotCurrent),
+            "run-2's RunState still says Published but revision 2 is no longer current — see #18"
         );
     }
 }

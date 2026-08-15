@@ -24,7 +24,10 @@ is still on its sixth and final roadmap milestone. See
 `docs/TIMESERIES_ROADMAP.md` for what this session's work means relative to
 plan phases.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_14_HANDOFF.md`, which picked up
+this handoff's deferred item 1 (Milestone 6's inspection API, now landed as
+`RunInspection`) and deferred item 2 (issue #18, resolved by that same
+work).
 
 ## What this session built
 
