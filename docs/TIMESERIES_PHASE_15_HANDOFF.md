@@ -32,7 +32,10 @@ plan's Phase 4 (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:582-670`) has every
 see that roadmap's "Phase 4 done" section, unchanged by this session, for
 what remains.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_16_HANDOFF.md`, which extended
+`docs/TIMESERIES_ROADMAP.md` to plan-Phase 5 (this doc's deferred item 4)
+and left the rest of this doc's deferred list (`#17`, `#16`, `#10`, item
+6's unverified `return Err(err)` branch) unchanged/re-confirmed.
 
 ## What this session built
 

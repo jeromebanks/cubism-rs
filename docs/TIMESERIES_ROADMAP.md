@@ -1,6 +1,7 @@
-# Time-Series Roadmap: Phase 4 Session-Slice Milestones
+# Time-Series Roadmap: Phase 4-5 Session-Slice Milestones
 
-Date: 2026-08-12
+Date: 2026-08-12 (Phase 5 section added 2026-08-15, see that section's own
+note)
 
 Branch: `feature/timeseries-phase-0a`
 
@@ -15,9 +16,13 @@ series has been. Filed in response to
 Scope: Phase 4 minus compaction/retention/object-store (tracked separately in
 [#10](https://github.com/jeromebanks/cubism-rs/issues/10)), per
 [#13](https://github.com/jeromebanks/cubism-rs/issues/13)'s explicit
-non-goals. **Does not yet cover plan-Phase 5** (exactness-aware DataFusion
-range queries) — extending this roadmap past Phase 4 is deferred; see the
-Phase 7 handoff's deferred list.
+non-goals, **plus Phase 5** (exactness-aware DataFusion range queries and
+serving — see "Phase 5 Milestones" below, added once every Phase 4 milestone
+was done, per #15's own suggested steps). Phase 5's SQL/pushdown-generality
+half stays gated on [#8](https://github.com/jeromebanks/cubism-rs/issues/8)
+(DataFusion 53/54 convergence for `iceberg-datafusion`'s `TableProvider`);
+its direct-call functional half is not — see "Phase 5 Milestones" for the
+evidence and the boundary between them.
 
 ## How `timeseries-slice` step 1 should use this doc
 
@@ -38,14 +43,19 @@ this doc existed:
 3. Advisor still reviews the pick — this doc narrows the candidate list to
    one, it doesn't replace the advisor's scope/locking-model check (skill
    step 1, item 3).
-4. **Once every milestone below is marked done**, this roadmap's milestone
-   list is exhausted — not the same claim as Phase 4 (`#13`'s scope) being
-   finished; see "Phase 4 done" below for why (as of Milestone 6 closing,
-   it is not: criterion 2 is open via #17, criteria 3-4 are out of this
-   roadmap's scope via #10). At that point step 1 has no more milestones to
-   consult here and should fall back to its original behavior: scan open
-   issues and the latest handoff's deferred list directly (starting with
-   #10 and this roadmap's own "Deferred" note about Phase 5).
+4. **Once every milestone below is marked done** (Phase 4's six plus Phase
+   5's, see "Phase 5 Milestones"), this roadmap's milestone list is
+   exhausted — not the same claim as Phase 4 (`#13`'s scope) or Phase 5
+   being finished; see "Phase 4 done" and "Phase 5 Milestones" below for
+   why (as of Milestone 6 closing, Phase 4 is not: criterion 2 is open via
+   #17, criteria 3-4 are out of this roadmap's scope via #10; Phase 5's own
+   completion criteria are walked in that section). At that point step 1
+   has no more milestones to consult here and should fall back to its
+   original behavior: scan open issues and the latest handoff's deferred
+   list directly, starting with #10 (compaction/retention/object-store,
+   still out of this roadmap's scope) — the Phase 5 fallback this line
+   used to point to is resolved now that Phase 5 has its own milestones
+   below.
 
 ## Current state (read before drafting Milestone 1's implementation)
 
@@ -470,12 +480,191 @@ Distinct from "every milestone above is done," per plan lines 650-669:
   [#17](https://github.com/jeromebanks/cubism-rs/issues/17), not assigned to
   a milestone above.
 
+## Phase 5 Milestones
+
+Added 2026-08-15 (`docs/TIMESERIES_PHASE_16_HANDOFF.md`), once every Phase 4
+milestone above was `Done`, per #15's own suggested steps and this doc's
+former "Deferred" item 1 below (now resolved). Same decomposition
+convention as Phase 4's milestones: target file(s), the one test it adds,
+its dependencies, its done-condition. **Doc-only when added** — no Phase 5
+milestone below is implemented yet; every "Status" is `Not started` unless
+noted.
+
+### Why this section exists despite #8
+
+[#8](https://github.com/jeromebanks/cubism-rs/issues/8) says Phase 5
+"cannot proceed" until `cubism-datafusion` (DataFusion 54) and
+`iceberg-datafusion` 0.10 (DataFusion 53) converge, because their
+`SessionContext`/`TableProvider`/`ExecutionPlan` types aren't
+interchangeable. Read closely (`crates/cubism-iceberg/src/lib.rs`'s
+top-level doc comment, `crates/cubism-iceberg/src/reader.rs`'s
+`read_window` doc comment, `crates/cubism-datafusion/src/state_udaf.rs`),
+that claim is broader than the evidence: it's true for *generic SQL-level*
+access — registering this crate's Iceberg tables in a DataFusion
+`SessionContext` via `iceberg-datafusion`'s `TableProvider` impl so
+arbitrary predicate pushdown/joins work through the DF53 crate. It is not
+true for calling `AggregateReader::read_window` (`crates/cubism-iceberg/src/reader.rs:28`)
+directly from `cubism-datafusion` (a plain path dependency, no
+`iceberg-datafusion` involved) and merging the resulting `RecordBatch`es
+with the merge machinery `state_udaf.rs` already has
+(`AggregateState::decode`+`merge`, `crates/cubism-core/src/aggregate_state.rs:169`)
+— the same "cross the crate boundary via `arrow_array::RecordBatch`/
+`arrow_schema::Schema` only" strategy `cubism-iceberg`'s own top-level doc
+comment already describes for Phase 3. Confirmed, not assumed:
+`cargo tree -i arrow --workspace` resolves a single unified `arrow` 58.3.0
+across both the DF53 and DF54 dependency trees, and `cargo tree -p
+cubism-iceberg` resolves the same `arrow-array`/`arrow-schema` 58.3.0 — so
+a `RecordBatch` from `read_window` is already the type DF54's
+`cubism-datafusion` expects, with no adapter needed. `crates/cubism-iceberg/src/reader.rs`'s
+doc comment carried the same overstated framing as #8 (a `read_window`
+call site describing range queries as "gated on DataFusion 53/54
+convergence") — corrected in place there, additively, this session.
+
+Commented on #8 with this narrowing (read-not-built, matching how the
+`return Err(err)` branch was labeled in
+`docs/TIMESERIES_PHASE_15_HANDOFF.md`) rather than closing or rewriting it:
+#8 stays open and load-bearing for the SQL/pushdown half (see Milestone
+10's "Depends on" and completion-criterion 774 below), narrowed rather than
+resolved.
+
+Milestone 7 below converts this from a reasoned-from-`Cargo.toml` premise
+into an observed one before Milestones 8-10 build on it.
+
+### Milestone 7 — Spike: `RecordBatch` from `cubism-iceberg` into a DF54 `SessionContext`
+
+- **Status:** Not started.
+- **Target:** new integration test in `crates/cubism-datafusion` (e.g.
+  `tests/iceberg_bridge.rs`), plus adding `cubism-iceberg` as a plain path
+  dependency of `cubism-datafusion`'s `Cargo.toml` (not currently a
+  dependency in either direction, confirmed via `cargo tree`).
+- **What it does:** publishes one window via `cubism-iceberg` (in-memory
+  catalog/control store, same pattern `tests/phase3.rs` already uses), then
+  from `cubism-datafusion` calls `AggregateReader::read_window` and hands
+  the resulting `Vec<RecordBatch>` to a `datafusion::execution::context::SessionContext`
+  (`SessionContext::new().read_batches(...)` or equivalent) with **no**
+  `iceberg-datafusion` dependency anywhere in the call path. Purely a
+  premise check — no query planning, merging, or `TemporalQuery` type yet.
+- **Test:** one integration test asserting the batch round-trips through a
+  DF54 `SessionContext` (e.g. a trivial `SELECT count(*)` over it) without
+  a version-seam type error at compile or run time.
+- **Depends on:** nothing new (Milestone 6 and everything in "Current
+  state" above).
+- **Done when:** the test passes and the full step-4 battery is clean. If
+  it does **not** pass — the "Why this section exists despite #8" reasoning
+  was wrong somewhere `cargo tree` didn't catch (e.g. a runtime ABI
+  mismatch `cargo tree`'s static resolution can't see) — this milestone
+  becomes "resolve the seam, or build the Arrow/service-boundary fallback
+  #8's own suggested next steps propose," and Milestones 8-10 stay blocked
+  behind it rather than proceeding on a false premise.
+
+### Milestone 8 — `TemporalQuery` (request shape + validation)
+
+- **Status:** Not started.
+- **Target:** `crates/cubism-datafusion/src/range_query.rs` (new file, per
+  plan line 677).
+- **What it does:** the plan's requested-query shape (lines 697-706) as a
+  typed struct — cube/spec, `XUnit` selector(s) (`crates/cubism-core/src/ypath.rs:74`),
+  measure(s), `[start, end)`, requested/auto `Resolution`
+  (`crates/cubism-core/src/temporal.rs:331`), `exact: bool`, gap policy,
+  timezone/display options — with construction-time validation (e.g.
+  `start < end`, requested resolution is one the cube's `TemporalSpec`
+  actually supports). Pure request-shape logic; touches no DataFusion
+  execution types, so it doesn't depend on Milestone 7.
+- **Test:** unit tests for valid construction plus at least one rejection
+  case (`start >= end`; an unsupported resolution for the cube).
+- **Depends on:** nothing new.
+- **Done when:** the type exists, is unit-tested, and the full step-4
+  battery is clean.
+
+### Milestone 9 — `ResolutionPlan` (non-overlapping segment selection)
+
+- **Status:** Not started.
+- **Target:** same file as Milestone 8.
+- **What it does:** given a `TemporalQuery` and a cube's `TemporalSpec`,
+  choose non-overlapping resolution segments covering `[start, end)` —
+  plan line 740 ("range decomposition for aligned and unaligned
+  boundaries") and line 741 ("resolution choice never overlaps or
+  double-counts"). Pure computation over window boundaries; still no
+  DataFusion execution types.
+- **Test:** unit/property tests over synthetic boundary sets — an
+  interval aligned to bucket edges, one that isn't, and an assertion that
+  the chosen segments never overlap or leave a gap inside `[start, end)`.
+- **Depends on:** Milestone 8.
+- **Done when:** the test passes for both aligned and unaligned boundaries
+  and the full step-4 battery is clean.
+
+### Milestone 10 — `CoveragePlan`/`SeriesResponse` against real published windows
+
+- **Status:** Not started.
+- **Target:** same file as Milestones 8-9; consumes
+  `AggregateReader::read_window` (`crates/cubism-iceberg/src/reader.rs:28`)
+  and `PublicationStore::current` (`crates/cubism-iceberg/src/control.rs:318`)
+  through the `cubism-iceberg` dependency Milestone 7 adds.
+- **What it does:** for each segment in a `ResolutionPlan`, resolves
+  whether it's backed by a current published revision (`is_exact`),
+  merges per-window `AggregateState` blobs read back via `read_window`
+  using the existing `AggregateState::merge`/`state_udaf.rs` machinery
+  (see "Why this section exists despite #8" above), and identifies
+  segments needing a raw-event scan or reporting `missing` — plan lines
+  708-719's response shape (value/presentation, bucket_start/end,
+  `is_exact`, coverage, source_resolution, missing marker,
+  snapshot/revision provenance). Plan line 703's `exact=true` failure
+  behavior ("fails clearly if retained buckets/raw data cannot exactly
+  cover a partial boundary... never rounds silently") is this milestone's
+  explicit test, not a follow-on.
+- **Test:** integration test (real `cubism-iceberg` in-memory catalog):
+  publish window W1 (current revision, exact), leave W2 unpublished;
+  build a `ResolutionPlan` spanning both; assert `CoveragePlan` marks W1
+  `is_exact: true` with correct snapshot/revision provenance and W2 as
+  `missing`; assert an `exact=true` query touching W2 fails clearly
+  instead of silently rounding or omitting it.
+- **Depends on:** Milestones 7, 8, 9.
+- **Done when:** the test passes and the full step-4 battery is clean.
+  **Does not close** plan completion-criterion 774 ("range plans prune
+  storage and stay within latency/memory budgets") — `read_window`'s
+  predicate is a single `(window_id, revision)` equality per call (see
+  `reader.rs`'s corrected doc comment), not a semijoin against every
+  published window's manifest the way a real `TableProvider` scan would
+  prune; achieving 774 for many windows still needs #8's SQL/pushdown
+  half, or a purpose-built multi-window batch read added to
+  `cubism-iceberg` itself (not scoped to this milestone). Record that gap
+  here rather than treating "774 met" as implied by "710-719 met."
+
+### Phase 5 "done" condition (for the milestones above)
+
+Walking the plan's four completion criteria (lines 772-775), the same way
+"Phase 4 done" above walks Phase 4's, once Milestones 7-10 are `Done`:
+
+- 772 ("answers exact aligned ranges from aggregate state") — met by
+  Milestone 10's direct-call path.
+- 773 ("partial-boundary behavior is truthful and tested") — met by
+  Milestone 10's `exact=true` failure test.
+- 774 ("range plans prune storage and stay within latency/memory
+  budgets") — **not** met by Milestones 7-10 as scoped; see Milestone 10's
+  "Done when" above. Remains gated on #8 (or a not-yet-scoped multi-window
+  `cubism-iceberg` API).
+- 775 ("every result reports sufficient coverage and provenance") — met by
+  Milestone 10's response shape.
+- The plan's "Unresolved decisions" (lines 779-783) — "SQL table-function
+  interface in addition to HTTP" is exactly the #8-gated half and is not
+  resolved by Milestones 7-10; the other three (max raw boundary scan,
+  multi-XUnit/multi-measure response shape, server-side caching,
+  authorization boundary) are not addressed by any milestone above and
+  stay open for a successor roadmap slice once Milestones 7-10 land.
+- `/api/series` itself (`crates/cubism-serve`) and rolling
+  comparisons/trend inputs (plan Phase 6) are **not** covered by
+  Milestones 7-10 — those are the next roadmap extension once this
+  section's milestones close, not assumed done here.
+
 ## Deferred (not in scope for this roadmap doc)
 
-1. **Extend this roadmap to plan-Phase 5** (DataFusion range queries and
-   serving, exactness-aware) once Milestones 1-6 above are underway — #15's
-   own suggested steps ask for this, deliberately not done in the same slice
-   that drafted Phase 4's milestones (see the Phase 7 handoff for why).
+1. **~~Extend this roadmap to plan-Phase 5~~ Resolved** — see "Phase 5
+   Milestones" above, added `docs/TIMESERIES_PHASE_16_HANDOFF.md`. What
+   remains open from the original note: `/api/series`
+   (`crates/cubism-serve`) itself, and everything gated on #8's
+   SQL/pushdown half (completion-criterion 774, the plan's SQL
+   table-function unresolved decision) — tracked in that section, not
+   re-listed here.
 2. **The Rollback-point milestone gap** noted above under "Phase 4 done" —
    (Corrected: resolved in `docs/TIMESERIES_PHASE_13_HANDOFF.md`. Rollback
    needed no new milestone; it falls out of the existing `publish` CAS

@@ -40,9 +40,11 @@ points to).
 **First check `docs/TIMESERIES_ROADMAP.md` if it exists.** For any phase the
 roadmap covers, find the first milestone not yet marked done and confirm its
 dependencies are done — that's the candidate slice, not a fresh scan of the
-deferred list. Only fall back to the ad hoc deferred-list/issue scan below
-for phases the roadmap doesn't reach yet (it does not cover plan-Phase 5+ as
-of this writing) or once every milestone in it is done.
+deferred list. As of this writing the roadmap covers Phase 4 and part of
+Phase 5 (its own "Phase 5 Milestones" section notes what Phase 5 completion
+criterion — and what beyond Phase 5 — it doesn't reach yet). Only fall back
+to the ad hoc deferred-list/issue scan below for phases/criteria the
+roadmap doesn't reach, or once every milestone in it is done.
 
 Do not choose the code slice yourself — whether from the roadmap or the
 deferred list — without a second opinion: in the session that produced this

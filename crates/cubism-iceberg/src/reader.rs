@@ -25,6 +25,24 @@ impl AggregateReader {
     /// verify/read, not a range query across many windows (that's Phase 5,
     /// gated on DataFusion 53/54 convergence per the crate's top-level doc
     /// comment).
+    ///
+    /// Correction (`docs/TIMESERIES_ROADMAP.md`'s Phase 5 milestones,
+    /// filed against [#8](https://github.com/jeromebanks/cubism-rs/issues/8)):
+    /// "gated on DataFusion 53/54 convergence" overstates it. Only *generic
+    /// SQL-level* access — registering this crate's tables in a DataFusion
+    /// `SessionContext` via `iceberg-datafusion`'s `TableProvider`, so
+    /// arbitrary predicate pushdown/joins work — needs that convergence.
+    /// Calling this function once per window from `cubism-datafusion` (DF
+    /// 54) and merging the resulting `RecordBatch`es directly, the same
+    /// "cross the boundary via `arrow_array`/`arrow_schema` only" strategy
+    /// this crate's top-level doc comment already describes, does not:
+    /// both sides resolve to the same unified `arrow` 58.3.0 (confirmed via
+    /// `cargo tree -i arrow --workspace`), so a `RecordBatch` from here is
+    /// already the type DF54 expects. What that direct-call path cannot do
+    /// is prune storage across many windows the way a real `TableProvider`
+    /// would (this function's predicate is a single `(window_id, revision)`
+    /// equality, not a semijoin) — see the roadmap's Milestone 10 for where
+    /// that limit is recorded against the plan's completion criteria.
     pub async fn read_window(
         catalog: &dyn Catalog,
         temporal_table: &TemporalTable,
