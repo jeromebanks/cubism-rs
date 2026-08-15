@@ -459,16 +459,18 @@ async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a
 
 /// Roadmap Milestone 6 (`docs/TIMESERIES_ROADMAP.md`): plan lines 666-669
 /// ("Rollback point") ask for repointing a window to its prior published
-/// revision. `PublicationStore::publish` (both backends) has no
-/// revision-monotonicity check — it only enforces the CAS against
-/// `expected_current`, and always writes back the *calling run's own fixed
-/// revision* (set once, at `claim_run` time) — so calling it again with the
-/// original run's own `run_id` and a fresh `expected_current` matching the
-/// window's current (higher) revision repoints `control_publications`
-/// backward with **no new source code**. Same shape as Milestone 2's
-/// finding for `ExpectedRevision`: the mechanism was already built, this
-/// test is the first thing to exercise it as rollback rather than as a
-/// same-revision replay.
+/// revision. `PublicationStore::publish` has no revision-monotonicity
+/// check — it only enforces the CAS against `expected_current`, and always
+/// writes back the *calling run's own fixed revision* (set once, at
+/// `claim_run` time) — so calling it again with the original run's own
+/// `run_id` and a fresh `expected_current` matching the window's current
+/// (higher) revision repoints `control_publications` backward with **no new
+/// source code**. Same shape as Milestone 2's finding for
+/// `ExpectedRevision`: the mechanism was already built, this test is the
+/// first thing to exercise it as rollback rather than as a same-revision
+/// replay. This test exercises the SQLite backend; the in-memory arm's
+/// identical early-return-before-status-write ordering (`control.rs:206-210`)
+/// was confirmed by reading, not by a parallel in-memory test.
 ///
 /// This specifically proves the repoint is *reader*-visible, not just a
 /// control-store row change: `AggregateReader::read_window` filters by
@@ -487,10 +489,10 @@ async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a
 /// It also reuses run-1's own identity — the resulting `Publication.run_id`
 /// is `"run-1"`, not a new run, and no new revision number is allocated —
 /// so the rollback event itself is recorded nowhere in the control store; a
-/// real limitation, not a footnote. The consequence for
-/// `ReconciliationRecord::classify` (run-2's own `RunState` still reports
-/// `Published` after this rollback, even though its revision is no longer
-/// current) is filed as
+/// real limitation, not a footnote. This test's final assertion proves the
+/// consequence directly, not by inference: run-2's own `RunState` still
+/// classifies as `Published` after the rollback, even though revision 2 is
+/// no longer current — filed as
 /// [#18](https://github.com/jeromebanks/cubism-rs/issues/18), not silently
 /// assumed away.
 #[tokio::test]
@@ -515,7 +517,7 @@ async fn publish_repoints_a_window_to_a_prior_published_revision_via_the_existin
     // publishes revision 2 as a correction against it. Dropped before the
     // rollback below, so the rollback below cannot see either through
     // anything but the database.
-    let original_snapshot_id = {
+    let (original_snapshot_id, corrected_snapshot_id) = {
         let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
         let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
         let publications = PublicationStore::sqlite(&control_db).await.unwrap();
@@ -560,7 +562,7 @@ async fn publish_repoints_a_window_to_a_prior_published_revision_via_the_existin
         publications.record_append("run-2", result2.snapshot_id).await.unwrap();
         publications.publish("run-2", Some(WindowRevision::new(1).unwrap())).await.unwrap();
 
-        result.snapshot_id
+        (result.snapshot_id, result2.snapshot_id)
     };
 
     // Second handle, fresh catalog and control-store handles: confirm
@@ -601,4 +603,19 @@ async fn publish_repoints_a_window_to_a_prior_published_revision_via_the_existin
     let read_c =
         AggregateReader::read_window(catalog_c.as_ref(), &table_c, &publications_c, &window_id).await.unwrap();
     assert_eq!(total_rows(&read_c), 1, "a third fresh handle must see the rollback too");
+
+    // The consequence #18 tracks, proven directly rather than inferred: the
+    // rollback above touched only `control_publications` and run-1's own
+    // `control_runs` row, so run-2's own `RunState` — never touched by the
+    // rollback — still classifies as `Published`, even though revision 2 is
+    // no longer the window's current revision.
+    let superseded = publications_c.run_state("run-2").await.unwrap();
+    assert_eq!(
+        ReconciliationRecord::classify(superseded.as_ref()),
+        ReconciliationRecord::Published {
+            revision: WindowRevision::new(2).unwrap(),
+            aggregate_snapshot_id: corrected_snapshot_id
+        },
+        "a rolled-back-past run still classifies as Published — see #18"
+    );
 }

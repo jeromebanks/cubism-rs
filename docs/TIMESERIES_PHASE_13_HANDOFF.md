@@ -128,20 +128,22 @@ original revision's content, not the corrected revision's; (3) the returned
 one; (4) this is durable across a real process restart — the rollback is
 performed on one freshly-opened handle and confirmed visible (both `current`
 and `read_window`) from a second, independently-opened handle, this file's
-standing convention.
+standing convention; (5) the rollback is **not** safely inspectable
+afterward through `RunState` alone — the test's final assertion, on the
+third freshly-opened handle, calls `ReconciliationRecord::classify` on
+run-2's own `run_state` after the rollback and it still reports `Published`
+with revision 2, even though revision 2 is no longer current. This is
+proven directly by the test, not inferred from reading
+`durable_control.rs:330`'s `run_id`-scoped `UPDATE`.
 
 It does **not** prove the other two-thirds of plan lines 666-669's wording:
 no scheduler exists anywhere in this crate to "stop correction scheduling,"
 and no snapshot expiry/retention exists to "retain a configured recovery
 window" before superseded snapshots would be expired (that's
-[#10](https://github.com/jeromebanks/cubism-rs/issues/10)'s scope). It also
-does not prove the rollback is safely inspectable afterward: the test does
-not check what `ReconciliationRecord::classify` reports for the
-now-superseded run-2 after the rollback — a follow-up read (not part of this
-test, done separately below) found it still reports `Published`, which is
-now stale. That's a real, currently-unresolved gap in what a caller could
-safely infer from `RunState` alone post-rollback; not fixed by this
-session, filed as
+[#10](https://github.com/jeromebanks/cubism-rs/issues/10)'s scope). Item (5)
+above is a real, currently-unresolved gap in what a caller could safely
+infer from `RunState` alone post-rollback; not fixed by this session, filed
+as
 [#18](https://github.com/jeromebanks/cubism-rs/issues/18) rather than
 silently assumed away. It also does not touch Milestone 6's other two
 components (submit/schedule facade, inspection API) — neither exists yet.
