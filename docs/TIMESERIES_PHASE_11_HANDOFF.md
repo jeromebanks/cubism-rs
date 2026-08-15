@@ -26,7 +26,9 @@ is now four milestones into its six-milestone roadmap. See
 `docs/TIMESERIES_ROADMAP.md` for what "Milestone 4" means relative to plan
 phases.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_12_HANDOFF.md`, which lands
+Milestone 5 (`ReconciliationRecord` + failure-injection recoverability,
+narrowed) — this handoff's deferred item 1.
 
 ## What this session built
 

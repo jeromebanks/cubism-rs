@@ -18,8 +18,12 @@ use std::sync::Arc;
 use arrow_array::{FixedSizeBinaryArray, Float64Array, Int64Array, RecordBatch, TimestampMicrosecondArray};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use chrono::DateTime;
+use cubism_core::AggKind;
 use cubism_core::temporal::{WindowId, WindowRevision};
-use cubism_iceberg::{AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, CubismIcebergError, PublicationStore, TemporalTable};
+use cubism_iceberg::{
+    AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, CorrectionCoordinator,
+    CorrectionRequest, CubismIcebergError, PublicationStore, ReconciliationRecord, TemporalTable,
+};
 use tempfile::TempDir;
 
 const CUBE_ID: &str = "web_analytics";
@@ -277,4 +281,160 @@ async fn sqlite_correction_against_a_superseded_revision_is_rejected_then_succee
     // just handle B's in-memory belief about its own retry.
     let store_c = PublicationStore::sqlite(&control_db).await.unwrap();
     assert_eq!(store_c.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(3).unwrap()));
+}
+
+/// Roadmap Milestone 5 (`docs/TIMESERIES_ROADMAP.md`): `ReconciliationRecord`
+/// classifies a run's recovery status from the durable `RunState` the
+/// control store already tracks, and `CorrectionCoordinator::execute`
+/// recovers from two of the four interruption points the roadmap's plan
+/// test (line 638) asks about — proven here across real process restarts
+/// (every handle below is freshly opened, matching this file's convention),
+/// not just in-process retries.
+///
+/// Leg 1 proves recovery from `ReconciliationRecord::AwaitingAppend` in its
+/// **unambiguous** form: a run claimed but never attempted an append at
+/// all. This is deliberately not the ambiguous form (append committed to
+/// Iceberg, but the crash landed before `record_append` persisted that
+/// fact) — `coordinator.rs`'s `ReconciliationRecord` doc comment explains
+/// why that form is not safely recoverable by this milestone's logic
+/// (`fast_append` has no idempotency check, and `AggregateReader::read_window`
+/// filters by `(window_id, revision)`, not by snapshot ID, so a second
+/// append would duplicate visible rows). That gap is filed as
+/// [issue #17](https://github.com/jeromebanks/cubism-rs/issues/17), not
+/// silently assumed safe.
+///
+/// Leg 2 proves recovery from `ReconciliationRecord::Published`: replaying
+/// the identical correction request after the first attempt already
+/// succeeded must return the same `Publication`, not a new one, and must
+/// not duplicate rows.
+///
+/// `ReconciliationRecord::AwaitingPublish` (append committed and recorded,
+/// no publication yet) is **not** re-proven here — `tests/coordinator.rs`'s
+/// `coordinator_skips_a_redundant_append_when_the_run_was_already_appended`
+/// already proves it, against the in-memory backend; this test does not
+/// duplicate that coverage.
+#[tokio::test]
+async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a_published_run_after_reopen() {
+    let warehouse = TempDir::new().unwrap();
+    let catalog_dir = TempDir::new().unwrap();
+    let catalog_db = catalog_dir.path().join("catalog.sqlite");
+    let control_dir = TempDir::new().unwrap();
+    let control_db = control_dir.path().join("control.sqlite");
+    let config = CatalogConfig::Sqlite { warehouse: warehouse.path().to_path_buf(), catalog_db: catalog_db.clone() };
+    let window_id = WindowId::new("2026-08-12").unwrap();
+
+    // An initial revision 1 is published directly (raw protocol) so the
+    // correction below has something to replace.
+    let initial_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let initial_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    {
+        let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+        let publications = PublicationStore::sqlite(&control_db).await.unwrap();
+        let claim = publications
+            .claim_run(CUBE_ID, &window_id, "run-initial", WindowRevision::new(1).unwrap(), 1)
+            .await
+            .unwrap();
+        assert!(matches!(claim, ClaimResult::New(_)));
+        let result = AggregateWriter::append_window(
+            catalog.as_ref(),
+            &table,
+            AppendWindow {
+                window_id: &window_id,
+                revision: WindowRevision::new(1).unwrap(),
+                run_id: "run-initial",
+                states: &initial_states,
+                registry: &initial_registry,
+            },
+        )
+        .await
+        .unwrap();
+        publications.record_append("run-initial", result.snapshot_id).await.unwrap();
+        publications.publish("run-initial", None).await.unwrap();
+    }
+
+    // The correction (revision 2) is claimed, then the process "crashes"
+    // before attempting the Iceberg append — the durable control store
+    // records `RunState::Claimed` for "run-correction" and nothing more.
+    let corrected_states = vec![states_batch(&[
+        ("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0),
+        ("2026-08-12T00:20:00Z", xunit_id(2), 2, 2.0),
+    ])];
+    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a"), (xunit_id(2), b"b")])];
+    let expected_rows: u64 = corrected_states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    {
+        let publications = PublicationStore::sqlite(&control_db).await.unwrap();
+        let claim = publications
+            .claim_run(CUBE_ID, &window_id, "run-correction", WindowRevision::new(2).unwrap(), expected_rows)
+            .await
+            .unwrap();
+        assert!(matches!(claim, ClaimResult::New(_)));
+        assert_eq!(
+            ReconciliationRecord::classify(Some(claim.state())),
+            ReconciliationRecord::AwaitingAppend { revision: WindowRevision::new(2).unwrap() }
+        );
+    }
+
+    // Leg 1: a fresh handle (fresh catalog, fresh control store — a real
+    // restart) reconciles the claimed-but-unattempted run by running
+    // `execute`, which appends and publishes.
+    let request = CorrectionRequest {
+        window_id: &window_id,
+        revision: WindowRevision::new(2).unwrap(),
+        run_id: "run-correction",
+        observed_current: WindowRevision::new(1).unwrap(),
+        kinds: &[AggKind::Sum, AggKind::Count],
+        states: &corrected_states,
+        registry: &corrected_registry,
+    };
+    let catalog_b = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+    let table_b = TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+    let publications_b = PublicationStore::sqlite(&control_db).await.unwrap();
+    let first_publication =
+        CorrectionCoordinator::execute(catalog_b.as_ref(), &table_b, &publications_b, request).await.unwrap();
+    assert_eq!(first_publication.revision, WindowRevision::new(2).unwrap());
+
+    let read_after_recovery =
+        AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id).await.unwrap();
+    assert_eq!(
+        total_rows(&read_after_recovery),
+        2,
+        "recovering a claimed-but-unattempted run must append exactly once"
+    );
+
+    let run_state_after = publications_b.run_state("run-correction").await.unwrap().unwrap();
+    assert_eq!(
+        ReconciliationRecord::classify(Some(&run_state_after)),
+        ReconciliationRecord::Published {
+            revision: WindowRevision::new(2).unwrap(),
+            aggregate_snapshot_id: first_publication.aggregate_snapshot_id
+        }
+    );
+
+    // Leg 2: another fresh handle replays the identical correction request
+    // (e.g. a supervisor that does not know the first attempt already
+    // succeeded). `execute` must not append a second time and must return
+    // the identical `Publication`, not a new one and not `StaleRevision`.
+    let request_retry = CorrectionRequest {
+        window_id: &window_id,
+        revision: WindowRevision::new(2).unwrap(),
+        run_id: "run-correction",
+        observed_current: WindowRevision::new(1).unwrap(),
+        kinds: &[AggKind::Sum, AggKind::Count],
+        states: &corrected_states,
+        registry: &corrected_registry,
+    };
+    let catalog_c = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+    let table_c = TemporalTable::create(catalog_c.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+    let publications_c = PublicationStore::sqlite(&control_db).await.unwrap();
+    let replayed_publication =
+        CorrectionCoordinator::execute(catalog_c.as_ref(), &table_c, &publications_c, request_retry).await.unwrap();
+    assert_eq!(
+        replayed_publication, first_publication,
+        "replaying a completed correction after a restart must return the identical publication, not a new one"
+    );
+
+    let read_after_replay =
+        AggregateReader::read_window(catalog_c.as_ref(), &table_c, &publications_c, &window_id).await.unwrap();
+    assert_eq!(total_rows(&read_after_replay), 2, "replaying a completed correction must not duplicate rows");
 }

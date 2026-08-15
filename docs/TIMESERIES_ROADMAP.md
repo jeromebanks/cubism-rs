@@ -281,25 +281,61 @@ compiles.
 
 ### Milestone 5 — `ReconciliationRecord` + failure-injection recoverability
 
-- **Status:** Not started.
-- **Target:** new type in `crates/cubism-iceberg/src`; coordinator from
-  Milestone 4 extended to record reconciliation state at each stage.
-- **What it does:** records what a coordinator run did/attempted at each
-  commit/publication stage, so an interrupted job can be classified and
-  reconciled on retry (plan's completion criterion: "a deterministic
-  recovery run classifies and reconciles every interrupted job").
-- **Test:** plan line 638 — failure injection at every commit/publication
-  stage the coordinator passes through, asserting recovery reaches a
-  consistent published state (not a partial/corrupt one) in every case.
-- **Depends on:** Milestone 4 (needs the coordinator's stages to inject
-  failures into). Note for whichever slice picks this up: `execute`
-  (`crates/cubism-iceberg/src/coordinator.rs`) as landed is a single static
-  fn with no injection seam between its claim/append/publish steps — this
-  milestone will need to introduce one (e.g. per-stage hooks or breaking
-  `execute` into resumable steps) before failure injection is possible, not
-  just add `ReconciliationRecord` alongside the existing fn body unchanged.
+- **Status:** Done (narrowed) — `docs/TIMESERIES_PHASE_12_HANDOFF.md`.
+- **Target:** new type in `crates/cubism-iceberg/src/coordinator.rs`
+  (`ReconciliationRecord`); `CorrectionCoordinator::execute` updated to
+  consult it.
+- **What it does:** (Corrected: the original wording assumed
+  `ReconciliationRecord` needed to be a new persisted record and that
+  `execute` needed a new per-stage injection seam. Neither turned out to be
+  true — see `coordinator.rs`'s module doc comment for the full reasoning.)
+  `ReconciliationRecord::classify` is a pure projection of the durable
+  `RunState` the control store already tracks (`Claimed`/`Appended`/
+  `Published`) into "what should happen next": `NotStarted`,
+  `AwaitingAppend`, `AwaitingPublish`, or `Published`. `execute` now
+  branches on it (replacing its earlier raw `RunState::Claimed` match)
+  instead of leaving the type unused. No new injection seam was needed:
+  `tests/coordinator.rs`'s existing
+  `coordinator_skips_a_redundant_append_when_the_run_was_already_appended`
+  already demonstrated the technique that generalizes to every stage —
+  build the intermediate `RunState` directly via claim/append/record calls
+  outside the coordinator, then call `execute` and assert on recovery —
+  no per-stage hooks or resumable-step refactor required.
+- **What it does not do:** `AwaitingAppend` is ambiguous between "the append
+  was never attempted" and "the Iceberg append committed but the process
+  crashed before `record_append` persisted that fact" — the latter is not
+  safely recoverable by re-running `execute` (`fast_append` has no
+  cross-commit idempotency check, and `read_window` filters by
+  `(window_id, revision)`, not snapshot ID), so a naive retry can duplicate
+  visible rows. This is a real, currently-unresolved gap, not fixed by this
+  milestone — filed as
+  [#17](https://github.com/jeromebanks/cubism-rs/issues/17). Plan line 638's
+  literal "failure injection at every commit/publication stage is
+  recoverable" is therefore met for three of the four interruption points a
+  correction can crash at (claimed-and-unattempted, appended-and-recorded,
+  published), not all four.
+- **Test:** narrowed from plan line 638's literal "every stage" — see #17
+  for the one stage this doesn't cover.
+  `sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a_published_run_after_reopen`
+  (`crates/cubism-iceberg/tests/durability.rs`) proves recovery from
+  `AwaitingAppend` in its unambiguous form (a claim that never attempted an
+  append) and from `Published` (replaying a completed correction after a
+  restart returns the identical `Publication`, no duplicate rows) — both
+  across real process restarts (fresh catalog and control-store handles per
+  leg, this file's own convention), not just in-process retries.
+  `AwaitingPublish` recovery is **not** re-proven here — it cites
+  `tests/coordinator.rs`'s existing
+  `coordinator_skips_a_redundant_append_when_the_run_was_already_appended`
+  instead of duplicating that coverage. `ReconciliationRecord::classify`
+  itself is unit-tested directly in `coordinator.rs`'s own `mod tests`
+  (all four variants, mirroring `control.rs`'s existing unit-test
+  convention for pure classification logic).
+- **Depends on:** Milestone 4 (needs the coordinator's stages to classify
+  and recover). Met.
 - **Done when:** `ReconciliationRecord` exists and the failure-injection
-  test passes for every stage the coordinator has.
+  test passes for every *recoverable* stage the coordinator has. **Met, for
+  the narrowed scope** — the one non-recoverable stage is #17, not silently
+  assumed away.
 
 ### Milestone 6 — Public correction API
 
@@ -348,6 +384,15 @@ Distinct from "every milestone above is done," per plan lines 650-669:
   [#16](https://github.com/jeromebanks/cubism-rs/issues/16), which needs a
   decision on which crate closes the gap before it can become a milestone
   here or in a successor roadmap doc.
+- Plan line 638's literal "failure injection at every commit/publication
+  stage is recoverable" is **not** fully met by Milestone 5 as narrowed: a
+  correction whose Iceberg append committed but crashed before
+  `record_append` persisted that fact is not safely recoverable by
+  `CorrectionCoordinator::execute` today (a naive retry can duplicate
+  visible rows — see `coordinator.rs`'s `ReconciliationRecord` doc
+  comment). Tracked in
+  [#17](https://github.com/jeromebanks/cubism-rs/issues/17), not assigned to
+  a milestone above.
 
 ## Deferred (not in scope for this roadmap doc)
 

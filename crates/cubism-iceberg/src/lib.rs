@@ -23,7 +23,7 @@ pub mod writer;
 
 pub use config::CatalogConfig;
 pub use control::{ClaimResult, Publication, PublicationStore, RunState};
-pub use coordinator::{CorrectionCoordinator, CorrectionRequest};
+pub use coordinator::{CorrectionCoordinator, CorrectionRequest, ReconciliationRecord};
 pub use correction::{CorrectionPlan, CorrectionStrategy};
 pub use error::CubismIcebergError;
 pub use reader::AggregateReader;

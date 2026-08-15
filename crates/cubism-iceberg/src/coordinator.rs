@@ -31,6 +31,11 @@
 //! [`crate::control::PublicationStore::publish`] directly (as every
 //! existing fixture's initial build already does), not through this
 //! coordinator. This is a type-level policy, not a runtime check.
+//!
+//! [`ReconciliationRecord`] (Milestone 5) classifies a run's recovery status
+//! from the durable [`RunState`] the control store already tracks — see its
+//! own doc comment for what each stage does and does not prove is safe to
+//! recover from a restart.
 
 use arrow_array::RecordBatch;
 use cubism_core::AggKind;
@@ -42,6 +47,80 @@ use crate::correction::{CorrectionPlan, CorrectionStrategy};
 use crate::error::{CubismIcebergError, Result};
 use crate::table::TemporalTable;
 use crate::writer::{AggregateWriter, AppendWindow};
+
+/// Classifies a run's recovery status from its durable [`RunState`] —
+/// Milestone 5 (`docs/TIMESERIES_ROADMAP.md`). This is **not** a new
+/// persisted record: `control.rs`'s `Claimed`/`Appended`/`Published`
+/// already durably encode every stage a run passes through (both the
+/// in-memory and SQLite backends), and [`PublicationStore::run_state`]
+/// already reads it back. `ReconciliationRecord::classify` is a pure
+/// projection of that existing state into "what should happen next,"
+/// exactly the same relationship Milestone 2 found between
+/// `ExpectedRevision` and the CAS parameter that already existed — adding a
+/// second table to track the same three stages would be untested
+/// scaffolding, the thing Milestone 3 refused to do for
+/// checkpoint/range fields.
+///
+/// **What each variant does and does not prove is recoverable:**
+///
+/// - [`Self::NotStarted`]: no run with this ID has ever been claimed (or
+///   the run ID is unknown to this control store). Recovery: run `execute`
+///   from scratch.
+/// - [`Self::AwaitingAppend`]: the run was claimed but the control store
+///   has no append recorded. Recovery: run `execute`, which appends and
+///   publishes. **Important caveat, not fully resolved by this milestone:**
+///   this state is ambiguous between "the append was never attempted" and
+///   "the Iceberg append committed, but the process crashed before
+///   `record_append` persisted that fact." `AggregateWriter::append_window`
+///   commits via `fast_append`, which is purely additive and has no
+///   idempotency check against a prior commit for the same
+///   window/revision/run; `AggregateReader::read_window` filters by
+///   `(window_id, revision)` columns, not by a specific snapshot ID. So
+///   re-running `execute` against a truly-ambiguous `AwaitingAppend` run
+///   can duplicate visible rows for that window/revision. This test suite
+///   only exercises the unambiguous half (a claim that never attempted an
+///   append at all) — see `tests/durability.rs`. The ambiguous half is a
+///   real, currently-unresolved gap, tracked as
+///   [issue #17](https://github.com/jeromebanks/cubism-rs/issues/17)
+///   rather than silently assumed safe.
+/// - [`Self::AwaitingPublish`]: the append committed and was recorded, but
+///   no publication exists yet. Recovery: run `execute`, which skips the
+///   append (see the append-skip branch below) and publishes. Already
+///   proven safe by
+///   `tests/coordinator.rs`'s
+///   `coordinator_skips_a_redundant_append_when_the_run_was_already_appended`
+///   — cited here, not re-proven.
+/// - [`Self::Published`]: the run already published. Recovery: replaying
+///   `execute` with the identical request must return the same
+///   [`Publication`], not a new one and not [`CubismIcebergError::StaleRevision`]
+///   — see `PublicationStore::publish`'s early return when the requested
+///   revision is already current, which both the in-memory and SQLite
+///   backends implement identically ahead of the CAS comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconciliationRecord {
+    NotStarted,
+    AwaitingAppend { revision: WindowRevision },
+    AwaitingPublish { revision: WindowRevision, aggregate_snapshot_id: i64 },
+    Published { revision: WindowRevision, aggregate_snapshot_id: i64 },
+}
+
+impl ReconciliationRecord {
+    /// Classify a run's recovery status from its durable [`RunState`], or
+    /// [`Self::NotStarted`] if the run has no recorded state at all (e.g.
+    /// [`PublicationStore::run_state`] returned `None`).
+    pub fn classify(run_state: Option<&RunState>) -> Self {
+        match run_state {
+            None => Self::NotStarted,
+            Some(RunState::Claimed { revision, .. }) => Self::AwaitingAppend { revision: *revision },
+            Some(RunState::Appended { revision, aggregate_snapshot_id, .. }) => {
+                Self::AwaitingPublish { revision: *revision, aggregate_snapshot_id: *aggregate_snapshot_id }
+            }
+            Some(RunState::Published { revision, aggregate_snapshot_id, .. }) => {
+                Self::Published { revision: *revision, aggregate_snapshot_id: *aggregate_snapshot_id }
+            }
+        }
+    }
+}
 
 /// One correction to execute: a window, the revision it produces, the
 /// already-rebuilt corrected payload, and the revision the caller observed
@@ -96,7 +175,7 @@ impl CorrectionCoordinator {
             )
             .await?;
 
-        if matches!(claim.state(), RunState::Claimed { .. }) {
+        if let ReconciliationRecord::AwaitingAppend { .. } = ReconciliationRecord::classify(Some(claim.state())) {
             let result = AggregateWriter::append_window(
                 catalog,
                 temporal_table,
@@ -113,5 +192,51 @@ impl CorrectionCoordinator {
         }
 
         publications.publish(request.run_id, Some(request.observed_current)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn revision(n: u64) -> WindowRevision {
+        WindowRevision::new(n).unwrap()
+    }
+
+    fn window_key() -> (String, String) {
+        ("cube".to_string(), "2026-08-12".to_string())
+    }
+
+    #[test]
+    fn classify_maps_every_run_state_stage_to_its_reconciliation_record() {
+        assert_eq!(ReconciliationRecord::classify(None), ReconciliationRecord::NotStarted);
+
+        let claimed = RunState::Claimed { window_key: window_key(), revision: revision(2), expected_rows: 3 };
+        assert_eq!(
+            ReconciliationRecord::classify(Some(&claimed)),
+            ReconciliationRecord::AwaitingAppend { revision: revision(2) }
+        );
+
+        let appended = RunState::Appended {
+            window_key: window_key(),
+            revision: revision(2),
+            expected_rows: 3,
+            aggregate_snapshot_id: 101,
+        };
+        assert_eq!(
+            ReconciliationRecord::classify(Some(&appended)),
+            ReconciliationRecord::AwaitingPublish { revision: revision(2), aggregate_snapshot_id: 101 }
+        );
+
+        let published = RunState::Published {
+            window_key: window_key(),
+            revision: revision(2),
+            expected_rows: 3,
+            aggregate_snapshot_id: 101,
+        };
+        assert_eq!(
+            ReconciliationRecord::classify(Some(&published)),
+            ReconciliationRecord::Published { revision: revision(2), aggregate_snapshot_id: 101 }
+        );
     }
 }
