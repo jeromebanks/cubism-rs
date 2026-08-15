@@ -370,11 +370,24 @@ Distinct from "every milestone above is done," per plan lines 650-669:
   Milestones 1 and 2 do for two of them) or explicitly deferred with a
   reason, not silently dropped.
 - Plan's "Rollback point" (lines 666-669) — repointing a window to its prior
-  published revision — is implemented and tested. Not currently assigned to
-  a milestone above; whichever slice implements Milestone 6's public API
-  should confirm whether rollback falls out of the existing CAS/publish
-  mechanism already or needs its own bounded milestone (open question,
-  flagged here rather than guessed at).
+  published revision — is implemented and tested. (Corrected: this
+  originally asked whichever slice implements Milestone 6's public API to
+  determine whether rollback falls out of the existing CAS/publish
+  mechanism or needs its own milestone; it does fall out of the existing
+  mechanism, confirmed empirically, not just read, in
+  `docs/TIMESERIES_PHASE_13_HANDOFF.md` — `PublicationStore::publish` has no
+  revision-monotonicity check, so re-publishing a prior run's own `run_id`
+  against a fresh `expected_current` repoints `control_publications`
+  backward, reader-visibly, with zero new source code.) Only the
+  *repointing* third of the plan's three-part wording is met — "stop
+  correction scheduling" (no scheduler exists in this crate) and "retain a
+  configured recovery window" before expiring superseded snapshots (no
+  snapshot expiry/retention exists — [#10](https://github.com/jeromebanks/cubism-rs/issues/10)'s
+  scope) are not. The rollback also leaves the superseded run's own
+  `RunState` reporting `Published` (`ReconciliationRecord::classify` cannot
+  tell it's now stale) — tracked in
+  [#18](https://github.com/jeromebanks/cubism-rs/issues/18), a real
+  consequence of this finding, not resolved by it.
 - Plan line 634's literal wording ("a late-event rebuild equals a clean
   rebuild from the corrected source") and "identifies affected windows from
   event time" (plan's Phase 4 "Types and modules" section) are **not** met
@@ -401,5 +414,9 @@ Distinct from "every milestone above is done," per plan lines 650-669:
    own suggested steps ask for this, deliberately not done in the same slice
    that drafted Phase 4's milestones (see the Phase 7 handoff for why).
 2. **The Rollback-point milestone gap** noted above under "Phase 4 done" —
-   needs a decision on whether it's covered by Milestone 6 or needs its own
-   slice.
+   (Corrected: resolved in `docs/TIMESERIES_PHASE_13_HANDOFF.md`. Rollback
+   needed no new milestone; it falls out of the existing `publish` CAS
+   mechanism, proven by a new `durability.rs` test. The one thing it left
+   open — a rolled-back-past run's `RunState` still reporting `Published`
+   — is [#18](https://github.com/jeromebanks/cubism-rs/issues/18), not a
+   milestone-shaped gap.)

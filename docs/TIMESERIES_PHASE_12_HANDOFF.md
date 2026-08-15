@@ -29,7 +29,13 @@ plan Phase 4 is now five milestones into its six-milestone roadmap. See
 `docs/TIMESERIES_ROADMAP.md` for what "Milestone 5" means relative to plan
 phases.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_13_HANDOFF.md`, which picked up
+this doc's first deferred item (Milestone 6) but, per its own advisor
+consultation, redirected to resolving the roadmap's rollback question first
+(this doc's fourth deferred item) — found to already work via the existing
+`publish` CAS mechanism, no new source code, filed as
+[#18](https://github.com/jeromebanks/cubism-rs/issues/18) the one gap it
+leaves open.
 
 ## What this session built
 

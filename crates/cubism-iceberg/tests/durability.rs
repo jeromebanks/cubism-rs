@@ -456,3 +456,149 @@ async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a
         AggregateReader::read_window(catalog_c.as_ref(), &table_c, &publications_c, &window_id).await.unwrap();
     assert_eq!(total_rows(&read_after_replay), 2, "replaying a completed correction must not duplicate rows");
 }
+
+/// Roadmap Milestone 6 (`docs/TIMESERIES_ROADMAP.md`): plan lines 666-669
+/// ("Rollback point") ask for repointing a window to its prior published
+/// revision. `PublicationStore::publish` (both backends) has no
+/// revision-monotonicity check — it only enforces the CAS against
+/// `expected_current`, and always writes back the *calling run's own fixed
+/// revision* (set once, at `claim_run` time) — so calling it again with the
+/// original run's own `run_id` and a fresh `expected_current` matching the
+/// window's current (higher) revision repoints `control_publications`
+/// backward with **no new source code**. Same shape as Milestone 2's
+/// finding for `ExpectedRevision`: the mechanism was already built, this
+/// test is the first thing to exercise it as rollback rather than as a
+/// same-revision replay.
+///
+/// This specifically proves the repoint is *reader*-visible, not just a
+/// control-store row change: `AggregateReader::read_window` filters by
+/// `(window_id, revision)` (established by the test above), so after
+/// rolling back, revision 2's 2 rows must stop being visible and revision
+/// 1's original 1 row must come back — both `fast_append`s are still on
+/// disk (Iceberg appends are additive, never deleted), so this is genuinely
+/// testing which revision the reader selects, not which rows exist.
+///
+/// What this does **not** prove, per plan lines 667-669's three-part
+/// wording: it repoints the window (proven above), but does not "stop
+/// correction scheduling" (no scheduler exists anywhere in this crate) and
+/// does not "retain a configured recovery window" before expiring
+/// superseded snapshots (no snapshot expiry/retention exists in this crate
+/// — [#10](https://github.com/jeromebanks/cubism-rs/issues/10)'s scope).
+/// It also reuses run-1's own identity — the resulting `Publication.run_id`
+/// is `"run-1"`, not a new run, and no new revision number is allocated —
+/// so the rollback event itself is recorded nowhere in the control store; a
+/// real limitation, not a footnote. The consequence for
+/// `ReconciliationRecord::classify` (run-2's own `RunState` still reports
+/// `Published` after this rollback, even though its revision is no longer
+/// current) is filed as
+/// [#18](https://github.com/jeromebanks/cubism-rs/issues/18), not silently
+/// assumed away.
+#[tokio::test]
+async fn publish_repoints_a_window_to_a_prior_published_revision_via_the_existing_cas_mechanism() {
+    let warehouse = TempDir::new().unwrap();
+    let catalog_dir = TempDir::new().unwrap();
+    let catalog_db = catalog_dir.path().join("catalog.sqlite");
+    let control_dir = TempDir::new().unwrap();
+    let control_db = control_dir.path().join("control.sqlite");
+    let config = CatalogConfig::Sqlite { warehouse: warehouse.path().to_path_buf(), catalog_db: catalog_db.clone() };
+    let window_id = WindowId::new("2026-08-12").unwrap();
+
+    let original_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let original_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    let corrected_states = vec![states_batch(&[
+        ("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0),
+        ("2026-08-12T00:20:00Z", xunit_id(2), 2, 2.0),
+    ])];
+    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a"), (xunit_id(2), b"b")])];
+
+    // First handle: run-1 publishes revision 1 uncontested, then run-2
+    // publishes revision 2 as a correction against it. Dropped before the
+    // rollback below, so the rollback below cannot see either through
+    // anything but the database.
+    let original_snapshot_id = {
+        let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+        let publications = PublicationStore::sqlite(&control_db).await.unwrap();
+
+        publications
+            .claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1)
+            .await
+            .unwrap();
+        let result = AggregateWriter::append_window(
+            catalog.as_ref(),
+            &table,
+            AppendWindow {
+                window_id: &window_id,
+                revision: WindowRevision::new(1).unwrap(),
+                run_id: "run-1",
+                states: &original_states,
+                registry: &original_registry,
+            },
+        )
+        .await
+        .unwrap();
+        publications.record_append("run-1", result.snapshot_id).await.unwrap();
+        publications.publish("run-1", None).await.unwrap();
+
+        publications
+            .claim_run(CUBE_ID, &window_id, "run-2", WindowRevision::new(2).unwrap(), 2)
+            .await
+            .unwrap();
+        let result2 = AggregateWriter::append_window(
+            catalog.as_ref(),
+            &table,
+            AppendWindow {
+                window_id: &window_id,
+                revision: WindowRevision::new(2).unwrap(),
+                run_id: "run-2",
+                states: &corrected_states,
+                registry: &corrected_registry,
+            },
+        )
+        .await
+        .unwrap();
+        publications.record_append("run-2", result2.snapshot_id).await.unwrap();
+        publications.publish("run-2", Some(WindowRevision::new(1).unwrap())).await.unwrap();
+
+        result.snapshot_id
+    };
+
+    // Second handle, fresh catalog and control-store handles: confirm
+    // revision 2 is current and its 2 rows are visible before rolling
+    // back — the baseline the rollback below must actually change.
+    let catalog_b = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+    let table_b = TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+    let publications_b = PublicationStore::sqlite(&control_db).await.unwrap();
+    assert_eq!(publications_b.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+    let before_rollback =
+        AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id).await.unwrap();
+    assert_eq!(total_rows(&before_rollback), 2, "revision 2's 2 rows must be visible before rollback");
+
+    // The rollback: re-publish run-1's own already-claimed, fixed revision
+    // against the window's actual current revision (2) as the CAS anchor.
+    // No new claim, no new append, no new run_id — the existing mechanism,
+    // called a second time.
+    let rolled_back = publications_b.publish("run-1", Some(WindowRevision::new(2).unwrap())).await.unwrap();
+    assert_eq!(rolled_back.revision, WindowRevision::new(1).unwrap());
+    assert_eq!(rolled_back.run_id, "run-1");
+    assert_eq!(rolled_back.aggregate_snapshot_id, original_snapshot_id);
+
+    assert_eq!(publications_b.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(1).unwrap()));
+    let after_rollback =
+        AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id).await.unwrap();
+    assert_eq!(
+        total_rows(&after_rollback),
+        1,
+        "rollback must make revision 1's original 1 row visible again, not revision 2's 2 rows"
+    );
+
+    // A third, freshly-opened handle pair sees the rollback too, not just
+    // handle B's in-memory belief about its own write.
+    let catalog_c = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+    let table_c = TemporalTable::create(catalog_c.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+    let publications_c = PublicationStore::sqlite(&control_db).await.unwrap();
+    assert_eq!(publications_c.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(1).unwrap()));
+    let read_c =
+        AggregateReader::read_window(catalog_c.as_ref(), &table_c, &publications_c, &window_id).await.unwrap();
+    assert_eq!(total_rows(&read_c), 1, "a third fresh handle must see the rollback too");
+}
