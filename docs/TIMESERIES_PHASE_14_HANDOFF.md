@@ -158,7 +158,14 @@ criterion 1 (atomic replacement) is met, criterion 2 (deterministic
 recovery of every interrupted job) is only partially met (#17's ambiguous
 stage remains unrecoverable), and criteria 3-4 (compaction/retention SLOs,
 no maintenance path changing answers) are entirely out of this roadmap's
-scope, tracked in #10.
+scope, tracked in #10. It also does **not** verify that a caller passes
+`inspect`'s `cube_id`/`window_id` matching the `run_id`'s own window —
+`RunState` carries a `window_key`, but `inspect` does not read it back to
+check agreement, so a caller passing a different window's ID gets a
+`RevisionStatus` compared against that unrelated window's `current`, not an
+error. This is a type-level caller contract, documented on `inspect` itself
+(matching `CorrectionRequest::observed_current`'s existing house style for
+the same kind of unchecked precondition), not a runtime-checked one.
 
 ## GitHub issues touched
 
@@ -282,7 +289,7 @@ cargo test -p cubism-core                                                 # 92 p
   narrowed; "Phase 4 done" completion-criteria walkthrough; #18 resolution
   note)
 - [`TIMESERIES_IMPLEMENTATION_PLAN.md`](TIMESERIES_IMPLEMENTATION_PLAN.md)
-  (plan lines 582-670, Phase 4 in full; lines 603-604, the "Public API
+  (plan lines 582-670, Phase 4 in full; lines 604-605, the "Public API
   changes" bullets this session's inspection half addresses)
 - [`TIMESERIES_PHASE_13_HANDOFF.md`](TIMESERIES_PHASE_13_HANDOFF.md) (the
   rollback finding this session's tests replay, and #18's origin)

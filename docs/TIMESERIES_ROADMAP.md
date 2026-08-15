@@ -38,11 +38,14 @@ this doc existed:
 3. Advisor still reviews the pick — this doc narrows the candidate list to
    one, it doesn't replace the advisor's scope/locking-model check (skill
    step 1, item 3).
-4. **Once every milestone below is marked done**, Phase 4 (`#13`'s scope) is
-   finished. At that point step 1 has no more milestones to consult here and
-   should fall back to its original behavior: scan open issues and the
-   latest handoff's deferred list directly (starting with #10 and this
-   roadmap's own "Deferred" note about Phase 5).
+4. **Once every milestone below is marked done**, this roadmap's milestone
+   list is exhausted — not the same claim as Phase 4 (`#13`'s scope) being
+   finished; see "Phase 4 done" below for why (as of Milestone 6 closing,
+   it is not: criterion 2 is open via #17, criteria 3-4 are out of this
+   roadmap's scope via #10). At that point step 1 has no more milestones to
+   consult here and should fall back to its original behavior: scan open
+   issues and the latest handoff's deferred list directly (starting with
+   #10 and this roadmap's own "Deferred" note about Phase 5).
 
 ## Current state (read before drafting Milestone 1's implementation)
 

@@ -40,7 +40,7 @@
 //! [`RunInspection`] (Milestone 6, narrowed) is this crate's inspection
 //! half of the plan's "submit or schedule a correction by source
 //! checkpoint/time range; inspect current/superseded revisions and
-//! reconciliation state" (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:603-604`).
+//! reconciliation state" (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:604-605`).
 //! Only the inspection half is built: a submit/schedule-by-checkpoint-or-
 //! range facade needs the same event-time-to-window mapping Milestone 4
 //! already found this crate cannot do without an aggregation engine
@@ -205,6 +205,15 @@ impl RunInspection {
     /// Inspect one run: classify its [`RunState`] and, if
     /// [`ReconciliationRecord::Published`], cross-check its revision
     /// against the window's live [`PublicationStore::current`] value.
+    ///
+    /// `cube_id`/`window_id` must be the run's *own* window — a type-level
+    /// caller contract, not a runtime check, matching
+    /// [`CorrectionRequest::observed_current`]'s. `RunState`'s variants do
+    /// carry their own `window_key`, but this function does not read it
+    /// back to verify agreement: passing a window other than the one
+    /// `run_id` actually published into silently compares against an
+    /// unrelated window's `current` and can report a confidently wrong
+    /// [`RevisionStatus`].
     pub async fn inspect(
         publications: &PublicationStore,
         cube_id: &str,
