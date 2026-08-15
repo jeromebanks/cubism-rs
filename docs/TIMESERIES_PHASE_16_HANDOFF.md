@@ -84,8 +84,9 @@ via `arrow_array::RecordBatch`/`arrow_schema::Schema` only" strategy
 3. `reader.rs`'s own doc comment carried the same overstated framing as
 `#8` — a `read_window` call site describing range queries as "gated on
 DataFusion 53/54 convergence" — corrected in place, additively, this
-session (`reader.rs:28-41`), matching this series' convention of adding a
-correction paragraph rather than rewriting the original claim.
+session (`reader.rs:29-45`, ahead of `read_window` itself at line 46),
+matching this series' convention of adding a correction paragraph rather
+than rewriting the original claim.
 
 The advisor's second pass (after that finding, before writing the roadmap
 content) drew the boundary precisely rather than accepting "nothing is
@@ -118,10 +119,11 @@ Primary files changed:
   Phase 5 instead of stopping at Phase 4. All Phase 5 milestones are
   `Status: Not started` — doc-only this session, no implementation.
 - **`crates/cubism-iceberg/src/reader.rs`** (modified): additive
-  correction paragraph on `read_window`'s doc comment (`reader.rs:28-41`)
-  narrowing "gated on DataFusion 53/54 convergence" to the SQL/pushdown
-  half specifically, cross-linking `#8` and the roadmap's Milestone 10.
-  No behavior change — doc comment only.
+  correction paragraph on `read_window`'s doc comment (`reader.rs:29-45`,
+  ahead of the function itself at line 46) narrowing "gated on DataFusion
+  53/54 convergence" to the SQL/pushdown half specifically, cross-linking
+  `#8` and the roadmap's Milestone 10. No behavior change — doc comment
+  only.
 - **`.claude/skills/timeseries-slice/SKILL.md`** (modified): step 1's
   parenthetical no longer claims the roadmap "does not cover plan-Phase 5+
   as of this writing" — it now says the roadmap covers Phase 4 and part of
@@ -270,7 +272,8 @@ cargo tree -p cubism-iceberg                                              # conf
   Milestones" section, Milestones 7-10, "Phase 5 'done' condition",
   updated scope/fallback text)
 - [`../crates/cubism-iceberg/src/reader.rs`](../crates/cubism-iceberg/src/reader.rs)
-  (`read_window`'s doc comment, additive correction at lines 28-41)
+  (`read_window`'s doc comment, additive correction paragraph at lines
+  29-45, the function itself at line 46)
 - [`../.claude/skills/timeseries-slice/SKILL.md`](../.claude/skills/timeseries-slice/SKILL.md)
   (step 1's Phase-5 parenthetical, corrected)
 - [`TIMESERIES_PHASE_15_HANDOFF.md`](TIMESERIES_PHASE_15_HANDOFF.md) (prior

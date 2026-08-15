@@ -503,7 +503,7 @@ that claim is broader than the evidence: it's true for *generic SQL-level*
 access — registering this crate's Iceberg tables in a DataFusion
 `SessionContext` via `iceberg-datafusion`'s `TableProvider` impl so
 arbitrary predicate pushdown/joins work through the DF53 crate. It is not
-true for calling `AggregateReader::read_window` (`crates/cubism-iceberg/src/reader.rs:28`)
+true for calling `AggregateReader::read_window` (`crates/cubism-iceberg/src/reader.rs:46`)
 directly from `cubism-datafusion` (a plain path dependency, no
 `iceberg-datafusion` involved) and merging the resulting `RecordBatch`es
 with the merge machinery `state_udaf.rs` already has
@@ -597,7 +597,7 @@ into an observed one before Milestones 8-10 build on it.
 
 - **Status:** Not started.
 - **Target:** same file as Milestones 8-9; consumes
-  `AggregateReader::read_window` (`crates/cubism-iceberg/src/reader.rs:28`)
+  `AggregateReader::read_window` (`crates/cubism-iceberg/src/reader.rs:46`)
   and `PublicationStore::current` (`crates/cubism-iceberg/src/control.rs:318`)
   through the `cubism-iceberg` dependency Milestone 7 adds.
 - **What it does:** for each segment in a `ResolutionPlan`, resolves
@@ -608,7 +608,7 @@ into an observed one before Milestones 8-10 build on it.
   segments needing a raw-event scan or reporting `missing` — plan lines
   708-719's response shape (value/presentation, bucket_start/end,
   `is_exact`, coverage, source_resolution, missing marker,
-  snapshot/revision provenance). Plan line 703's `exact=true` failure
+  snapshot/revision provenance). Plan lines 721-722's `exact=true` failure
   behavior ("fails clearly if retained buckets/raw data cannot exactly
   cover a partial boundary... never rounds silently") is this milestone's
   explicit test, not a follow-on.
@@ -647,7 +647,7 @@ Walking the plan's four completion criteria (lines 772-775), the same way
   Milestone 10's response shape.
 - The plan's "Unresolved decisions" (lines 779-783) — "SQL table-function
   interface in addition to HTTP" is exactly the #8-gated half and is not
-  resolved by Milestones 7-10; the other three (max raw boundary scan,
+  resolved by Milestones 7-10; the other four (max raw boundary scan,
   multi-XUnit/multi-measure response shape, server-side caching,
   authorization boundary) are not addressed by any milestone above and
   stay open for a successor roadmap slice once Milestones 7-10 land.
