@@ -567,7 +567,23 @@ into an observed one before Milestones 8-10 build on it.
 
 ### Milestone 8 — `TemporalQuery` (request shape + validation)
 
-- **Status:** Not started.
+- **Status:** Done — `docs/TIMESERIES_PHASE_18_HANDOFF.md`. Landed as
+  `crates/cubism-datafusion/src/range_query.rs:54-63`
+  (`TemporalQuery`) and `:42-49` (`GapPolicy`), with `TemporalQuery::new`
+  at `:67-101`. Two deviations from this milestone's original text,
+  both advisor-confirmed before writing: (1) the struct holds `cube:
+  String` (an identifier), not the `cube/spec` `TemporalSpec` itself —
+  Milestone 9's own text takes a `TemporalQuery` **and** a `TemporalSpec`
+  as separate arguments, so storing the spec here would make that
+  signature redundant; `TemporalSpec` is instead a `&TemporalSpec`
+  argument to `new()` that validates but isn't retained. (2) `timezone`/
+  display options from the plan's request shape are omitted entirely —
+  `TemporalSpec::validate` (`crates/cubism-core/src/temporal.rs:619-624`)
+  hard-rejects any non-`"UTC"` spec, so a free-form timezone request
+  field would be unimplementable without re-deriving that check, which is
+  out of this milestone's scope. Measures/selectors are not validated
+  against a `CubeSpec` (no `CubeSpec` is threaded through this module at
+  all) — not in this milestone's "e.g." validation list.
 - **Target:** `crates/cubism-datafusion/src/range_query.rs` (new file, per
   plan line 677).
 - **What it does:** the plan's requested-query shape (lines 697-706) as a
@@ -579,7 +595,10 @@ into an observed one before Milestones 8-10 build on it.
   actually supports). Pure request-shape logic; touches no DataFusion
   execution types, so it doesn't depend on Milestone 7.
 - **Test:** unit tests for valid construction plus at least one rejection
-  case (`start >= end`; an unsupported resolution for the cube).
+  case (`start >= end`; an unsupported resolution for the cube). Landed as
+  four tests, `range_query.rs:134-204`: two valid-construction cases
+  (explicit supported resolution, and `None`/auto) and the two required
+  rejections.
 - **Depends on:** nothing new.
 - **Done when:** the type exists, is unit-tested, and the full step-4
   battery is clean.

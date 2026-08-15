@@ -27,7 +27,9 @@ plan's Phase 4 (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:582-670`) has every
 fully done — see that roadmap's "Phase 4 done" section, unchanged by this
 session, for what remains.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_18_HANDOFF.md`, which landed
+Milestone 8 (`TemporalQuery`), the deferred item this doc's item 1 named
+as the natural next slice.
 
 ## What this session built
 
