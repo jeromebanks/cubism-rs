@@ -14,5 +14,7 @@ pub mod udf;
 pub use build::{build_cube, cube_sql};
 pub use cubism_core;
 pub use datafusion;
-pub use range_query::{GapPolicy, ResolutionPlan, ResolutionSegment, TemporalQuery};
+pub use range_query::{
+    CoveragePlan, GapPolicy, ResolutionPlan, ResolutionSegment, SegmentCoverage, TemporalQuery,
+};
 pub use temporal_build::build_temporal;

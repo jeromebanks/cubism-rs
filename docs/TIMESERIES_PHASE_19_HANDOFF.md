@@ -21,7 +21,10 @@ plan's Phase 4 (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:582-670`) has every
 done — see that roadmap's "Phase 4 done" section, unchanged by this
 session, for what remains.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`TIMESERIES_PHASE_20_HANDOFF.md`](TIMESERIES_PHASE_20_HANDOFF.md),
+which picked up this doc's deferred item 1 (Milestone 10) and landed it,
+narrowed to provenance/`missing`/`exact=true` failure only, deferring
+value materialization as a not-yet-scoped "Milestone 10b."
 
 ## What this session built
 

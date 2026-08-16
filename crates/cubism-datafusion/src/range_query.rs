@@ -66,10 +66,65 @@
 //! job, not the constructor's) — so a `Calendar` resolution can legally reach
 //! `ResolutionPlan::new` and must be caught here instead of panicking or
 //! silently producing a plan that doesn't cover the range.
+//!
+//! [`CoveragePlan`]: Milestone 10 (`docs/TIMESERIES_ROADMAP.md`'s Milestone
+//! 10 entry). Resolves a [`ResolutionPlan`]'s segments against real
+//! publication state and decides, per segment, whether it can be answered
+//! exactly from retained aggregate state.
+//!
+//! Two deliberate deviations from the roadmap text, both recorded in the
+//! roadmap's Milestone 10 entry, not filed as separate issues (same
+//! precedent Milestone 9 set for its own scope cuts):
+//!
+//! - **The segment→[`WindowId`] mapping is a caller-supplied input, not
+//!   something this module derives.** No canonical encoding from a
+//!   `TimeRange`/`Resolution` pair to a `WindowId` exists anywhere in this
+//!   codebase — `WindowId` is an opaque, caller-assigned string
+//!   (`crates/cubism-core/src/temporal.rs:527-529`), and `FixedResolution::bucket`
+//!   returns a `TimeBucket`, not a `WindowId`. Inventing that encoding here
+//!   would be a durable `cubism-core` API decision smuggled into a Phase-5
+//!   milestone, exactly the kind of unenforced-guarantee premise Milestone
+//!   9's scope fence already rejected once. `CoveragePlan::new` therefore
+//!   takes, per segment, the list of windows the caller has already
+//!   determined back that segment's time range, each with its currently
+//!   published revision (or `None`). A single segment can legitimately be
+//!   backed by more than one window: Milestone 9's aligned interior segment
+//!   is kept as one segment even when it spans many resolution buckets.
+//! - **`cubism-iceberg` stays a `cubism-datafusion` dev-dependency.** It is
+//!   not promoted to a normal dependency (roadmap line 542 floated this as
+//!   "one line"): nothing in this module calls `AggregateReader::read_window`
+//!   or `PublicationStore::current` directly, so `CoveragePlan` stays pure,
+//!   synchronous computation, consistent with `TemporalQuery`/`ResolutionPlan`
+//!   above and with this crate not carrying a non-dev `tokio` dependency.
+//!   The async iceberg calls that resolve the caller-supplied window list
+//!   live in the calling test/service layer instead (this milestone's own
+//!   integration test, `crates/cubism-datafusion/tests/iceberg_bridge.rs`,
+//!   is exactly that wiring).
+//!
+//! What this does **not** do: decode or merge any `AggregateState` blob, or
+//! produce a value/presentation for a segment — the roadmap's own **Test**
+//! bullet for this milestone (`docs/TIMESERIES_ROADMAP.md:689-694`) asserts
+//! only provenance, the `missing` marker, and the `exact=true` failure
+//! behavior, none of which need a decoded value. Value materialization
+//! (`AggregateState::decode`/`merge`, `state_udaf.rs`) is left for a
+//! successor slice (candidate "Milestone 10b" — not yet added to the
+//! roadmap as its own milestone) once `SeriesResponse`'s value/presentation
+//! fields are actually being built.
+//!
+//! A segment is exact iff it is **both** resolution-aligned (`aligned:
+//! true`) **and** every window backing it is published. An unaligned
+//! (partial head/tail) segment is never exact, even when every window
+//! backing it is published: the plan's own words for this
+//! (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:721-722`) are "`exact=true`
+//! fails clearly if retained buckets/raw data cannot exactly cover a
+//! partial boundary" — a published window's aggregate state is a
+//! whole-bucket summary, not a sub-bucket one, so it cannot exactly answer
+//! a range narrower than the bucket without a raw-event scan, which this
+//! milestone does not implement.
 
 use cubism_core::{
     BucketOrigin, CubismError, EventTime, FixedResolution, Resolution, TemporalSpec, TimeRange,
-    XUnit,
+    WindowId, WindowRevision, XUnit,
 };
 
 /// How a segment with no backing data should be reported. Forwarded to
@@ -287,6 +342,122 @@ fn decompose(
         });
     }
     Ok(segments)
+}
+
+/// One [`ResolutionPlan`] segment resolved against real publication state.
+///
+/// `published`/`missing` partition the windows the caller supplied for this
+/// segment (see the module doc comment): `published` carries each window's
+/// currently published revision (provenance), `missing` carries the ids of
+/// windows with no published revision at all. Both can be non-empty for the
+/// same segment — an interior segment spanning several windows can have
+/// some published and some not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentCoverage {
+    pub segment: ResolutionSegment,
+    pub published: Vec<(WindowId, WindowRevision)>,
+    pub missing: Vec<WindowId>,
+}
+
+impl SegmentCoverage {
+    /// True iff this segment is resolution-aligned and every window backing
+    /// it is published. See the module doc comment for why an unaligned
+    /// segment is never exact, regardless of publication state.
+    pub fn is_exact(&self) -> bool {
+        self.segment.aligned && self.missing.is_empty()
+    }
+}
+
+/// A [`ResolutionPlan`] resolved against real publication state: per-segment
+/// provenance, missing-window markers, and (when the originating query
+/// requested `exact: true`) a hard failure instead of a silent rounding.
+///
+/// See the module doc comment for what this does and does not decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoveragePlan {
+    pub resolution: Resolution,
+    pub segments: Vec<SegmentCoverage>,
+}
+
+impl CoveragePlan {
+    /// `windows` must have exactly one entry per `plan.segments`, in the
+    /// same order: the list of `(WindowId, Option<WindowRevision>)` the
+    /// caller has determined back that segment's time range (`None`
+    /// revision means unpublished). See the module doc comment for why this
+    /// mapping is a caller-supplied input rather than something derived
+    /// here.
+    ///
+    /// When `exact` is true, fails with `CubismError::Temporal` naming
+    /// every segment that cannot be answered exactly (unaligned, missing a
+    /// published window, or both) instead of returning a `CoveragePlan`
+    /// that silently rounds or omits them — the plan's own `exact=true`
+    /// contract (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:721-722`).
+    pub fn new(
+        plan: &ResolutionPlan,
+        exact: bool,
+        windows: &[Vec<(WindowId, Option<WindowRevision>)>],
+    ) -> Result<Self, CubismError> {
+        if windows.len() != plan.segments.len() {
+            return Err(CubismError::Temporal(format!(
+                "expected one window list per segment ({} segments, {} entries)",
+                plan.segments.len(),
+                windows.len()
+            )));
+        }
+
+        let segments: Vec<SegmentCoverage> = plan
+            .segments
+            .iter()
+            .zip(windows)
+            .map(|(segment, entries)| {
+                let mut published = Vec::new();
+                let mut missing = Vec::new();
+                for (window_id, revision) in entries {
+                    match revision {
+                        Some(revision) => published.push((window_id.clone(), *revision)),
+                        None => missing.push(window_id.clone()),
+                    }
+                }
+                SegmentCoverage {
+                    segment: *segment,
+                    published,
+                    missing,
+                }
+            })
+            .collect();
+
+        if exact {
+            let inexact: Vec<String> = segments
+                .iter()
+                .filter(|coverage| !coverage.is_exact())
+                .map(|coverage| {
+                    format!(
+                        "[{}, {}) (aligned={}, missing={:?})",
+                        coverage.segment.range.start().unix_micros(),
+                        coverage.segment.range.end().unix_micros(),
+                        coverage.segment.aligned,
+                        coverage
+                            .missing
+                            .iter()
+                            .map(WindowId::as_str)
+                            .collect::<Vec<_>>()
+                    )
+                })
+                .collect();
+            if !inexact.is_empty() {
+                return Err(CubismError::Temporal(format!(
+                    "query requested exact=true but these segments cannot be answered exactly \
+                     from retained aggregate state: {}",
+                    inexact.join(", ")
+                )));
+            }
+        }
+
+        Ok(Self {
+            resolution: plan.resolution,
+            segments,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -520,6 +691,122 @@ mod tests {
         let query = query_with(0, 3_600_000_000, None, &spec);
         let err = ResolutionPlan::new(&query, &spec)
             .expect_err("a Calendar base resolution has no fixed candidate to select");
+        assert!(matches!(err, CubismError::Temporal(_)));
+    }
+
+    fn window(id: &str) -> WindowId {
+        WindowId::new(id).unwrap()
+    }
+
+    fn revision(value: u64) -> WindowRevision {
+        WindowRevision::new(value).unwrap()
+    }
+
+    #[test]
+    fn coverage_plan_is_exact_when_segment_aligned_and_all_windows_published() {
+        let spec = spec_with(minute(), vec![hour()]);
+        // One aligned hour bucket, one window, published: see
+        // resolution_plan_aligned_interval_is_one_segment for the same
+        // plan shape.
+        let query = query_with(0, 3_600_000_000, Some(hour()), &spec);
+        let plan = ResolutionPlan::new(&query, &spec).expect("aligned hour range");
+        let windows = vec![vec![(window("w1"), Some(revision(1)))]];
+
+        let coverage = CoveragePlan::new(&plan, false, &windows).expect("all windows published");
+        assert_eq!(coverage.segments.len(), 1);
+        assert!(coverage.segments[0].is_exact());
+        assert_eq!(
+            coverage.segments[0].published,
+            vec![(window("w1"), revision(1))]
+        );
+        assert!(coverage.segments[0].missing.is_empty());
+    }
+
+    #[test]
+    fn coverage_plan_reports_missing_window_without_failing_when_exact_not_requested() {
+        let spec = spec_with(minute(), vec![hour()]);
+        let query = query_with(0, 3_600_000_000, Some(hour()), &spec);
+        let plan = ResolutionPlan::new(&query, &spec).expect("aligned hour range");
+        let windows = vec![vec![(window("w1"), None)]];
+
+        let coverage = CoveragePlan::new(&plan, false, &windows)
+            .expect("exact: false must not fail on a missing window");
+        assert!(!coverage.segments[0].is_exact());
+        assert!(coverage.segments[0].published.is_empty());
+        assert_eq!(coverage.segments[0].missing, vec![window("w1")]);
+    }
+
+    #[test]
+    fn coverage_plan_exact_true_fails_on_missing_window() {
+        let spec = spec_with(minute(), vec![hour()]);
+        let query = query_with(0, 3_600_000_000, Some(hour()), &spec);
+        let plan = ResolutionPlan::new(&query, &spec).expect("aligned hour range");
+        let windows = vec![vec![(window("w1"), None)]];
+
+        let err = CoveragePlan::new(&plan, true, &windows)
+            .expect_err("exact: true must fail clearly when a window is unpublished");
+        assert!(matches!(err, CubismError::Temporal(_)));
+    }
+
+    #[test]
+    fn coverage_plan_exact_true_fails_on_unaligned_segment_even_when_published() {
+        let spec = spec_with(minute(), vec![hour()]);
+        // Same shape as resolution_plan_range_within_single_bucket_is_one_partial_segment:
+        // the single segment is unaligned (a partial sub-bucket range), so
+        // even a fully published window cannot answer it exactly — the
+        // published aggregate is bucket-granularity, not sub-bucket.
+        let query = query_with(600_000_000, 1_200_000_000, Some(hour()), &spec);
+        let plan = ResolutionPlan::new(&query, &spec).expect("sub-bucket range");
+        assert!(
+            !plan.segments[0].aligned,
+            "precondition: segment must be unaligned"
+        );
+        let windows = vec![vec![(window("w1"), Some(revision(1)))]];
+
+        let err = CoveragePlan::new(&plan, true, &windows).expect_err(
+            "exact: true must fail on an unaligned segment even when its only window is published",
+        );
+        assert!(matches!(err, CubismError::Temporal(_)));
+    }
+
+    #[test]
+    fn coverage_plan_mixed_published_and_missing_within_one_segment() {
+        let spec = spec_with(minute(), vec![hour()]);
+        // A single aligned interior segment can be backed by more than one
+        // window (Milestone 9 keeps a multi-bucket interior as one
+        // segment) — mirrors the roadmap's own Milestone 10 test scenario
+        // (one window published, one not, within a plan spanning both).
+        let query = query_with(0, 7_200_000_000, Some(hour()), &spec);
+        let plan = ResolutionPlan::new(&query, &spec).expect("two aligned hour buckets");
+        assert_eq!(plan.segments.len(), 1);
+        assert!(plan.segments[0].aligned);
+        let windows = vec![vec![
+            (window("w1"), Some(revision(1))),
+            (window("w2"), None),
+        ]];
+
+        let coverage = CoveragePlan::new(&plan, false, &windows)
+            .expect("exact: false must not fail on a partially-missing segment");
+        assert!(!coverage.segments[0].is_exact());
+        assert_eq!(
+            coverage.segments[0].published,
+            vec![(window("w1"), revision(1))]
+        );
+        assert_eq!(coverage.segments[0].missing, vec![window("w2")]);
+
+        let err = CoveragePlan::new(&plan, true, &windows)
+            .expect_err("exact: true must fail when any window backing the segment is missing");
+        assert!(matches!(err, CubismError::Temporal(_)));
+    }
+
+    #[test]
+    fn coverage_plan_rejects_windows_length_mismatch() {
+        let spec = spec_with(minute(), vec![hour()]);
+        let query = query_with(0, 3_600_000_000, Some(hour()), &spec);
+        let plan = ResolutionPlan::new(&query, &spec).expect("aligned hour range");
+
+        let err = CoveragePlan::new(&plan, false, &[])
+            .expect_err("one segment but zero window-list entries must be rejected");
         assert!(matches!(err, CubismError::Temporal(_)));
     }
 }

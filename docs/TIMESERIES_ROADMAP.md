@@ -667,33 +667,84 @@ into an observed one before Milestones 8-10 build on it.
 - **Done when:** the test passes for both aligned and unaligned boundaries
   and the full step-4 battery is clean.
 
-### Milestone 10 — `CoveragePlan`/`SeriesResponse` against real published windows
+### Milestone 10 — `CoveragePlan` against real published windows
 
-- **Status:** Not started.
-- **Target:** same file as Milestones 8-9; consumes
-  `AggregateReader::read_window` (`crates/cubism-iceberg/src/reader.rs:46`)
-  and `PublicationStore::current` (`crates/cubism-iceberg/src/control.rs:318`)
-  through the `cubism-iceberg` dependency Milestone 7 adds.
-- **What it does:** for each segment in a `ResolutionPlan`, resolves
-  whether it's backed by a current published revision (`is_exact`),
-  merges per-window `AggregateState` blobs read back via `read_window`
-  using the existing `AggregateState::merge`/`state_udaf.rs` machinery
-  (see "Why this section exists despite #8" above), and identifies
-  segments needing a raw-event scan or reporting `missing` — plan lines
-  708-719's response shape (value/presentation, bucket_start/end,
-  `is_exact`, coverage, source_resolution, missing marker,
-  snapshot/revision provenance). Plan lines 721-722's `exact=true` failure
-  behavior ("fails clearly if retained buckets/raw data cannot exactly
-  cover a partial boundary... never rounds silently") is this milestone's
-  explicit test, not a follow-on.
-- **Test:** integration test (real `cubism-iceberg` in-memory catalog):
-  publish window W1 (current revision, exact), leave W2 unpublished;
-  build a `ResolutionPlan` spanning both; assert `CoveragePlan` marks W1
-  `is_exact: true` with correct snapshot/revision provenance and W2 as
-  `missing`; assert an `exact=true` query touching W2 fails clearly
-  instead of silently rounding or omitting it.
-- **Depends on:** Milestones 7, 8, 9.
-- **Done when:** the test passes and the full step-4 battery is clean.
+- **Status:** Done (narrowed in place upon landing, same convention prior
+  milestones used). Landed as `CoveragePlan`/`SegmentCoverage`
+  (`crates/cubism-datafusion/src/range_query.rs:356-461`), covering
+  provenance/`missing`/`exact=true` failure only — **not**
+  `SeriesResponse` (deferred as "Milestone 10b" below); title above kept
+  as `CoveragePlan` alone to match what actually landed.
+- **Target:** same file as Milestones 8-9. Does **not** consume
+  `AggregateReader::read_window` or `PublicationStore::current` directly —
+  see deviations below.
+- **Deviations from the original text above** (advisor-confirmed before
+  writing code, same precedent Milestones 8-9 set for their own
+  deviations):
+  - **`cubism-iceberg` was not promoted to a normal `cubism-datafusion`
+    dependency.** It stays a dev-dependency (`crates/cubism-datafusion/Cargo.toml`).
+    `CoveragePlan::new` is pure, synchronous computation — it does not call
+    `read_window`/`current` itself. Those async calls happen in the
+    caller (this milestone's own integration test), which resolves each
+    segment's backing windows and hands `CoveragePlan::new` the results as
+    `&[Vec<(WindowId, Option<WindowRevision>)>]`, one list per segment.
+    Checked via `cargo tree`/reading both `Cargo.toml`s directly: no
+    dependency cycle exists either direction, so promotion was possible,
+    just not necessary for this milestone's scope.
+  - **The segment→`WindowId` mapping is a caller-supplied input, not
+    derived by this module.** No canonical encoding from a
+    `TimeRange`/`Resolution` pair to a `WindowId` exists anywhere in this
+    codebase (`WindowId` is an opaque caller-assigned string,
+    `crates/cubism-core/src/temporal.rs:527-529`); inventing one here would
+    be a durable `cubism-core` API decision smuggled into this milestone.
+    A single segment can legitimately be backed by more than one window
+    (Milestone 9's aligned interior segment stays one segment even when it
+    spans many resolution buckets) — `CoveragePlan::new` handles that
+    directly via the per-segment `Vec`.
+  - **No value materialization.** `AggregateState::decode`/`merge`/
+    `state_udaf.rs` are not exercised: this milestone's own **Test** bullet
+    below (unchanged from the original text) asserts only provenance, the
+    `missing` marker, and the `exact=true` failure — no numeric value.
+    Deferred as **"Milestone 10b"**, not yet added to this roadmap as its
+    own entry: build `SeriesResponse`'s value/presentation fields on top
+    of the `CoveragePlan` this milestone lands, calling `read_window` and
+    merging via `state_udaf.rs` for each `published` window a
+    `SegmentCoverage` reports.
+  - **`is_exact` is stricter than "backed by a current published
+    revision."** A segment is exact iff it is **both**
+    resolution-aligned (`ResolutionSegment::aligned`) **and** every
+    window backing it is published — an unaligned (partial head/tail)
+    segment is never exact, even fully published, because a published
+    window's aggregate state is bucket-granularity and cannot exactly
+    answer a sub-bucket range without a raw-event scan (not implemented).
+    This follows directly from plan lines 721-722 ("fails clearly if
+    retained buckets/raw data cannot exactly cover a partial boundary"),
+    not from the "backed by a current published revision" phrasing alone.
+- **What it does:** for each segment in a `ResolutionPlan`, given the
+  caller-resolved publication state of its backing window(s), reports
+  which windows are published (with `WindowRevision` provenance) and
+  which are `missing`, and computes `is_exact` per the stricter rule
+  above. `CoveragePlan::new` fails with `CubismError::Temporal`, naming
+  every offending segment, when `exact: true` and any segment is not
+  exact — plan lines 721-722's behavior, this milestone's explicit test.
+- **Test:** integration test (real `cubism-iceberg` in-memory catalog,
+  `crates/cubism-datafusion/tests/iceberg_bridge.rs:213`
+  `coverage_plan_resolves_real_publication_state_across_two_windows`):
+  publish window W1 (current revision, exact) at day resolution, leave W2
+  (the adjacent day) unpublished; build a `ResolutionPlan` spanning both
+  (kept as one aligned interior segment per Milestone 9); resolve both
+  windows' real `PublicationStore::current` and feed them into
+  `CoveragePlan::new`; assert the segment's `published` list contains W1
+  with its real `WindowRevision` and `missing` contains W2; assert
+  `exact: true` fails clearly (error message contains `"exact=true"`)
+  instead of silently rounding or omitting W2. Six additional pure unit
+  tests in `range_query.rs`'s own test module cover the aligned+published,
+  aligned+missing, unaligned+published (the `is_exact` stricter-rule
+  case), mixed-within-one-segment, and windows-length-mismatch shapes
+  without the async iceberg harness.
+- **Depends on:** Milestones 7, 8, 9 — all `Done` before this slice began.
+- **Done when:** the test passes and the full step-4 battery is clean. Met
+  (49 passed in `cubism-datafusion`, up from 42; full battery clean).
   **Does not close** plan completion-criterion 774 ("range plans prune
   storage and stay within latency/memory budgets") — `read_window`'s
   predicate is a single `(window_id, revision)` equality per call (see
@@ -702,29 +753,45 @@ into an observed one before Milestones 8-10 build on it.
   prune; achieving 774 for many windows still needs #8's SQL/pushdown
   half, or a purpose-built multi-window batch read added to
   `cubism-iceberg` itself (not scoped to this milestone). Record that gap
-  here rather than treating "774 met" as implied by "710-719 met."
+  here rather than treating "774 met" as implied by "710-719 met." Also
+  does not close plan-line-708 "value/presentation" or
+  plan-line-716 "state/error metadata" — those are Milestone 10b's, per
+  the deviations above.
 
 ### Phase 5 "done" condition (for the milestones above)
 
 Walking the plan's four completion criteria (lines 772-775), the same way
-"Phase 4 done" above walks Phase 4's, once Milestones 7-10 are `Done`:
+"Phase 4 done" above walks Phase 4's. Milestones 7-9 are `Done`; Milestone
+10 is `Done` **as narrowed** (see its own entry's "Deviations" — no value
+materialization, deferred to the not-yet-scoped "Milestone 10b"), so this
+walk is corrected from the original all-4-met assumption to reflect that
+narrowing rather than overclaim it:
 
-- 772 ("answers exact aligned ranges from aggregate state") — met by
-  Milestone 10's direct-call path.
+- 772 ("answers exact aligned ranges from aggregate state") — **not yet
+  met**. `CoveragePlan` resolves whether a range *can* be answered exactly
+  (`is_exact`, provenance, `missing`), but does not itself decode or merge
+  any `AggregateState` to produce the answer — that's Milestone 10b's
+  `read_window`/`state_udaf.rs` work, not landed here. Corrected from this
+  criterion's original "met by Milestone 10's direct-call path," which
+  assumed value materialization was part of Milestone 10's scope.
 - 773 ("partial-boundary behavior is truthful and tested") — met by
-  Milestone 10's `exact=true` failure test.
+  Milestone 10's `exact=true` failure test (both the missing-window and
+  the unaligned-but-published cases).
 - 774 ("range plans prune storage and stay within latency/memory
   budgets") — **not** met by Milestones 7-10 as scoped; see Milestone 10's
   "Done when" above. Remains gated on #8 (or a not-yet-scoped multi-window
   `cubism-iceberg` API).
-- 775 ("every result reports sufficient coverage and provenance") — met by
-  Milestone 10's response shape.
+- 775 ("every result reports sufficient coverage and provenance") —
+  **partially met**: `CoveragePlan`'s `published`/`missing` fields report
+  coverage and revision provenance per segment. Not fully met until
+  Milestone 10b's `SeriesResponse` actually carries this alongside a
+  value/presentation per plan line 708.
 - The plan's "Unresolved decisions" (lines 779-783) — "SQL table-function
   interface in addition to HTTP" is exactly the #8-gated half and is not
   resolved by Milestones 7-10; the other four (max raw boundary scan,
   multi-XUnit/multi-measure response shape, server-side caching,
   authorization boundary) are not addressed by any milestone above and
-  stay open for a successor roadmap slice once Milestones 7-10 land.
+  stay open for a successor roadmap slice once Milestones 7-10(b) land.
 - `/api/series` itself (`crates/cubism-serve`) and rolling
   comparisons/trend inputs (plan Phase 6) are **not** covered by
   Milestones 7-10 — those are the next roadmap extension once this
