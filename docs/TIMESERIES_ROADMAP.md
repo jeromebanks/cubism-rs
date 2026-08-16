@@ -541,6 +541,12 @@ into an observed one before Milestones 8-10 build on it.
   `cubism-datafusion`'s shipped dependency graph to serve a spike.
   Milestone 10 promotes it to a normal dependency in one line when it
   needs `cubism-iceberg` from `src/`.
+
+  **Correction (Milestone 10's entry below):** Milestone 10 landed without
+  this promotion — `CoveragePlan` stays pure/synchronous and never calls
+  `cubism-iceberg` from `src/`, so `cubism-iceberg` is still a
+  dev-dependency only. The promotion this paragraph describes is now
+  "Milestone 10b"'s, when value materialization needs `read_window`.
 - **Target:** new integration test in `crates/cubism-datafusion` (e.g.
   `tests/iceberg_bridge.rs`), plus adding `cubism-iceberg` as a plain path
   dependency of `cubism-datafusion`'s `Cargo.toml` (not currently a

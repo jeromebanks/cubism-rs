@@ -142,7 +142,7 @@ content this session never touched. Fixed in a follow-up commit: hand-
 reconstructed `iceberg_bridge.rs` from the pre-Milestone-10 committed
 version, preserving its exact original formatting, and added only the new
 `use` lines and the new test function as genuinely new text (diff against
-the prior commit dropped from 183 to 92 changed lines). Re-ran the full
+the prior commit dropped from 183 to 103 changed lines). Re-ran the full
 step-4 battery a third time after this fix; all figures held identical
 (see "Verification performed"). This is a stronger, reproducible
 confirmation of the same `#3` discrepancy the other incident only
@@ -166,7 +166,7 @@ Primary files changed:
   comment addendum (`:70-123`) describing what Milestone 10 does and does
   not decide and its two dependency/mapping deviations, and six new unit
   tests plus two shared test helpers (`:697-811`).
-- **`crates/cubism-datafusion/src/lib.rs`** (modified, +2/-1 lines): the
+- **`crates/cubism-datafusion/src/lib.rs`** (modified, +3/-1 lines): the
   re-export line now also exports `CoveragePlan`, `SegmentCoverage`.
 - **`crates/cubism-datafusion/tests/iceberg_bridge.rs`** (modified): added
   `coverage_plan_resolves_real_publication_state_across_two_windows`
@@ -321,23 +321,30 @@ around.
 
 ## Worktree state
 
-**Committed and pushed** to `feature/timeseries-phase-0a` as two commits
+**Committed and pushed** to `feature/timeseries-phase-0a` as three commits
 (see `git log` for the exact hashes — this doc deliberately doesn't
 hardcode them, per this series' established convention): the initial
-Milestone 10 commit, and a follow-up commit (per this series' "apply
-advisor corrections separately, don't amend" convention) that
-hand-reconstructed `crates/cubism-datafusion/tests/iceberg_bridge.rs` to
-undo the unrelated Milestone-7-test-body reflow described above, plus this
-file's citation corrections. Together those commits contain:
+Milestone 10 commit; a first follow-up (per this series' "apply advisor
+corrections separately, don't amend" convention) that hand-reconstructed
+`crates/cubism-datafusion/tests/iceberg_bridge.rs` to undo the unrelated
+Milestone-7-test-body reflow described above, plus two of this file's
+citation corrections; and a second follow-up, from a second advisor pass
+on that diff, fixing a roadmap self-contradiction (Milestone 7's entry
+still claimed the dependency promotion Milestone 10 deliberately didn't
+do) and two more numeric errors in this file (the `iceberg_bridge.rs`
+diff-size figure and `lib.rs`'s insertion count). Together those commits
+contain:
 
 - New: `docs/TIMESERIES_PHASE_20_HANDOFF.md` (this file).
 - Modified: `crates/cubism-datafusion/src/range_query.rs` (Milestone 10's
   `CoveragePlan`/`SegmentCoverage`), `crates/cubism-datafusion/src/lib.rs`
   (re-export), `crates/cubism-datafusion/tests/iceberg_bridge.rs` (new
   integration test; pre-existing Milestone 7 test body's original
-  formatting restored in the follow-up commit), `docs/TIMESERIES_ROADMAP.md`
-  (Milestone 10 status, Phase 5 done-condition correction),
-  `docs/TIMESERIES_PHASE_19_HANDOFF.md` (added `**Superseded by:**` line).
+  formatting restored in the first follow-up), `docs/TIMESERIES_ROADMAP.md`
+  (Milestone 10 status, Phase 5 done-condition correction, Milestone 7's
+  entry corrected in the second follow-up to not claim a promotion that
+  didn't happen), `docs/TIMESERIES_PHASE_19_HANDOFF.md` (added
+  `**Superseded by:**` line).
 - Untouched: `crates/cubism-core/src`, `crates/cubism-iceberg/src`,
   `crates/cubism-datafusion/src/{build,state_udaf,temporal_build,udaf,udf}.rs`
   (briefly reformatted out-of-band mid-session and reverted with `git
