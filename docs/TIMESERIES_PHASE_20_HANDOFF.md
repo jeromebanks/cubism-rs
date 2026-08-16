@@ -14,9 +14,15 @@ materialization (`AggregateState` decode/merge, i.e. the roadmap's original
 as a not-yet-scoped "Milestone 10b" — see "What was actually verified" and
 the roadmap entry for why. Six new unit tests plus one new integration test
 against a real `cubism-iceberg` in-memory catalog. Milestone 10 flipped to
-`Done` (narrowed) in the roadmap; no new GitHub issues filed. One tooling
-incident this session: an out-of-band reformat touched five files this
-session never edited, reverted before committing (see below).
+`Done` (narrowed) in the roadmap; no new GitHub issues filed. Two tooling
+incidents this session, both reverted/reconstructed before the work
+described here was considered final (see below): an unidentified-cause
+reformat touched five files this session never edited; separately, this
+session's own `rustfmt --edition 2024` call on `iceberg_bridge.rs`
+reflowed that file's entire pre-existing Milestone 7 test body, because
+the file was not `rustfmt --check`-clean under this toolchain to begin
+with — caught in the follow-up advisor review (skill step 8), not before
+the first commit.
 
 (Despite the filename, this doc documents a session slice, not "Phase 20"
 of the implementation plan — same convention every prior handoff in this
@@ -118,6 +124,34 @@ issue filed beyond `#3`, which already tracks this class of rustfmt/
 toolchain discrepancy; recorded here as a second, differently-triggered
 occurrence for whichever session investigates `#3` next.
 
+**A third, confirmed instance, caught only in the follow-up advisor
+review (skill step 8), not before the first commit:** the initial commit
+(`383f9db`, later followed up) shipped `iceberg_bridge.rs` with 183
+changed lines against a new test plus imports of roughly 105 — the
+difference was this session's own explicit `rustfmt --edition 2024
+crates/cubism-datafusion/tests/iceberg_bridge.rs` call reflowing the
+entire pre-existing Milestone 7 test body (import order, line wrapping),
+not just the new content added around it. Unlike the five-file incident
+above, the trigger here is fully explained, not a mystery: `rustfmt
+--edition 2024 --check` on that file, re-run afterward against a clean
+tree, reports diffs starting at the file's *pre-existing*, already-
+committed `micros` helper (line 45) — the file was never `--check`-clean
+under this toolchain, so any whole-file `rustfmt` invocation on it,
+however narrowly scoped to that one file, was always going to reflow
+content this session never touched. Fixed in a follow-up commit: hand-
+reconstructed `iceberg_bridge.rs` from the pre-Milestone-10 committed
+version, preserving its exact original formatting, and added only the new
+`use` lines and the new test function as genuinely new text (diff against
+the prior commit dropped from 183 to 92 changed lines). Re-ran the full
+step-4 battery a third time after this fix; all figures held identical
+(see "Verification performed"). This is a stronger, reproducible
+confirmation of the same `#3` discrepancy the other incident only
+suspected: a single-file `rustfmt --edition 2024 <path>` invocation is not
+safe to run on any file in this crate without first checking it is
+already `--check`-clean, since otherwise it will reformat pre-existing
+lines indiscriminately. No new issue filed; recorded against `#3` for the
+same reason as above.
+
 Scope fence held per the advisor's confirmation: no `AggregateState`
 decode/merge, no `read_window`/`AggregateReader` call from `src/`, no
 `SeriesResponse` value/presentation field — those are Milestone 10b's job,
@@ -129,9 +163,9 @@ Primary files changed:
 - **`crates/cubism-datafusion/src/range_query.rs`** (modified): added
   `SegmentCoverage` (`:356-360`) and its `is_exact` (`:362-369`),
   `CoveragePlan` (`:377-380`) and its `new` (`:382-461`), plus a module doc
-  comment addendum (`:70-121`) describing what Milestone 10 does and does
+  comment addendum (`:70-123`) describing what Milestone 10 does and does
   not decide and its two dependency/mapping deviations, and six new unit
-  tests (`:706-811`).
+  tests plus two shared test helpers (`:697-811`).
 - **`crates/cubism-datafusion/src/lib.rs`** (modified, +2/-1 lines): the
   re-export line now also exports `CoveragePlan`, `SegmentCoverage`.
 - **`crates/cubism-datafusion/tests/iceberg_bridge.rs`** (modified): added
@@ -212,17 +246,22 @@ mapping exists or is correct in general — the integration test's mapping
 buckets) is hand-constructed by the test itself, exactly the "caller's
 contract" the module doc comment describes, not something `CoveragePlan`
 derives or validates. It does not identify the root cause of the
-out-of-band reformat incident described above — only that it happened, was
-reverted, and left no regression.
+five-file out-of-band reformat incident described above — only that it
+happened, was reverted, and left no regression; the `iceberg_bridge.rs`
+incident's cause, by contrast, is confirmed (see above), not just worked
+around.
 
 ## GitHub issues touched
 
-- No new issues filed. The out-of-band reformat of five untouched files is
-  a new, differently-triggered *symptom* of `#3`'s already-tracked
-  rustfmt/toolchain discrepancy (Phase 19's occurrence was `cargo fmt -p`
-  reformatting a whole crate; this session's explicit formatting commands
-  never did that, yet five files changed anyway) — recorded above for
-  whichever session next investigates `#3`, not filed as a separate issue.
+- No new issues filed. Both tooling incidents this session are new
+  *symptoms* of `#3`'s already-tracked rustfmt/toolchain discrepancy —
+  the five-file reformat with an unconfirmed trigger, and the confirmed
+  `iceberg_bridge.rs` reflow (any whole-file `rustfmt --edition 2024`
+  invocation on a file that isn't already `--check`-clean under this
+  toolchain will reformat pre-existing lines, proven by re-running
+  `--check` against the file's committed, pre-Milestone-10 state) — both
+  recorded above for whichever session next investigates `#3`, neither
+  filed as a separate issue.
 - No comments added to any other open issue; nothing Milestone 10 touches
   narrows or resolves any of `#1`-`#18`. `#16` was read in full to confirm
   it does not already cover the `WindowId`-mapping gap (see "What this
@@ -241,45 +280,64 @@ reverted, and left no regression.
    also where `cubism-iceberg`'s promotion from dev-dependency to a normal
    `cubism-datafusion` dependency would actually become necessary (this
    session confirmed no cycle blocks that promotion).
-2. **Out-of-band reformat root cause** — not identified this session
-   (worked around by reverting and re-verifying, same as Phase 19's
-   `cargo fmt -p` incident). A future session hitting this again should
-   check whether a hook or environment-level formatter runs on file edits
-   independent of any explicit `cargo fmt`/`rustfmt` invocation, since
-   this session's explicit commands were already scoped to individual
-   files and the extra reformatting happened anyway.
-3. **#17** (append-committed-but-not-recorded recovery) — unchanged; still
+2. **Five-file out-of-band reformat root cause** — not identified this
+   session (worked around by reverting and re-verifying, same as Phase
+   19's `cargo fmt -p` incident). A future session hitting this again
+   should check whether a hook or environment-level formatter runs on
+   file edits independent of any explicit `cargo fmt`/`rustfmt`
+   invocation, since this session's explicit commands were already scoped
+   to individual files and the extra reformatting happened anyway. By
+   contrast, this session's separate `iceberg_bridge.rs` incident *is*
+   fully explained (see "What this session built") — not the same open
+   question.
+3. **Files not `rustfmt --edition 2024 --check`-clean under this
+   toolchain** — confirmed this session for `iceberg_bridge.rs`'s
+   pre-existing Milestone 7 test body (diffs start at its committed,
+   untouched `micros` helper). Not checked this session for any other
+   file in the crate. A future session should run `rustfmt --edition 2024
+   --check <file>` on a file *before* running a bare `rustfmt --edition
+   2024 <file>` on it, and hand-preserve pre-existing formatting (as this
+   session's follow-up commit does) if the check reports pre-existing
+   diffs, rather than let a single-file rustfmt call reflow content
+   unrelated to the change being made.
+4. **#17** (append-committed-but-not-recorded recovery) — unchanged; still
    needs a design decision before it can be sized into a bounded milestone.
    Not re-read this session (Phase 19 already re-confirmed its state; no
    reason to expect it changed).
-4. **#16** (event-time window identification + recompute-equality proof) —
+5. **#16** (event-time window identification + recompute-equality proof) —
    unchanged; re-read in full this session (see "GitHub issues touched")
    and confirmed distinct from this milestone's `WindowId`-mapping
    deviation, not touched by `CoveragePlan` itself.
-5. **#10** (real object store + Iceberg maintenance) — unchanged.
-6. **#11/#12** — unchanged; not touched this session.
-7. **Plan completion-criterion 774** (storage pruning across many windows)
+6. **#10** (real object store + Iceberg maintenance) — unchanged.
+7. **#11/#12** — unchanged; not touched this session.
+8. **Plan completion-criterion 774** (storage pruning across many windows)
    — unchanged; still gated on #8's SQL/pushdown half.
-8. **`/api/series` (`crates/cubism-serve`) and plan-Phase 6** — unchanged;
+9. **`/api/series` (`crates/cubism-serve`) and plan-Phase 6** — unchanged;
    not reached by Milestones 8-10(b).
-9. **`#14`** (retry-loop/connection-poisoning gap) — unchanged, still open;
+10. **`#14`** (retry-loop/connection-poisoning gap) — unchanged, still open;
    its own suggested next step (force a `SQLITE_BUSY`/`SQLITE_LOCKED`
    retry past `busy_timeout`) is still not implemented, a deliberately
    slow (>5s) test not added to keep the fast suite fast.
 
 ## Worktree state
 
-**Committed and pushed** to `feature/timeseries-phase-0a` (see `git log`
-for the exact hash — this doc deliberately doesn't hardcode it, per this
-series' established convention). That commit contains:
+**Committed and pushed** to `feature/timeseries-phase-0a` as two commits
+(see `git log` for the exact hashes — this doc deliberately doesn't
+hardcode them, per this series' established convention): the initial
+Milestone 10 commit, and a follow-up commit (per this series' "apply
+advisor corrections separately, don't amend" convention) that
+hand-reconstructed `crates/cubism-datafusion/tests/iceberg_bridge.rs` to
+undo the unrelated Milestone-7-test-body reflow described above, plus this
+file's citation corrections. Together those commits contain:
 
 - New: `docs/TIMESERIES_PHASE_20_HANDOFF.md` (this file).
 - Modified: `crates/cubism-datafusion/src/range_query.rs` (Milestone 10's
   `CoveragePlan`/`SegmentCoverage`), `crates/cubism-datafusion/src/lib.rs`
   (re-export), `crates/cubism-datafusion/tests/iceberg_bridge.rs` (new
-  integration test), `docs/TIMESERIES_ROADMAP.md` (Milestone 10 status,
-  Phase 5 done-condition correction), `docs/TIMESERIES_PHASE_19_HANDOFF.md`
-  (added `**Superseded by:**` line).
+  integration test; pre-existing Milestone 7 test body's original
+  formatting restored in the follow-up commit), `docs/TIMESERIES_ROADMAP.md`
+  (Milestone 10 status, Phase 5 done-condition correction),
+  `docs/TIMESERIES_PHASE_19_HANDOFF.md` (added `**Superseded by:**` line).
 - Untouched: `crates/cubism-core/src`, `crates/cubism-iceberg/src`,
   `crates/cubism-datafusion/src/{build,state_udaf,temporal_build,udaf,udf}.rs`
   (briefly reformatted out-of-band mid-session and reverted with `git
@@ -321,9 +379,11 @@ cargo clippy --workspace --exclude cubism-py --all-targets --no-deps -- -D warni
 ```
 
 The `cubism-datafusion`/workspace test and clippy lines above were each run
-twice this session: once before the five-file out-of-band reformat was
-noticed, and once fresh after reverting it, to confirm the revert
-introduced no regression. Figures shown are from the post-revert run.
+three times this session: once before the five-file out-of-band reformat
+was noticed; once fresh after reverting those five files; and once more
+after the follow-up commit hand-reconstructed `iceberg_bridge.rs` to undo
+its own unrelated reflow. All three runs produced identical figures.
+Figures shown are from the final, post-reconstruction run.
 
 ## Primary files
 
