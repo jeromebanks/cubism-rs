@@ -8,7 +8,9 @@ description: Run one bounded "session slice" of work on cubism's time-series/Ice
 Encodes the exact workflow used for every `TIMESERIES_PHASE_N_HANDOFF.md`
 session on `feature/timeseries-phase-0a` so it doesn't need to be
 re-specified by hand each time. Read this whole file before starting — the
-ordering matters (advisor-before-code, verify-before-cite, commit-before-final-advisor-call).
+ordering matters (advisor-before-code, check-before-format,
+verify-before-cite, re-verify-before-final-advisor-call,
+commit-before-final-advisor-call).
 
 ## 0. Orient
 
@@ -88,6 +90,23 @@ and ask it to:
   the actual lines). Use `rtk proxy grep -n "..." <file>` to get real
   output, or the `Read` tool with an offset, and confirm the exact number
   before citing it anywhere.
+- **Before running `rustfmt --edition 2024 <file>` on any file — including
+  a file you're only adding to, not rewriting — run `rustfmt --edition
+  2024 --check <file>` on it first, against a clean tree.** Plain `rustfmt
+  <path>` with no `--edition` flag fails outright on this crate's
+  let-chain syntax, so `--edition 2024` is required either way, but the
+  `--check` pass is a separate, mandatory gate: if it reports *any* diff,
+  the file already isn't clean under this toolchain, and a bare `rustfmt
+  --edition 2024 <file>` will reflow lines you never touched, including
+  content from prior sessions. This bit twice in the Milestone 10 slice
+  alone — once as five files reformatted by an unidentified cause, once as
+  a confirmed case where formatting exactly one file (scoped correctly,
+  not `cargo fmt -p`) still reflowed that file's own pre-existing,
+  already-committed test body. When `--check` reports pre-existing diffs,
+  do not run plain `rustfmt` on that file: hand-write your new lines
+  matching the surrounding style instead, and leave the rest of the file's
+  formatting exactly as committed. `cargo clippy -D warnings` does not
+  care about formatting, so this costs nothing at verification time.
 
 ## 3. File GitHub issues for newly (or still) untracked deferred items
 
@@ -185,6 +204,19 @@ git commit -m "..."
 ```
 
 ## 8. Advisor review, then push
+
+**Before calling advisor, re-verify every line-number citation in the new
+handoff doc and in any code/roadmap comments touched this session —
+mechanically, not from memory.** Citations that were correct when first
+written have drifted after a later edit in the same session more than
+once in this series (Phase 18, 19, and twice in Phase 20's own follow-up
+round). For each `file.rs:N` or `file.rs:N-M` citation added or changed
+this session, re-run `rtk proxy grep -n "<anchor text>" <file>` (or `Read`
+with an offset) against the file's *current* state and fix any that
+shifted — most commonly because a citation was written before a later
+edit added or removed lines above it. This is a mechanical pass you do
+yourself; don't rely on the advisor call below to catch it, that's
+strictly slower (a full extra round trip) than catching it here.
 
 Call `advisor()` again now that there's a real diff to review. This
 series' pattern (see `c2c92b3`, `d7efc04`, and the commit this skill's own
