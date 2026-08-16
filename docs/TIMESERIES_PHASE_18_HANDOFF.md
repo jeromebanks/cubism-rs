@@ -22,7 +22,8 @@ plan's Phase 4 (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:582-670`) has every
 fully done — see that roadmap's "Phase 4 done" section, unchanged by this
 session, for what remains.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_19_HANDOFF.md`, which landed
+Milestone 9 (`ResolutionPlan`), this doc's deferred item 1.
 
 ## What this session built
 

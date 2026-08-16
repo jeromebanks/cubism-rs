@@ -605,7 +605,37 @@ into an observed one before Milestones 8-10 build on it.
 
 ### Milestone 9 — `ResolutionPlan` (non-overlapping segment selection)
 
-- **Status:** Not started.
+- **Status:** Done — `docs/TIMESERIES_PHASE_19_HANDOFF.md`. Landed as
+  `crates/cubism-datafusion/src/range_query.rs:159-162`
+  (`ResolutionSegment`), `:165-172` (`ResolutionPlan`), `ResolutionPlan::new`
+  at `:174-192`, `as_fixed` at `:196-205`, `auto_select_resolution` at
+  `:216-231`, `decompose` at `:237-289`. One deviation from this milestone's
+  original text, advisor-confirmed before writing: this milestone picks
+  **one** resolution per plan (the query's `Some`, or an auto-selected one
+  for `None`) and decomposes `[start, end)` into at most 3 contiguous
+  segments (partial head / aligned interior / partial tail) at that single
+  resolution — it does **not** build a cross-resolution cover (e.g. serving
+  the interior from a coarser rollup and the edges from the base
+  resolution). Plan line 741 ("resolution choice never overlaps or
+  double-counts") reads as inviting the cross-resolution version, but that
+  depends on the divisibility/coarseness guarantee between a spec's rollups
+  and base resolution that only `TemporalSpec::validate` enforces
+  (`crates/cubism-core/src/temporal.rs:634-649`) and that this constructor
+  does not call — building it without that guarantee would be a false
+  premise. Deferred, not filed as a separate issue (see #15's role as this
+  series' Phase-4+ tracker) — revisit once a caller actually needs
+  multi-resolution serving. Non-overlap/coverage for the single-resolution
+  case follow from the segments being built off one shared cursor, proven
+  by `assert_exact_cover` in each of the six new `ResolutionPlan` tests
+  rather than by any cross-resolution reasoning. `Resolution::Calendar` is
+  rejected explicitly (no calendar equivalent of `FixedResolution::bucket`
+  exists) at both the explicit-selection and auto-selection paths, each with
+  its own test (`resolution_plan_rejects_calendar_resolution`,
+  `resolution_plan_auto_select_rejects_calendar_base_with_no_fixed_rollup`).
+  Auto-selection's rule (not dictated by the plan text) is recorded here:
+  the coarsest `Fixed` candidate (base or a rollup) whose width fits within
+  the query's duration, falling back to the base resolution when no rollup
+  fits.
 - **Target:** same file as Milestone 8.
 - **What it does:** given a `TemporalQuery` and a cube's `TemporalSpec`,
   choose non-overlapping resolution segments covering `[start, end)` —
@@ -616,6 +646,12 @@ into an observed one before Milestones 8-10 build on it.
 - **Test:** unit/property tests over synthetic boundary sets — an
   interval aligned to bucket edges, one that isn't, and an assertion that
   the chosen segments never overlap or leave a gap inside `[start, end)`.
+  Landed as six tests plus two shared helpers, `range_query.rs:391-520`
+  (`query_with`, `assert_exact_cover`, and the tests at `:428-519`): aligned interval (one
+  segment), unaligned interval (head/interior/tail), a range narrower than
+  one bucket (single partial segment, no interior), auto-selection choosing
+  the coarsest fitting rollup, auto-selection falling back to the base
+  resolution, and both Calendar-rejection cases above.
 - **Depends on:** Milestone 8.
 - **Done when:** the test passes for both aligned and unaligned boundaries
   and the full step-4 battery is clean.
