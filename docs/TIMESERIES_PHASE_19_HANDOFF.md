@@ -45,10 +45,10 @@ has already satisfied them. That read confirmed the divisibility/coarseness
 guarantee exists in `validate()` but is genuinely not enforced at
 construction — which is what motivated the scope fence below.
 
-The advisor's scope fence, applied as written: build the classic
+The advisor's scope fence, applied as written: do **not** build the classic
 coarse-interior/fine-edges *multi-resolution* decomposition Milestone 9's
 "resolution choice never overlaps or double-counts" text could be read as
-inviting, and it would depend on that unenforced divisibility guarantee —
+inviting, since it would depend on that unenforced divisibility guarantee —
 a false premise this milestone shouldn't build on. Instead, `ResolutionPlan`
 picks **one** resolution (the query's `Some`, or an auto-selected one for
 `None`) and decomposes `[start, end)` into at most three contiguous
@@ -56,8 +56,9 @@ segments at that single resolution: an optional partial head, an optional
 aligned interior (kept as one segment even when it spans many whole
 buckets, not split per-bucket), and an optional partial tail. Non-overlap
 and full coverage follow directly from building the segments off one
-shared cursor, not from any cross-resolution reasoning — stated explicitly
-in the module doc comment, this series' convention for a claim a new
+shared `interior_start`/`interior_end` boundary pair, not from any
+cross-resolution reasoning — stated explicitly in the module doc comment,
+this series' convention for a claim a new
 module is making.
 
 Two more decisions came out of the same advisor call:
@@ -71,15 +72,19 @@ Two more decisions came out of the same advisor call:
   No calendar equivalent of `FixedResolution::bucket` exists anywhere in
   this codebase, so both the explicit-selection and the auto-selection
   paths reject `Calendar` via a shared `as_fixed` helper
-  (`range_query.rs:196-205`) rather than silently producing a plan that
+  (`range_query.rs:197-206`) rather than silently producing a plan that
   doesn't cover the range. Two tests cover this
   (`resolution_plan_rejects_calendar_resolution`,
-  `resolution_plan_auto_select_rejects_calendar_base_with_no_fixed_rollup`).
+  `resolution_plan_auto_select_rejects_calendar_base` — the name
+  deliberately doesn't mention "no fixed rollup": `auto_select_resolution`
+  rejects a Calendar base via `as_fixed` before it ever inspects rollups,
+  so an empty rollup list isn't what triggers the rejection; a Calendar
+  base with a `Fixed` rollup present would reject identically).
 - **Auto-selection rule, since the plan text doesn't dictate one**: the
   coarsest `Fixed` candidate (the spec's base resolution or one of its
   rollups) whose width fits within the query's duration, falling back to
   the base resolution when no rollup fits. Implemented in
-  `auto_select_resolution` (`range_query.rs:216-231`). Recorded as a
+  `auto_select_resolution` (`range_query.rs:217-232`). Recorded as a
   decision in the roadmap's Milestone 9 entry, not left implicit in code —
   same treatment Milestone 8 gave its two deviations.
 
@@ -99,9 +104,14 @@ overlap.
 cubism-datafusion` (skill step 4 does not call for `cargo fmt` explicitly,
 but it was run to format the new code before verification) reformatted six
 files this session never touched (`build.rs`, `state_udaf.rs`, `udaf.rs`,
-`udf.rs`, `temporal_build.rs`, `tests/iceberg_bridge.rs`) — 1,109
-insertions across the crate from what should have been a single-file
-change. This is a local rustfmt/toolchain mismatch, not new source drift;
+`udf.rs`, `temporal_build.rs`, `tests/iceberg_bridge.rs`) — 760 insertions
+and 222 deletions (982 changed lines) of pure formatting churn across
+those six files alone, from what should have been a single-file change.
+(The initial `git diff --stat` total of 1,109 insertions/229 deletions
+covered all ten touched files, including this milestone's own intended
+`range_query.rs`/`lib.rs`/doc changes alongside the six-file churn — not
+the churn by itself.) This is a local rustfmt/toolchain mismatch, not new
+source drift;
 it's the same class of problem `#3` ("rustfmt --edition 2024 --check does
 not reproduce clean") already tracks, just surfaced by `cargo fmt -p`
 running crate-wide instead of file-scoped. The six unrelated files were
@@ -111,7 +121,9 @@ afterward to confirm nothing besides formatting had changed in them (see
 "Verification performed"). No issue filed for this beyond `#3`, which
 already covers the underlying rustfmt discrepancy; a future session
 touching this repeatedly should format only the changed file(s)
-(`rustfmt <path>`) rather than `cargo fmt -p <crate>`.
+(`rustfmt --edition 2024 <path>` — plain `rustfmt <path>` with no
+`--edition` flag fails outright on this crate's let-chain syntax) rather
+than `cargo fmt -p <crate>`.
 
 Scope fence held per the advisor's confirmation: no `CoveragePlan`/
 `is_exact`/`coverage`/`source_resolution` fields or logic — those are
@@ -121,12 +133,12 @@ Milestone 10's job, not this one's. `ResolutionSegment` carries only
 Primary files changed:
 
 - **`crates/cubism-datafusion/src/range_query.rs`** (modified, +313/-0
-  net across the file): added `ResolutionSegment` (`:159-162`),
-  `ResolutionPlan` (`:169-172`) and its `new` (`:174-192`), the `as_fixed`
-  helper (`:196-205`), `auto_select_resolution` (`:216-231`), `decompose`
-  (`:237-289`), plus a module doc comment addendum (`:36-67`) describing
+  net across the file): added `ResolutionSegment` (`:160-163`),
+  `ResolutionPlan` (`:170-173`) and its `new` (`:179-192`), the `as_fixed`
+  helper (`:197-206`), `auto_select_resolution` (`:217-232`), `decompose`
+  (`:238-290`), plus a module doc comment addendum (`:36-68`) describing
   what Milestone 9 does and does not do, and seven new unit tests plus two
-  shared test helpers (`:391-520`, tests themselves at `:428-519`).
+  shared test helpers (`:392-524`, tests themselves at `:429-524`).
 - **`crates/cubism-datafusion/src/lib.rs`** (modified, +1 line): the
   Milestone 8 re-export line now also exports `ResolutionPlan`,
   `ResolutionSegment`.
@@ -150,20 +162,23 @@ partial head, one full aligned interior bucket, and a partial tail
 entirely inside a single bucket, narrower than the resolution itself, which
 produces one partial segment with no aligned interior at all
 (`resolution_plan_range_within_single_bucket_is_one_partial_segment`); and
-that a shared `assert_exact_cover` helper's four checks (first segment
+that a shared `assert_exact_cover` helper's three checks (first segment
 starts at the range start, last segment ends at the range end, each
-adjacent pair is exactly contiguous with no gap or overlap) hold for every
-one of the six `ResolutionPlan` tests, not just asserted ad hoc per test.
-That auto-selection (`resolution: None`) picks the coarsest rollup that
-fits a 2-hour range
+adjacent pair is exactly contiguous with no gap or overlap) hold for each
+of the five tests that construct a plan — the two Calendar-rejection tests
+below build no plan to check, so `assert_exact_cover` does not run in
+those two. That auto-selection (`resolution: None`) picks the coarsest
+rollup that fits a 2-hour range
 (`resolution_plan_auto_selects_coarsest_resolution_that_fits`) and falls
 back to the base resolution when the only rollup is wider than a 30-minute
 range (`resolution_plan_auto_falls_back_to_base_when_no_rollup_fits`). That
 a `Calendar` resolution is rejected with `CubismError::Temporal` both when
 requested explicitly against a spec whose base is `Calendar`
 (`resolution_plan_rejects_calendar_resolution`) and when auto-selection has
-a `Calendar` base and no `Fixed` rollup to fall back to
-(`resolution_plan_auto_select_rejects_calendar_base_with_no_fixed_rollup`).
+a `Calendar` base with no `Fixed` rollup present
+(`resolution_plan_auto_select_rejects_calendar_base` — the rejection is
+actually triggered by the Calendar base alone, before rollups are ever
+inspected; the empty rollup list in this particular test isn't load-bearing).
 That the full step-4 verification battery — including `cargo clippy … -D
 warnings` — is clean with this change in place, run fresh this session
 (see "Tests" below), and re-run a second time after reverting the six
@@ -199,7 +214,7 @@ is pure computation over window boundaries.
 ## Deferred / not done this session
 
 1. **Milestone 10 (`CoveragePlan`/`SeriesResponse`)** — the roadmap's next
-   Phase 5 milestone (`docs/TIMESERIES_ROADMAP.md:659-720`, post-edit:
+   Phase 5 milestone (`docs/TIMESERIES_ROADMAP.md:666-727`, post-edit:
    this session's Milestone 9 edit added lines above it, shifting it down
    from its pre-edit 623). Depends on Milestones 8 (done) and 9 (now
    done), plus the `cubism-iceberg` dependency Milestone 7 added. Natural
@@ -214,7 +229,9 @@ is pure computation over window boundaries.
 3. **`cargo fmt -p <crate>` reformatting unrelated files** — worked around
    this session by reverting and re-verifying, but the underlying rustfmt/
    edition-2024 discrepancy `#3` tracks is unchanged. A future session
-   should default to `rustfmt <changed-file-path>` rather than
+   should default to `rustfmt --edition 2024 <changed-file-path>` (plain
+   `rustfmt <path>` with no `--edition` flag fails outright on this crate's
+   let-chain syntax — confirmed this session) rather than
    `cargo fmt -p <crate>` in this repo until `#3` is resolved.
 4. **#17** (append-committed-but-not-recorded recovery) — unchanged; still
    needs a design decision before it can be sized into a bounded milestone.
@@ -293,7 +310,7 @@ cargo clippy --workspace --exclude cubism-py --all-targets --no-deps -- -D warni
 - [`../crates/cubism-datafusion/src/lib.rs`](../crates/cubism-datafusion/src/lib.rs)
   (re-export, line 17)
 - [`../docs/TIMESERIES_ROADMAP.md`](TIMESERIES_ROADMAP.md) (Milestone 9,
-  lines 606-657 post-edit; Milestone 10, now starting at line 659, is the
+  lines 606-664 post-edit; Milestone 10, now starting at line 666, is the
   natural next slice)
 - [`TIMESERIES_PHASE_18_HANDOFF.md`](TIMESERIES_PHASE_18_HANDOFF.md) (prior
   handoff, superseded by this one)

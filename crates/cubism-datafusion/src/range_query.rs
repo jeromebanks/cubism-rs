@@ -6,7 +6,7 @@
 //! `cubism-iceberg` I/O. `TemporalQuery::new` validates against a caller-
 //! supplied `&TemporalSpec` but does not retain it: Milestone 9's
 //! `ResolutionPlan` construction takes both a `TemporalQuery` and the spec
-//! separately (`docs/TIMESERIES_ROADMAP.md:610`), so storing the spec here
+//! separately (`docs/TIMESERIES_ROADMAP.md:651`), so storing the spec here
 //! would make that signature redundant.
 //!
 //! Two validations run at construction time:
@@ -40,8 +40,9 @@
 //! that resolution: an optional partial head, an optional aligned interior
 //! (itself possibly spanning many whole buckets, kept as a single segment
 //! rather than split per-bucket), and an optional partial tail. Non-overlap
-//! and full coverage follow from the segments being built contiguously off
-//! one shared cursor, not from any cross-resolution reasoning.
+//! and full coverage follow from the segments being built directly off one
+//! shared `interior_start`/`interior_end` boundary pair, not from any
+//! cross-resolution reasoning.
 //!
 //! What this deliberately does **not** do: decompose across *multiple*
 //! resolutions (e.g. serve the interior from a coarser rollup and the edges
@@ -506,16 +507,19 @@ mod tests {
     }
 
     #[test]
-    fn resolution_plan_auto_select_rejects_calendar_base_with_no_fixed_rollup() {
-        // resolution: None with a Calendar base and no Fixed rollup leaves
-        // auto-selection with no fixed candidate at all.
+    fn resolution_plan_auto_select_rejects_calendar_base() {
+        // resolution: None with a Calendar base: auto_select_resolution
+        // rejects via as_fixed(spec.base_resolution) before it ever looks
+        // at rollups, so the empty rollup list here isn't what triggers the
+        // rejection — a Calendar base with a Fixed rollup present would
+        // reject identically.
         let spec = spec_with(
             Resolution::Calendar(CalendarResolution::CalendarDay),
             vec![],
         );
         let query = query_with(0, 3_600_000_000, None, &spec);
         let err = ResolutionPlan::new(&query, &spec)
-            .expect_err("auto-selection has no Fixed candidate to fall back to");
+            .expect_err("a Calendar base resolution has no fixed candidate to select");
         assert!(matches!(err, CubismError::Temporal(_)));
     }
 }

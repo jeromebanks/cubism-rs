@@ -568,9 +568,13 @@ into an observed one before Milestones 8-10 build on it.
 ### Milestone 8 — `TemporalQuery` (request shape + validation)
 
 - **Status:** Done — `docs/TIMESERIES_PHASE_18_HANDOFF.md`. Landed as
-  `crates/cubism-datafusion/src/range_query.rs:60-69`
-  (`TemporalQuery`) and `:48-53` (`GapPolicy`), with `TemporalQuery::new`
-  at `:77-114`. Two deviations from this milestone's original text,
+  `crates/cubism-datafusion/src/range_query.rs:97-106`
+  (`TemporalQuery`) and `:85-90` (`GapPolicy`), with `TemporalQuery::new`
+  at `:114-150` (re-verified and corrected this session — Milestone 9's own
+  module-doc-comment addition shifted every line below it, which had gone
+  unnoticed until this pass; the original citations, `:60-69`/`:48-53`/
+  `:77-114`, were accurate as of Phase 18 but are stale now). Two
+  deviations from this milestone's original text,
   both advisor-confirmed before writing: (1) the struct holds `cube:
   String` (an identifier), not the `cube/spec` `TemporalSpec` itself —
   Milestone 9's own text takes a `TemporalQuery` **and** a `TemporalSpec`
@@ -596,7 +600,7 @@ into an observed one before Milestones 8-10 build on it.
   execution types, so it doesn't depend on Milestone 7.
 - **Test:** unit tests for valid construction plus at least one rejection
   case (`start >= end`; an unsupported resolution for the cube). Landed as
-  four tests, `range_query.rs:144-215`: two valid-construction cases
+  four tests, `range_query.rs:318-390`: two valid-construction cases
   (explicit supported resolution, and `None`/auto) and the two required
   rejections.
 - **Depends on:** nothing new.
@@ -606,10 +610,10 @@ into an observed one before Milestones 8-10 build on it.
 ### Milestone 9 — `ResolutionPlan` (non-overlapping segment selection)
 
 - **Status:** Done — `docs/TIMESERIES_PHASE_19_HANDOFF.md`. Landed as
-  `crates/cubism-datafusion/src/range_query.rs:159-162`
-  (`ResolutionSegment`), `:165-172` (`ResolutionPlan`), `ResolutionPlan::new`
-  at `:174-192`, `as_fixed` at `:196-205`, `auto_select_resolution` at
-  `:216-231`, `decompose` at `:237-289`. One deviation from this milestone's
+  `crates/cubism-datafusion/src/range_query.rs:160-163`
+  (`ResolutionSegment`), `:170-173` (`ResolutionPlan`), `ResolutionPlan::new`
+  at `:179-192`, `as_fixed` at `:197-206`, `auto_select_resolution` at
+  `:217-232`, `decompose` at `:238-290`. One deviation from this milestone's
   original text, advisor-confirmed before writing: this milestone picks
   **one** resolution per plan (the query's `Some`, or an auto-selected one
   for `None`) and decomposes `[start, end)` into at most 3 contiguous
@@ -625,13 +629,20 @@ into an observed one before Milestones 8-10 build on it.
   premise. Deferred, not filed as a separate issue (see #15's role as this
   series' Phase-4+ tracker) — revisit once a caller actually needs
   multi-resolution serving. Non-overlap/coverage for the single-resolution
-  case follow from the segments being built off one shared cursor, proven
-  by `assert_exact_cover` in each of the six new `ResolutionPlan` tests
-  rather than by any cross-resolution reasoning. `Resolution::Calendar` is
-  rejected explicitly (no calendar equivalent of `FixedResolution::bucket`
-  exists) at both the explicit-selection and auto-selection paths, each with
-  its own test (`resolution_plan_rejects_calendar_resolution`,
-  `resolution_plan_auto_select_rejects_calendar_base_with_no_fixed_rollup`).
+  case follow from the segments being built directly off one shared
+  `interior_start`/`interior_end` boundary pair, proven by
+  `assert_exact_cover` in each of the five new `ResolutionPlan` tests that
+  construct a plan (the two Calendar-rejection tests below construct no
+  plan to check) — three checks per call: first segment starts at the
+  range start, last segment ends at the range end, and each adjacent pair
+  is exactly contiguous. `Resolution::Calendar` is rejected explicitly (no
+  calendar equivalent of `FixedResolution::bucket` exists) at both the
+  explicit-selection and auto-selection paths, each with its own test
+  (`resolution_plan_rejects_calendar_resolution`,
+  `resolution_plan_auto_select_rejects_calendar_base` — the latter's name
+  doesn't mention "no fixed rollup": `auto_select_resolution` rejects a
+  Calendar base via `as_fixed` before it ever inspects rollups, so an empty
+  rollup list isn't what triggers the rejection).
   Auto-selection's rule (not dictated by the plan text) is recorded here:
   the coarsest `Fixed` candidate (base or a rollup) whose width fits within
   the query's duration, falling back to the base resolution when no rollup
@@ -646,12 +657,12 @@ into an observed one before Milestones 8-10 build on it.
 - **Test:** unit/property tests over synthetic boundary sets — an
   interval aligned to bucket edges, one that isn't, and an assertion that
   the chosen segments never overlap or leave a gap inside `[start, end)`.
-  Landed as six tests plus two shared helpers, `range_query.rs:391-520`
-  (`query_with`, `assert_exact_cover`, and the tests at `:428-519`): aligned interval (one
+  Landed as seven tests plus two shared helpers, `range_query.rs:392-524`
+  (`query_with`, `assert_exact_cover`, and the tests at `:429-524`): aligned interval (one
   segment), unaligned interval (head/interior/tail), a range narrower than
   one bucket (single partial segment, no interior), auto-selection choosing
   the coarsest fitting rollup, auto-selection falling back to the base
-  resolution, and both Calendar-rejection cases above.
+  resolution, and both Calendar-rejection cases above (7 total).
 - **Depends on:** Milestone 8.
 - **Done when:** the test passes for both aligned and unaligned boundaries
   and the full step-4 battery is clean.
