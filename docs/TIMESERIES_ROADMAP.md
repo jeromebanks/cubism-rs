@@ -490,6 +490,13 @@ its dependencies, its done-condition. **Doc-only when added** — no Phase 5
 milestone below is implemented yet; every "Status" is `Not started` unless
 noted.
 
+**Phase start (for `.claude/skills/timeseries-slice/SKILL.md` step 8a's
+cross-model phase review, backfilled 2026-08-16, not used retroactively —
+Phase 4 predates step 8a):** `f0599b2`, the commit immediately before this
+section was added by `4299d60`. When Phase 5's "done" condition below is
+actually reached, step 8a diffs `f0599b2..HEAD` for that review, not just
+whatever this session's own commits touch.
+
 ### Why this section exists despite #8
 
 [#8](https://github.com/jeromebanks/cubism-rs/issues/8) says Phase 5

@@ -155,3 +155,35 @@ filing issues in this repo, not just this branch's skill.
    reapplied) do a short process retro like this one — cheap, and it's
    what surfaced both the `#3` root-cause signal and the citation-drift
    pattern before they became larger.
+4. **Decide on an issue-tracking system for the next-gen SDLC** — GitHub
+   issues (current), Linear, Jira, or something else. Not analyzed here;
+   flagged during this retro (2026-08-16) as an open question for a
+   dedicated follow-up, not a decision to make inline. Whatever's chosen
+   should account for what's already working well with GitHub issues in
+   this series specifically (cheap `gh issue create`/`view` from an agent
+   session, the Summary/Scope/Suggested-next-steps/non-goals/Environment
+   template above, issue numbers as stable cross-references from commit
+   messages and docs) rather than assuming a switch is free.
+
+## Addendum: cross-model phase review (added 2026-08-16)
+
+Prompted by comparing notes against `~/dev/postscript_interpreter`'s
+`work-issue` skill, which gates merge on an independent Codex review —
+deliberately blank-context, seeing only `gh pr diff`, never the
+implementing session's narrative. `timeseries-slice` had no equivalent:
+every review in this series has been `advisor()`, which inherits the
+whole session transcript, including whatever justification was offered
+for each choice along the way. That's a real gap, but `work-issue`'s
+per-PR cadence doesn't map onto this branch (no PRs, direct push to a
+shared feature branch) or its economics (slices are deliberately small
+and cheap; a multi-minute cross-model pass on every one would erode that).
+
+Landed as `.claude/skills/timeseries-slice/SKILL.md` step 8a instead:
+triggered only when a slice closes a roadmap `## Phase N "done" condition`
+section — Phase 4 took ~8 slices, Phase 5 is on track for ~5-6 — reviewing
+the whole phase's accumulated diff via the same Codex plugin `work-issue`
+uses (`--scope branch --base <phase start>`), with output written to
+`docs/phase-reviews/TIMESERIES_PHASE_<N>_REVIEW.md` rather than a PR
+comment. Forward-only: Phase 4 already closed without this gate and isn't
+retroactively reviewed. First real run expected whenever Phase 5's "done"
+condition is reached (Milestone 10b and/or `#8`).

@@ -10,7 +10,11 @@ session on `feature/timeseries-phase-0a` so it doesn't need to be
 re-specified by hand each time. Read this whole file before starting — the
 ordering matters (advisor-before-code, check-before-format,
 verify-before-cite, re-verify-before-final-advisor-call,
-commit-before-final-advisor-call).
+commit-before-final-advisor-call). One occasional step is
+condition-triggered rather than every-slice: step 8a's cross-model phase
+review, which only runs when this slice closes out a roadmap `## Phase N
+"done" condition` section — see step 1 for how that gets flagged and step
+8a for the mechanics.
 
 ## 0. Orient
 
@@ -72,6 +76,18 @@ and ask it to:
   slice: `SqliteStore`'s `max_connections(1)` + `BEGIN IMMEDIATE` means
   "concurrent" cannot mean "parallel at the DB level" — the advisor caught
   this before a test got written that would have asserted something false).
+- **confirm whether landing this slice will satisfy (or narrow-and-close,
+  the usual outcome in this series) a roadmap `## Phase N "done" condition`
+  section.** If yes, step 8a's cross-model phase review applies this
+  session — note that now so it isn't discovered as an afterthought after
+  step 7's commit. If this slice is also the *first* one to add a brand
+  new `## Phase N` section to the roadmap (i.e. it opens a phase, not
+  closes one), record the commit immediately before that roadmap edit as
+  that section's **Phase start (for step 8a):** line — this is what step
+  8a's eventual review diffs from, and it's cheap to capture now versus
+  git-archaeology later. (Phase 5's own start is already backfilled:
+  `f0599b2`, the commit immediately before `4299d60` added the "Phase 5
+  Milestones" section.)
 
 ## 2. Implement the slice
 
@@ -228,7 +244,10 @@ with no forward-pointer from the previous one, a missing filename
 disclaimer, an undercounted test total, a test claim that overstates what
 timing/concurrency was actually shown.
 
-Once the advisor pass is clean (or its follow-up commit is in), push:
+Once the advisor pass is clean (or its follow-up commit is in): **if step
+1 flagged this slice as phase-closing, do step 8a now, before the push
+below** — its own fix commits (if any) should go out in the same push as
+this slice's, not a second one. Otherwise skip straight to push.
 
 ```bash
 git push origin feature/timeseries-phase-0a
@@ -236,10 +255,108 @@ git push origin feature/timeseries-phase-0a
 
 Push and commit are pre-authorized for this workflow — that's the standing
 instruction this skill exists to satisfy — but everything in `git status`
-should still be exactly what step 7 intended to stage before it's pushed.
+should still be exactly what step 7 (and step 8a, if it ran) intended to
+stage before it's pushed.
+
+## 8a. Cross-model phase review (only when this slice closes a phase)
+
+**Skip this step entirely unless step 1 flagged that this slice satisfies
+a roadmap `## Phase N "done" condition` section.** Most slices don't
+reach this step — it's phase-sized, not slice-sized, deliberately, so it
+doesn't add cost to the common case.
+
+**Why this exists, and why it's not just another `advisor()` call:**
+`advisor()` forwards this entire session's transcript — every
+rationalization and framing choice made along the way. It's a genuinely
+useful check, and every slice in this series has used it, but it can't
+catch a mistake it's been talked into agreeing with, because it always
+sees *why* a choice was made, not just the choice. A phase boundary is
+sized right for a second kind of check: a reviewer that sees only the
+accumulated diff, with none of these sessions' narrative behind it. This
+mirrors `~/dev/postscript_interpreter/.claude/skills/work-issue/SKILL.md`
+step 8's cross-model Codex gate, adapted from a PR-based merge checkpoint
+(which this branch doesn't have — no PRs, direct push) to a phase-sized
+diff instead.
+
+**Forward-only.** This step did not exist when Phase 4 closed (Milestone
+6, `docs/TIMESERIES_PHASE_14_HANDOFF.md` era) — Phase 4 is not
+retroactively reviewed under this process. The first phase this applies
+to is Phase 5, whenever its "done" condition is actually reached
+(Milestone 10b and/or `#8` landing). Revisit whether a Phase 4 baseline
+review is worth doing separately later; don't let this step's existence
+imply one already happened.
+
+Locate the Codex plugin runtime the same way `work-issue` does — don't
+assume `$CLAUDE_PLUGIN_ROOT`:
+
+```bash
+CODEX_SCRIPT=$(find "$HOME/.claude/plugins" -path "*/codex/scripts/codex-companion.mjs" 2>/dev/null | head -1)
+node "$CODEX_SCRIPT" status --json   # confirm it resolves before trusting the review call below
+```
+
+Read the phase's **Phase start:** commit from its roadmap section (step 1
+backfills this when a phase opens). Run the review scoped to that whole
+range, from inside the repo root, on a clean `HEAD` (this slice's own
+commit(s) from step 7 already in):
+
+```bash
+rm -f /tmp/codex-phase-review-<N>.json && \
+  git fetch origin feature/timeseries-phase-0a && \
+  node "$CODEX_SCRIPT" review --wait --json --scope branch --base <phase-start-commit> \
+  > /tmp/codex-phase-review-<N>.json
+```
+
+Same pitfalls apply as `work-issue`'s equivalent step (worth re-reading
+that file's "Pitfalls" section once before the first time this runs in
+this repo): expect several minutes, not a hang; the real content is
+`.codex.stdout` (free-form markdown, `[P1]`/`[P2]`-tagged bullets as a
+rough heuristic, not a schema); check `.codex.status == 0` and non-empty
+`.codex.stdout` before trusting the output; a `status --all --json` job
+can report `"running"` long after the process actually died — cross-check
+`kill -0 <pid>` before waiting longer.
+
+**If the Codex runtime is unavailable or the run fails:** fall back to a
+blank-context `Agent` (not `advisor` — it must not inherit this session).
+Self-contained prompt: nothing but "review `git diff
+<phase-start-commit>..HEAD` in
+`/Users/jeromebanks/dev/cubism_saas/cubism` for correctness, scope
+overclaims, and consistency with `docs/TIMESERIES_ROADMAP.md`'s Phase N
+'done' condition claims" — it reads the diff and the roadmap itself, not
+anything from this session. Note the fallback explicitly in the output
+file below.
+
+**Output goes in a file, not a PR/issue comment — there's no PR on this
+branch.** Write to `docs/phase-reviews/TIMESERIES_PHASE_<N>_REVIEW.md`
+(create the `docs/phase-reviews/` subfolder the first time this runs),
+containing: date, branch, phase number, the diff range (`<phase-start
+commit> (one-line)..HEAD (one-line)`), which reviewer ran (Codex, or
+"blank-context Agent fallback" with why), and the full review text
+verbatim. **Write this file even if the review is clean with nothing to
+fix** — a clean pass is still a durable record, same as `work-issue`'s
+"post unconditionally" rule.
+
+**Read the whole thing yourself; don't gate on `[P1]`-only.** Every
+finding needs an explicit disposition recorded in the same file — fixed
+(with the follow-up commit hash once it exists), not a bug (with why), or
+deferred (with the issue it's tracked under, filing one via step 3's
+convention if it isn't tracked yet). An unexplained skip isn't
+acceptable, matching this series' "don't let a passing check read as more
+coverage than it has" convention applied to review findings instead of
+tests.
+
+If fixes are needed: apply them as a separate follow-up commit (same
+"never rewrite the landing commit" convention as every other advisor
+follow-up in this series), re-run the step 4 battery, update the
+disposition in the review file, and commit that update too. Then link the
+review file from the roadmap doc's `## Phase N "done" condition` section
+(an additive pointer, same convention as every other cross-link in this
+doc) before continuing to push.
 
 ## 9. Report back
 
 Short summary: what slice landed, what got filed, what's still deferred,
-link to the new handoff doc. Don't restate the whole handoff doc in chat —
-it's already durable on disk and pushed.
+link to the new handoff doc. If step 8a ran, also link the new
+`docs/phase-reviews/TIMESERIES_PHASE_<N>_REVIEW.md` and say in one line
+whether it came back clean or needed a fix. Don't restate the whole
+handoff doc (or the whole phase review) in chat — both are already
+durable on disk and pushed.
