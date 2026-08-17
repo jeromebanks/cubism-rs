@@ -24,6 +24,21 @@
 //!   just that point. The plan's "state/error metadata where appropriate"
 //!   (line 716) is not implemented at that granularity this slice.
 //!
+//! **`is_exact` is inherited from `CoveragePlan`, not re-verified against
+//! `batches`.** `SegmentCoverage::is_exact()` reflects only the caller-
+//! supplied `published`/`missing` window lists (`range_query.rs`'s own
+//! module doc comment: that mapping is a caller-supplied input this crate
+//! deliberately does not derive). `SeriesResponse::new` does not and
+//! cannot check that `batches[i]` actually contains rows for the windows
+//! `coverage.segments[i]` reports as published — that correspondence is
+//! entirely the caller's responsibility. A caller that reports a window as
+//! published but hands an empty or wrong batch list still gets
+//! `is_exact: true` back, with `value: None` (or `Some(0.0)` under
+//! [`GapPolicy::Zero`]) — an exact-looking point with no data behind it.
+//! This is not a bug this module can fix without inventing a
+//! windows-to-batches correspondence it has no way to derive; it is a
+//! contract callers must uphold.
+//!
 //! **Gap policy is consumed, not deferred.** `merge_average_column` over a
 //! segment with zero published windows (or windows whose only rows are
 //! null) returns `AverageState::new()` — a zero-count state whose
@@ -46,6 +61,10 @@ use crate::series_merge::merge_average_column;
 pub struct SeriesPoint {
     pub bucket_start: EventTime,
     pub bucket_end: EventTime,
+    /// Copied from `SegmentCoverage::is_exact()` — not re-verified against
+    /// `batches`. See the module doc comment: this is `true` whenever the
+    /// caller's `CoveragePlan` says the segment is aligned and fully
+    /// published, even if `batches` for that segment is empty or wrong.
     pub is_exact: bool,
     /// The segment's merged `AverageState`, presented (`AggregateState::present`,
     /// i.e. the mean). `None` means no data was folded in for this segment —
@@ -209,11 +228,21 @@ mod tests {
     fn series_response_no_data_is_none_under_missing_gap_policy() {
         let coverage = one_segment_coverage_plan();
         // No blobs at all for the segment's one published window's batch —
-        // an empty read result, not an error.
+        // an empty read result, not an error. `coverage`'s own `missing`
+        // list is still empty (the caller reported w1 as published), so
+        // `is_exact` stays `true` here even though no data was actually
+        // folded in — the module doc comment's documented caveat that
+        // `is_exact` is inherited from `CoveragePlan`, not re-verified
+        // against `batches`. Asserted explicitly so this incoherent-looking
+        // combination is visible, not implied.
         let batches = vec![vec![avg_batch("avg_v1", &[])]];
 
         let response =
             SeriesResponse::new(&coverage, GapPolicy::Missing, "avg_v1", &batches).unwrap();
+        assert!(
+            response.points[0].is_exact,
+            "is_exact reflects CoveragePlan's own published/missing lists, not batches content"
+        );
         assert_eq!(response.points[0].value, None);
     }
 
@@ -223,6 +252,10 @@ mod tests {
         let batches = vec![vec![avg_batch("avg_v1", &[])]];
 
         let response = SeriesResponse::new(&coverage, GapPolicy::Zero, "avg_v1", &batches).unwrap();
+        assert!(
+            response.points[0].is_exact,
+            "same caveat as the Missing-policy test above: is_exact does not depend on batches"
+        );
         assert_eq!(response.points[0].value, Some(0.0));
     }
 

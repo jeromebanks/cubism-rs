@@ -899,6 +899,16 @@ into an observed one before Milestones 8-10 build on it.
     `None` case when it is `GapPolicy::Zero`; `GapPolicy::Missing` leaves it
     `None`. A segment with a genuine non-zero-count merge is never touched
     by this substitution.
+  - **`is_exact` is copied from `CoveragePlan`, not re-verified against
+    `batches`.** `SeriesResponse::new` has no way to check that `batches[i]`
+    actually contains rows for the windows `coverage.segments[i]` reports as
+    published — that correspondence is the caller's responsibility, not
+    something this module derives (same reason `CoveragePlan` itself
+    doesn't derive the segment→`WindowId` mapping). A caller that
+    mis-supplies `batches` for a segment it reported as published still
+    gets `is_exact: true` back, with `value: None`/`Some(0.0)` depending on
+    `gap_policy` — see "Phase 5 done condition" below, criterion 772, for
+    the full statement of this caveat.
 - **What it does:** given a `CoveragePlan` and one already-read batch list
   per segment, decodes+merges each segment's `avg_v1`-style column via
   `merge_average_column` and produces one `SeriesPoint` per segment:
@@ -940,13 +950,23 @@ tracked against an issue rather than treated as blocking, the same pattern
 "Phase 4 done" used for its own criteria 2-4. Milestones 7-10b-2 are all
 `Done` (10 and 10b-1 as narrowed, per their own entries' "Deviations"):
 
-- 772 ("answers exact aligned ranges from aggregate state") — **met**.
-  `SeriesResponse::new` (Milestone 10b-2) wires `CoveragePlan`'s `published`
-  list to `merge_average_column` (Milestone 10b-1) and produces a real
-  value; the integration test above proves this end-to-end against a real
-  published window, not just in-memory logic. Scoped to `AverageState`
-  only — widening to other measure kinds is not this criterion's literal
-  wording and is left open (see Milestone 10b-2's "Deviations").
+- 772 ("answers exact aligned ranges from aggregate state") — **met as
+  narrowed, `AverageState` only**. `SeriesResponse::new` (Milestone 10b-2)
+  wires `CoveragePlan`'s `published` list to `merge_average_column`
+  (Milestone 10b-1) and produces a real value; the integration test above
+  proves this end-to-end against a real published window, not just
+  in-memory logic. Widening to other measure kinds is not this criterion's
+  literal wording and is left open (see Milestone 10b-2's "Deviations").
+  **Caveat, not a gap in this criterion but worth stating plainly:**
+  `SeriesResponse::new` does not verify that `batches` actually corresponds
+  to the windows `coverage` reports as published — `is_exact: true` is
+  copied straight from `SegmentCoverage::is_exact()`, which reflects only
+  the caller-supplied `published`/`missing` lists. A caller that
+  mis-supplies `batches` (e.g. hands an empty list for a segment it itself
+  reported as published) gets an `is_exact: true` point with no data behind
+  it; the correspondence is entirely the caller's responsibility, same as
+  the segment→`WindowId` mapping `CoveragePlan` already doesn't derive
+  (`series_response.rs`'s own module doc comment records this).
 - 773 ("partial-boundary behavior is truthful and tested") — met by
   Milestone 10's `exact=true` failure test (both the missing-window and
   the unaligned-but-published cases), unchanged by this milestone.
@@ -959,10 +979,14 @@ tracked against an issue rather than treated as blocking, the same pattern
   not-yet-scoped multi-window `cubism-iceberg` API) — same "excluded, not
   silently dropped" treatment "Phase 4 done" gave its own unmet criteria
   against #10/#17.
-- 775 ("every result reports sufficient coverage and provenance") — **met**.
-  `SeriesResponse`'s `published`/`missing` fields (copied from
-  `SegmentCoverage`) now sit alongside an actual materialized `value`, not
-  just provenance on its own as Milestone 10 alone left it.
+- 775 ("every result reports sufficient coverage and provenance") — **met
+  as narrowed, minus per-point state/error metadata**. `SeriesResponse`'s
+  `published`/`missing` fields (copied from `SegmentCoverage`) now sit
+  alongside an actual materialized `value`, not just provenance on its own
+  as Milestone 10 alone left it. Plan line 716's "state/error metadata
+  where appropriate" is explicitly not implemented at per-point granularity
+  this slice (see Milestone 10b-2's "Deviations") — a decode/merge failure
+  fails the whole `SeriesResponse::new` call, not just the offending point.
 - The plan's "Unresolved decisions" (lines 779-783) — "SQL table-function
   interface in addition to HTTP" is exactly the #8-gated half and remains
   unresolved (same gap as 774). The other four (max raw boundary scan,
@@ -975,11 +999,13 @@ tracked against an issue rather than treated as blocking, the same pattern
   done here.
 
 **Net: Phase 5 as this roadmap defines it (excluding #8, the same way
-"Phase 4 done" excludes #10) is done as of Milestone 10b-2.** Criteria 772,
-773, and 775 are met; 774 and the SQL-table-function unresolved decision
-remain #8's scope, not a gap in Milestones 7-10b-2 themselves. Per this
-series' step 8a (`.claude/skills/timeseries-slice/SKILL.md`), landing
-Milestone 10b-2 triggers the cross-model phase review — see
+"Phase 4 done" excludes #10) is done as of Milestone 10b-2.** Criteria 772
+and 775 are met as narrowed (see their own bullets above for exactly what
+"narrowed" excludes); 773 is met without qualification; 774 and the
+SQL-table-function unresolved decision remain #8's scope, not a gap in
+Milestones 7-10b-2 themselves. Per this series' step 8a
+(`.claude/skills/timeseries-slice/SKILL.md`), landing Milestone 10b-2
+triggers the cross-model phase review — see
 [`docs/phase-reviews/TIMESERIES_PHASE_5_REVIEW.md`](phase-reviews/TIMESERIES_PHASE_5_REVIEW.md)
 for that review's findings and disposition.
 
