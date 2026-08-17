@@ -101,3 +101,14 @@ own new code (`AggregateReader::run_append_snapshot` and its call sites) was
 not flagged. That is expected, not a gap in the review's coverage: this is
 Phase 4's *first* review, covering six milestones' worth of accumulated code
 in one pass, not a review scoped to one slice's own diff.
+
+Scope caveat: this review ran with `--scope branch --base a253f4f`, i.e.
+against the tree at `73145b1`. Two things postdate that tree and so fall
+outside what this review actually covered: the P2 fix itself
+(`crates/cubism-core/src/temporal.rs`, widened to `i128`) and the
+`run_append_snapshot_returns_none_against_a_table_with_no_commits_at_all`
+test, both landed in the separate follow-up commit that applies this
+review's own dispositions. "The review covered Phase 4" means the
+`a253f4f..73145b1` diff, not the tree as it stands after that follow-up
+commit — the fix was not re-reviewed, by design (see the roadmap's step 8a
+note on not re-running a phase review to chase its own fix commit).

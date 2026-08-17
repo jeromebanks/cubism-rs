@@ -108,7 +108,11 @@ compiles.
 
 ### Milestone 1 — `LatenessPolicy`
 
-- **Status:** Done — `docs/TIMESERIES_PHASE_8_HANDOFF.md`.
+- **Status:** Done — `docs/TIMESERIES_PHASE_8_HANDOFF.md`. Corrected:
+  `classify`'s deadline arithmetic was widened from `i64` to `i128` by
+  Phase 4's step 8a review, which found it could overflow on valid extreme
+  `bucket_end`/`allowed` inputs — see
+  `docs/phase-reviews/TIMESERIES_PHASE_4_REVIEW.md`.
 - **Target:** landed in `cubism-core`, not `cubism-iceberg`
   (`crates/cubism-core/src/temporal.rs`, beside `AllowedLateness`) — see
   "Current state" above for why: `IngestionTime`'s module-doc purpose

@@ -25,7 +25,12 @@ remaining gap, tracked against #17 since Milestone 6 closed. This triggers
 this series' step 8a cross-model phase review for the first time on Phase
 4 (Phase 4 predates step 8a's existence — see the skill's own "Forward-
 only" note — so this is the first review Phase 4 has ever had, not a
-follow-up to a prior one). See "Step 8a" below for the review's disposition.
+follow-up to a prior one). The review found two real, pre-existing issues:
+one filed as a new tracked issue,
+[#20](https://github.com/jeromebanks/cubism-rs/issues/20) (deferred pending
+a design decision), and one fixed in-session in `cubism-core` (an `i64`
+overflow in `LatenessPolicy::classify`). See "Step 8a" below for the full
+disposition of both.
 
 Also closed on GitHub this session, found to already be resolved by earlier
 work rather than needing a fix: **#18** (`Rollback leaves a superseded run's
