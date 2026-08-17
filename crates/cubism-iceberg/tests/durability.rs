@@ -677,6 +677,48 @@ async fn sqlite_coordinator_execute_recovers_an_appended_but_unrecorded_claim_af
     );
 }
 
+/// The other half of #17's fix that the crash-recovery test above cannot
+/// exercise: `AggregateReader::run_append_snapshot` is also reached by
+/// `cubism-cli`'s `iceberg_build` on a **brand-new cube's first-ever
+/// build**, where the states table has just been created and has zero
+/// commits — no snapshot exists at all yet, durable or otherwise. Iceberg's
+/// own `TableScanBuilder::build` (iceberg-rust 0.10, `scan/mod.rs`) returns a
+/// `TableScan` with `plan_context: None` when `current_snapshot()` is
+/// `None`, and `to_arrow()` short-circuits that into an empty stream rather
+/// than erroring — but that behavior lives in a dependency, not this crate,
+/// so it is proven directly here rather than trusted from reading the
+/// dependency's source.
+#[tokio::test]
+async fn run_append_snapshot_returns_none_against_a_table_with_no_commits_at_all() {
+    let warehouse = TempDir::new().unwrap();
+    let catalog_dir = TempDir::new().unwrap();
+    let catalog_db = catalog_dir.path().join("catalog.sqlite");
+    let config = CatalogConfig::Sqlite {
+        warehouse: warehouse.path().to_path_buf(),
+        catalog_db: catalog_db.clone(),
+    };
+    let window_id = WindowId::new("2026-08-12").unwrap();
+
+    let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+    let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
+        .await
+        .unwrap();
+
+    let result = AggregateReader::run_append_snapshot(
+        catalog.as_ref(),
+        &table,
+        &window_id,
+        WindowRevision::new(1).unwrap(),
+        "run-first-ever",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result, None,
+        "a states table with zero commits must scan as 'not yet appended', not error"
+    );
+}
+
 /// Roadmap Milestone 6 (`docs/TIMESERIES_ROADMAP.md`): plan lines 666-669
 /// ("Rollback point") ask for repointing a window to its prior published
 /// revision. `PublicationStore::publish` has no revision-monotonicity

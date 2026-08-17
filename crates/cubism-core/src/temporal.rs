@@ -487,9 +487,19 @@ impl LatenessPolicy {
     /// — half-open, matching this module's other boundary types (e.g.
     /// [`TimeBucket::contains`]): the deadline instant itself is `Late`, not
     /// `OnTime`.
+    ///
+    /// i128, not i64: `bucket_end` and `allowed` are each independently
+    /// valid values with no joint bound enforced anywhere they're
+    /// constructed, so a `bucket_end` near `i64::MAX` plus a large
+    /// `allowed` can overflow a plain i64 addition (panic in debug, silent
+    /// wraparound in release, potentially misclassifying an on-time event
+    /// as late) — caught by Phase 4's first cross-model phase review
+    /// (`docs/phase-reviews/TIMESERIES_PHASE_4_REVIEW.md`), the same class
+    /// of bug Phase 5's own review found and fixed in `auto_select_resolution`
+    /// (`crates/cubism-datafusion/src/range_query.rs`).
     pub fn classify(&self, event_time: EventTime, bucket_end: BucketEnd) -> Lateness {
-        let deadline = bucket_end.unix_micros() + self.allowed.micros();
-        if event_time.unix_micros() < deadline {
+        let deadline = bucket_end.unix_micros() as i128 + self.allowed.micros() as i128;
+        if (event_time.unix_micros() as i128) < deadline {
             Lateness::OnTime
         } else {
             Lateness::Late
@@ -750,6 +760,26 @@ mod tests {
         assert_eq!(
             policy.classify(EventTime::from_unix_micros(10 * MICROS_PER_SECOND), bucket_end),
             Lateness::Late
+        );
+    }
+
+    #[test]
+    fn lateness_policy_classify_does_not_overflow_on_extreme_inputs() {
+        // `bucket_end` near `i64::MAX` plus a large `allowed` used to
+        // overflow a plain i64 addition (panic in debug, silent wraparound
+        // in release) — caught by a cross-model phase review
+        // (`docs/phase-reviews/TIMESERIES_PHASE_4_REVIEW.md`), the same
+        // class of bug Phase 5's own review found in `auto_select_resolution`.
+        // Neither input is out of range on its own — `AllowedLateness::from_micros`
+        // only rejects negative values, and `BucketEnd` has no upper bound —
+        // so this combination is a real value this function must handle.
+        let policy = LatenessPolicy::new(AllowedLateness::from_micros(i64::MAX).unwrap());
+        let bucket_end = BucketEnd::from_unix_micros(i64::MAX);
+
+        assert_eq!(
+            policy.classify(EventTime::from_unix_micros(i64::MAX), bucket_end),
+            Lateness::OnTime,
+            "i64::MAX is strictly before an i128 deadline of i64::MAX + i64::MAX"
         );
     }
 }

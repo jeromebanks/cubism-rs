@@ -122,12 +122,18 @@ place. Both are now fixed, sharing `run_append_snapshot`
   existing invariant, because none exists to weaken; recorded in
   `run_append_snapshot`'s own doc comment rather than left unexamined.
 
-**A real bug caught by the test itself, not by review:**
-`FixedSizeBinaryArray`-adjacent code was not touched this session, but the
-new integration test's first run surfaced nothing broken — worth noting the
-absence explicitly since a prior slice in this series (Milestone 10b-3) hit
-exactly this class of bug in similar territory. This session's test passed
-on the first real run after the fix landed; no equivalent surprise here.
+**One more gap the advisor caught on a second pass:** the CLI fix reaches
+`run_append_snapshot` from `iceberg_build`'s `Claimed` branch, which a
+brand-new cube's *first-ever* build also passes through — at that point the
+states table has just been created and has zero commits, no snapshot at
+all. Read through iceberg-rust 0.10's own `TableScanBuilder::build`
+(`scan/mod.rs`) to confirm it returns a scan with `plan_context: None` in
+that case rather than erroring, and `to_arrow()` short-circuits that into an
+empty stream — then proved it directly rather than trusting the reading,
+with a new test,
+`run_append_snapshot_returns_none_against_a_table_with_no_commits_at_all`
+(`crates/cubism-iceberg/tests/durability.rs`), since that behavior lives in
+a dependency this crate doesn't control.
 
 Step 8a's own trigger question — "does this slice satisfy or newly close a
 roadmap Phase N done condition" — was resolved explicitly at the advisor
@@ -190,17 +196,44 @@ the whole file), with every fix re-diffed against the pre-existing baseline
 afterward to confirm the remaining diff count matched exactly — not
 approximately.
 
+That `LatenessPolicy::classify` (step 8a's P2 finding, fixed as a follow-up
+commit) does not overflow on the specific extreme inputs the review
+identified:
+`lateness_policy_classify_does_not_overflow_on_extreme_inputs`
+(`crates/cubism-core/src/temporal.rs`) constructs
+`AllowedLateness::from_micros(i64::MAX)` (a valid value — the constructor
+only rejects negative micros) and `BucketEnd::from_unix_micros(i64::MAX)`
+(no upper bound at all) together, and asserts
+`EventTime::from_unix_micros(i64::MAX)` classifies `OnTime` — the pre-fix
+`i64` addition would panic on this input in a debug build and silently
+misclassify it `Late` in release. `cargo test -p cubism-core` (83 passed, up
+from 82) and `cargo clippy -p cubism-core --all-targets --no-deps -- -D
+warnings` (clean) were both re-run after this fix; `rustfmt --edition 2024
+--check` on `temporal.rs` was confirmed byte-for-byte identical in diff
+count to a fresh `HEAD` checkout of the same file — this fix's own new lines
+produced zero additional diff, verified directly, not assumed.
+
 It does **not** prove: anything about concurrent recovery of the same run
-(explicitly out of scope, see "What this session built" above). It does not
-change or re-verify anything about `#8`'s SQL/pushdown gap, `#10`'s
-compaction/retention scope, `#16`'s event-time-window-identification gap, or
-any Phase 5 work — none of those crates/paths were touched this session.
+(explicitly out of scope, see "What this session built" above), or anything
+about step 8a's P1 finding (`#20`) — deferred, not fixed, see "Step 8a"
+above. It does not change or re-verify anything about `#8`'s SQL/pushdown
+gap, `#10`'s compaction/retention scope, `#16`'s
+event-time-window-identification gap, or any Phase 5 work — none of those
+crates/paths were touched this session.
 
 ## GitHub issues touched
 
 - **Closed [#17](https://github.com/jeromebanks/cubism-rs/issues/17)** —
   fixed by this session's own code (`run_append_snapshot`, wired into both
   `CorrectionCoordinator::execute` and `cubism-cli`'s `iceberg_build`).
+  Comment posted and closed via `gh api`'s REST endpoint. Caught a real
+  process gap on resumption, not just a GraphQL retry: the original attempt
+  to close #17 (via `gh issue close`) was made while GitHub's GraphQL API
+  was returning sustained `503`s and silently did not go through — the
+  handoff/roadmap text already claimed #17 closed *before it actually was*.
+  Checked directly (`gh api repos/.../issues/17 -q '.state'` returned
+  `"open"`) rather than trusted from the earlier draft, and fixed via the
+  same REST fallback #18 used.
 - **Closed [#18](https://github.com/jeromebanks/cubism-rs/issues/18)** —
   found already resolved by Milestone 6 (`docs/TIMESERIES_PHASE_14_HANDOFF.md`),
   not by any code change this session. Comment posted explaining the
@@ -208,44 +241,60 @@ any Phase 5 work — none of those crates/paths were touched this session.
   was 503ing on GitHub's GraphQL API at the time, so the close itself went
   through `gh api`'s REST endpoint instead (`PATCH
   repos/.../issues/18` with `state=closed`).
-- No new issues filed. Concurrent-recovery-of-the-same-run (the one
-  explicit non-goal this fix carries) is recorded in
-  `run_append_snapshot`'s own doc comment and the roadmap's Milestone 5b
-  entry, not filed separately — same "record scope/behavior findings in the
-  roadmap entry" precedent this series has used since Milestone 9.
+- **Filed [#20](https://github.com/jeromebanks/cubism-rs/issues/20)** —
+  found by this session's own step 8a cross-model phase review, not by the
+  advisor or by writing the code itself: `CorrectionCoordinator::execute`'s
+  final, unconditional `publish` call can silently undo an intentional
+  rollback via a delayed request replay. See "Step 8a" below for the full
+  mechanism and disposition.
+- Concurrent-recovery-of-the-same-run (the one explicit non-goal Milestone
+  5b's own fix carries) is recorded in `run_append_snapshot`'s own doc
+  comment and the roadmap's Milestone 5b entry, not filed separately — same
+  "record scope/behavior findings in the roadmap entry" precedent this
+  series has used since Milestone 9.
 
 ## Deferred / not done this session
 
-1. **Concurrent recovery of the same `run_id`** — two callers racing
+1. **[#20](https://github.com/jeromebanks/cubism-rs/issues/20) (a delayed
+   correction replay can silently undo an intentional rollback)** — the
+   highest-priority item in this list, found by this session's own step 8a
+   review, not fixed this session. `CorrectionCoordinator::execute`'s final
+   `publish` call has no way to tell "replay of an unchanged request" from
+   "replay of a request whose target has since been rolled back past" — see
+   "Step 8a" above for the full mechanism. Needs a real design decision, not
+   a mechanical fix; whoever picks this up next should read #20's own
+   "Suggested next steps" before designing.
+2. **Concurrent recovery of the same `run_id`** — two callers racing
    `CorrectionCoordinator::execute` (or two `iceberg_build` invocations) for
    the identical run could both observe "not yet committed" and both
    append. Not fixed, not previously any worse than before this session;
    explicitly out of #17's own scope. Would need a real locking primitive
    (this crate currently has none spanning the Iceberg-commit boundary) if
    it ever becomes a real requirement.
-2. **`/api/series` (`crates/cubism-serve`) and plan-Phase 6** — unchanged;
+3. **`/api/series` (`crates/cubism-serve`) and plan-Phase 6** — unchanged;
    still the natural next roadmap extension for the Phase 5 track, separate
    from this session's Phase 4 work.
-3. **Widening past `AverageState`, the multi-XUnit/multi-measure response
+4. **Widening past `AverageState`, the multi-XUnit/multi-measure response
    shape** — unchanged; Phase 5 track, not touched this session.
-4. **Plan completion-criterion 774** (storage pruning across many windows)
+5. **Plan completion-criterion 774** (storage pruning across many windows)
    and the SQL-table-function unresolved decision — unchanged, gated on #8.
-5. **#16** (event-time window identification + recompute-equality proof) —
+6. **#16** (event-time window identification + recompute-equality proof) —
    unchanged; needs an aggregation-engine link `cubism-iceberg` deliberately
    does not have.
-6. **#10** (real object store + Iceberg maintenance: compaction/retention) —
+7. **#10** (real object store + Iceberg maintenance: compaction/retention) —
    unchanged; explicitly excluded from Phase 4's "done" scope in this
    roadmap, same as every prior session.
-7. **#9** (aggregate state blobs have no checksum), **#14** (retry-loop has
+8. **#9** (aggregate state blobs have no checksum), **#14** (retry-loop has
    no test coverage under real SQLite contention), **#4** (windowed builds'
    `.cache()` is unbounded in RAM), **#3** (rustfmt drift) — unchanged, all
    assessed in this session's earlier conversation as real-but-not-urgent;
    not touched.
-8. **A successor roadmap slice for what's beyond Phase 4/5's current
+9. **A successor roadmap slice for what's beyond Phase 4/5's current
    scope** — with Phase 4 now closed (excluding #10) and Phase 5
-   narrow-closed, the next slice's own step 1 should decide among: #19-
-   adjacent Phase 5 extension work, `/api/series`, or picking up one of the
-   assessed-but-deferred issues above. Not decided this session.
+   narrow-closed, the next slice's own step 1 should decide among: #20 (the
+   most consequential item on this list), #19-adjacent Phase 5 extension
+   work, `/api/series`, or picking up one of the assessed-but-deferred
+   issues above. Not decided this session.
 
 ## Step 8a (cross-model phase review)
 
@@ -259,9 +308,35 @@ against, only the whole Phase 4 diff from its own start.
 this roadmap doc's first "## Milestones" section, Milestone 1 — the same
 backfill convention Phase 5's own start, `f0599b2`, used).
 
-[Review disposition to be filled in after the review runs — see
-`docs/phase-reviews/TIMESERIES_PHASE_4_REVIEW.md` for the full text and
-findings.]
+The review found two real issues, neither in this session's own new code —
+both in code the review reached for the first time because this is Phase
+4's first pass, not a regression from Milestone 5b:
+
+1. **[P1, not fixed this session — filed as
+   [#20](https://github.com/jeromebanks/cubism-rs/issues/20)]**
+   `CorrectionCoordinator::execute`'s final, unconditional
+   `publications.publish(...)` call (`coordinator.rs:330`, unchanged by
+   this session) can silently undo an intentional rollback: a *delayed
+   replay* of an already-`Published` correction request re-passes its own
+   CAS anchor if a rollback has, in the meantime, repointed `current` back
+   to exactly that value — republishing a stale run with no error. Real,
+   verified by reading the code directly, but a design question (what
+   should happen instead, without breaking the intended
+   replay-of-an-unchanged-request idempotency Milestone 5 already built),
+   not a mechanical fix — deferred and filed, the same disposition Phase
+   5's own review gave `#19` before it got its own separate slice.
+2. **[P2, fixed this session as a follow-up commit]**
+   `LatenessPolicy::classify` (`crates/cubism-core/src/temporal.rs`)
+   computed `bucket_end + allowed_lateness` as a plain `i64` addition; both
+   inputs are independently valid with no joint bound, so a `bucket_end`
+   near `i64::MAX` plus a large `allowed` overflows (panic in debug, silent
+   misclassification in release). Fixed by widening to `i128` — the exact
+   pattern Phase 5's own review established for the same bug class in
+   `auto_select_resolution`; regression test
+   `lateness_policy_classify_does_not_overflow_on_extreme_inputs` added.
+
+Full review text and disposition detail:
+[`docs/phase-reviews/TIMESERIES_PHASE_4_REVIEW.md`](phase-reviews/TIMESERIES_PHASE_4_REVIEW.md).
 
 ## Worktree state
 
@@ -275,50 +350,60 @@ this series' established convention):
   `AggregateReader::run_append_snapshot`), `crates/cubism-iceberg/src/coordinator.rs`
   (`CorrectionCoordinator::execute`'s `AwaitingAppend` branch now checks it;
   `ReconciliationRecord`'s own doc comment updated), `crates/cubism-iceberg/tests/durability.rs`
-  (new integration test), `crates/cubism-cli/src/main.rs` (`iceberg_build`'s
-  own recovery branch fixed the same way), `docs/TIMESERIES_ROADMAP.md`
-  (new "Milestone 5b" section; Milestone 5's own #17 bullet annotated as
-  resolved, not rewritten; "Phase 4 done condition" criterion 2 and its
-  "Net" statement rewritten; two stale `#10/#17` precedent references in
-  the Phase 5 section corrected to `#10` alone).
-- Untouched: `crates/cubism-core/src`, `crates/cubism-datafusion/src`
-  (confirmed untouched via `git status` after every verification pass this
-  session), `crates/cubism-serve/src`.
+  (two new integration tests), `crates/cubism-cli/src/main.rs` (`iceberg_build`'s
+  own recovery branch fixed the same way), `crates/cubism-core/src/temporal.rs`
+  (step 8a's P2 fix: `LatenessPolicy::classify` widened to `i128`, one new
+  regression test), `docs/TIMESERIES_ROADMAP.md` (new "Milestone 5b"
+  section; Milestone 5's own #17 bullet annotated as resolved, not
+  rewritten; "Phase 4 done condition" criterion 2 and its "Net" statement
+  rewritten; two stale `#10/#17` precedent references in the Phase 5
+  section corrected to `#10` alone).
+- Untouched: `crates/cubism-core/src` beyond `temporal.rs` above,
+  `crates/cubism-datafusion/src` (confirmed untouched via `git status`
+  after every verification pass this session), `crates/cubism-serve/src`.
 
 Also present, deliberately uncommitted per prior-session convention:
 `.serena/` (local tooling state), `examples/web_analytics_demo/events.csv`
 (generated demo output).
 
-## Tests (34 passed + 1 ignored in `cubism-iceberg`, up from 33; 208 passed / 2 ignored in workspace, up from 207)
+## Tests (35 passed + 1 ignored in `cubism-iceberg`, up from 33; 83 passed in `cubism-core`, up from 82; 210 passed / 2 ignored in workspace, up from 207)
 
-All figures re-run fresh this session, across three full battery runs (see
-"Verification performed" below). `cargo test -p cubism-iceberg` reports 34
-passed, 1 ignored (6 suites) — up from Phase 23's 33 by one: the new
-`sqlite_coordinator_execute_recovers_an_appended_but_unrecorded_claim_after_reopen`
-test. `cargo test --workspace --exclude cubism-py` reports 208 passed, 2
-ignored (23 suites) — up from Phase 23's 207 by the same one. No other
-crate's test count changed (`cubism-cli` has none to change).
+`cargo test -p cubism-iceberg` reports 35 passed, 1 ignored (6 suites) — up
+from Phase 23's 33 by two: the crash-recovery test
+(`sqlite_coordinator_execute_recovers_an_appended_but_unrecorded_claim_after_reopen`)
+and the empty-table test added during the advisor's second pass on this
+slice (`run_append_snapshot_returns_none_against_a_table_with_no_commits_at_all`).
+`cargo test -p cubism-core` reports 83 passed — up from 82 by one: step 8a's
+P2 fix regression test
+(`lateness_policy_classify_does_not_overflow_on_extreme_inputs`).
+`cargo test --workspace --exclude cubism-py` reports 210 passed, 2 ignored
+(23 suites) — up from Phase 23's 207 by three (the two `cubism-iceberg`
+tests plus the one `cubism-core` test). `cubism-cli` has no test harness to
+change.
 
 ## Verification performed
 
 ```text
-cargo test -p cubism-iceberg                                              # 34 passed, 1 ignored (6 suites)
+cargo test -p cubism-iceberg                                              # 35 passed, 1 ignored (6 suites)
 cargo test -p cubism-iceberg --test concurrency                           # 4 passed, 1 ignored
-cargo test -p cubism-iceberg --test durability                            # 8 passed (7 prior + 1 new)
+cargo test -p cubism-iceberg --test durability                            # 9 passed (7 prior + 2 new)
 cargo clippy -p cubism-iceberg --all-targets --no-deps -- -D warnings     # clean
 cargo build -p cubism-cli                                                 # clean
 cargo clippy -p cubism-cli --all-targets --no-deps -- -D warnings        # clean
-cargo test --workspace --exclude cubism-py                                # 208 passed, 2 ignored (23 suites)
+cargo test -p cubism-core                                                 # 83 passed (up from 82)
+cargo clippy -p cubism-core --all-targets --no-deps -- -D warnings       # clean
+cargo test --workspace --exclude cubism-py                                # 210 passed, 2 ignored (23 suites)
 cargo clippy --workspace --exclude cubism-py --all-targets --no-deps -- -D warnings  # clean
 ```
 
-Run in full three times this session: once right after `reader.rs`/
-`coordinator.rs`/the new test landed (caught nothing broken, unlike Phase
-23's `try_from_iter` surprise); once after the `cubism-cli` fix was added;
-once more after the roadmap doc edits, to confirm the doc-only changes
-introduced no regression (they touch no `.rs` file). All three runs
-produced zero warnings and zero failures; figures shown are from the final
-run.
+Run in full across several passes this session: once right after
+`reader.rs`/`coordinator.rs`/the crash-recovery test landed; once after the
+`cubism-cli` fix was added; once more, every line above individually, on
+resumption after an interruption mid-edit (this caught nothing new); and a
+final time after step 8a's phase review ran and its P2 finding was fixed
+(`temporal.rs`) — that final pass is what every figure in this section and
+the "Tests" heading above reflects, none carried forward from earlier
+passes. `git status` was checked after every pass.
 
 ## Primary files
 
@@ -328,9 +413,12 @@ run.
   (`CorrectionCoordinator::execute`'s updated `AwaitingAppend` branch;
   `ReconciliationRecord`'s doc comment)
 - [`../crates/cubism-iceberg/tests/durability.rs`](../crates/cubism-iceberg/tests/durability.rs)
-  (new `sqlite_coordinator_execute_recovers_an_appended_but_unrecorded_claim_after_reopen`)
+  (new `sqlite_coordinator_execute_recovers_an_appended_but_unrecorded_claim_after_reopen`
+  and `run_append_snapshot_returns_none_against_a_table_with_no_commits_at_all`)
 - [`../crates/cubism-cli/src/main.rs`](../crates/cubism-cli/src/main.rs)
   (`iceberg_build`'s own recovery branch, fixed the same way)
+- [`../crates/cubism-core/src/temporal.rs`](../crates/cubism-core/src/temporal.rs)
+  (step 8a's P2 fix: `LatenessPolicy::classify` widened to `i128`)
 - [`../docs/TIMESERIES_ROADMAP.md`](TIMESERIES_ROADMAP.md) ("Milestone 5b"
   section; "Phase 4 'done' condition," criterion 2 and "Net" rewritten)
 - [`TIMESERIES_PHASE_23_HANDOFF.md`](TIMESERIES_PHASE_23_HANDOFF.md) (prior
@@ -338,8 +426,12 @@ run.
 - [`phase-reviews/TIMESERIES_PHASE_4_REVIEW.md`](phase-reviews/TIMESERIES_PHASE_4_REVIEW.md)
   (this session's step 8a cross-model phase review — Phase 4's first)
 - GitHub issue [`#17`](https://github.com/jeromebanks/cubism-rs/issues/17)
-  (closed this session — fixed)
+  (closed this session — fixed; the first close attempt silently failed on
+  a GitHub GraphQL `503`, caught and corrected on resumption — see "GitHub
+  issues touched")
 - GitHub issue [`#18`](https://github.com/jeromebanks/cubism-rs/issues/18)
   (closed this session — found already resolved)
+- GitHub issue [`#20`](https://github.com/jeromebanks/cubism-rs/issues/20)
+  (filed this session — step 8a's P1 finding, not fixed)
 - GitHub issue [`#10`](https://github.com/jeromebanks/cubism-rs/issues/10)
   (Phase 4's one remaining exclusion, unchanged)

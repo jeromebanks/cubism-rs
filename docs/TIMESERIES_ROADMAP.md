@@ -474,7 +474,14 @@ compiles.
   `sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a_published_run_after_reopen`
   (the unambiguous half) re-ran clean, confirming no regression to the
   `None`-branch (append-for-real) path this fix's `else` arm shares with
-  the original code. `cubism-cli` has no test harness at all (no `tests/`
+  the original code. A second test,
+  `run_append_snapshot_returns_none_against_a_table_with_no_commits_at_all`
+  (same file), proves `run_append_snapshot` doesn't error against a states
+  table with zero commits at all — the shape `iceberg_build` reaches on a
+  brand-new cube's first-ever build, which the crash-recovery test above
+  (a table with at least one prior commit) does not exercise; found and
+  added on the advisor's second pass over this slice, not the original
+  design. `cubism-cli` has no test harness at all (no `tests/`
   directory, zero `#[test]`s in `main.rs`) — this crate's own established
   gate is `cargo build -p cubism-cli` + `cargo clippy`, unchanged by this
   slice; the CLI's fix is a direct, mechanical reuse of the same
@@ -483,7 +490,11 @@ compiles.
 - **Depends on:** Milestone 5 (`Done`, narrowed — this closes the one gap
   it left open).
 - **Done when:** the test passes and the full step-4 battery is clean.
-  Met (34 passed + 1 ignored in `cubism-iceberg`, up from 33; full battery
+  Met (35 passed + 1 ignored in `cubism-iceberg`, up from 33 — the
+  crash-recovery test above plus
+  `run_append_snapshot_returns_none_against_a_table_with_no_commits_at_all`,
+  added on the advisor's second pass to cover the brand-new-cube,
+  zero-commits case `run_append_snapshot` must also handle; full battery
   clean). See "Phase 4 done condition" below, criterion 2, for the updated
   verdict — met for **both** recovery paths this crate has, not narrowed
   to one.
