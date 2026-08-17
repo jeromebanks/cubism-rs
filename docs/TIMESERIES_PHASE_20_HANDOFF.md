@@ -32,7 +32,11 @@ plan's Phase 4 (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:582-670`) has every
 done — see that roadmap's "Phase 4 done" section, unchanged by this
 session, for what remains.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`docs/TIMESERIES_PHASE_21_HANDOFF.md`](TIMESERIES_PHASE_21_HANDOFF.md),
+which picked up this doc's deferred item 1 ("Milestone 10b") — split, on
+advisor guidance, into 10b-1 (landed that session: the `AverageState`
+decode+merge primitive) and 10b-2 (not yet scoped: `SeriesResponse` plus
+wiring it to `CoveragePlan`).
 
 ## What this session built
 

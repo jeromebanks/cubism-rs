@@ -31,7 +31,10 @@ use cubism_core::temporal::{
     AllowedLateness, BucketOrigin, EventTime, FixedResolution, Resolution, TemporalSpec, WindowId,
     WindowRevision,
 };
-use cubism_datafusion::{CoveragePlan, GapPolicy, ResolutionPlan, TemporalQuery};
+use cubism_core::{AggregateState, AverageState};
+use cubism_datafusion::{
+    CoveragePlan, GapPolicy, ResolutionPlan, TemporalQuery, merge_average_column,
+};
 use cubism_iceberg::config::open_catalog;
 use cubism_iceberg::{
     AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, PublicationStore,
@@ -77,6 +80,38 @@ fn states_batch(rows: &[(&str, [u8; 32], i64, f64)]) -> RecordBatch {
     RecordBatch::try_new(
         Arc::new(states_schema()),
         vec![Arc::new(bucket_start), Arc::new(xunit_id), Arc::new(count), Arc::new(sum)],
+    )
+    .unwrap()
+}
+
+/// A states schema with one `Binary` measure column (`avg_v1`), matching
+/// `AggKind::Avg`'s shape in `temporal_build::temporal_state_schema` — used
+/// only by the Milestone 10b-1 test below, kept separate from
+/// `states_schema`/`states_batch` above (which model `AggKind::Sum`/`Count`
+/// as plain `Int64`/`Float64`, not blobs).
+fn avg_states_schema() -> ArrowSchema {
+    ArrowSchema::new(vec![
+        Field::new(
+            "bucket_start",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
+            true,
+        ),
+        Field::new("xunit_id", DataType::FixedSizeBinary(32), true),
+        Field::new("avg_v1", DataType::Binary, true),
+    ])
+}
+
+fn avg_states_batch(rows: &[(&str, [u8; 32], Vec<u8>)]) -> RecordBatch {
+    use datafusion::arrow::array::{BinaryArray, FixedSizeBinaryArray, TimestampMicrosecondArray};
+
+    let bucket_start =
+        TimestampMicrosecondArray::from_iter_values(rows.iter().map(|(t, _, _)| micros(t)))
+            .with_timezone("+00:00");
+    let xunit_id = FixedSizeBinaryArray::try_from_iter(rows.iter().map(|(_, x, _)| *x)).unwrap();
+    let avg = BinaryArray::from_iter_values(rows.iter().map(|(_, _, blob)| blob.as_slice()));
+    RecordBatch::try_new(
+        Arc::new(avg_states_schema()),
+        vec![Arc::new(bucket_start), Arc::new(xunit_id), Arc::new(avg)],
     )
     .unwrap()
 }
@@ -256,4 +291,120 @@ async fn coverage_plan_resolves_real_publication_state_across_two_windows() {
     let err = CoveragePlan::new(&plan, true, &windows)
         .expect_err("exact: true must fail clearly instead of silently omitting w2");
     assert!(err.to_string().contains("exact=true"));
+}
+
+/// Milestone 10b-1 (`docs/TIMESERIES_ROADMAP.md`): the value-materialization
+/// primitive `cubism_datafusion::merge_average_column` provides, wired
+/// against two real published windows' states rows — the "merging" half of
+/// the roadmap's deferred "Milestone 10b" note that Milestone 10 itself does
+/// not do (see `range_query.rs`'s module doc comment).
+///
+/// Proves: reading two published windows' states rows back via
+/// `AggregateReader::read_window` and feeding both windows' batches into
+/// `merge_average_column` produces the same `AverageState` as merging the
+/// two source states directly (`a.merge(&b)`) — the decode+merge round-trips
+/// through a real Parquet write/scan, not just in memory (`series_merge.rs`'s
+/// own unit tests already cover the in-memory decode+merge logic itself).
+/// Does not prove anything about `VarianceState`/`QuantileState`/the
+/// sketch-backed kinds (this function only handles `AverageState`), a
+/// `SeriesResponse` type, or `CoveragePlan` wiring: this test builds its two
+/// windows directly rather than through a `ResolutionPlan`/`CoveragePlan`,
+/// since Milestone 10b-1's scope is the merge primitive alone, not query
+/// planning (that's the test above, Milestone 10's own).
+#[tokio::test]
+async fn merge_average_column_reads_and_merges_two_published_windows() {
+    let warehouse = TempDir::new().unwrap();
+    let config = CatalogConfig::Memory {
+        warehouse: warehouse.path().to_path_buf(),
+    };
+    let catalog = open_catalog(&config).await.unwrap();
+    let temporal_table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &avg_states_schema())
+        .await
+        .unwrap();
+    let publications = PublicationStore::in_memory();
+
+    let mut a = AverageState::new();
+    a.accumulate(3.0).unwrap();
+    a.accumulate(5.0).unwrap();
+    let mut b = AverageState::new();
+    b.accumulate(10.0).unwrap();
+
+    let w1 = WindowId::new("2026-08-13").unwrap();
+    let w2 = WindowId::new("2026-08-14").unwrap();
+    let revision = WindowRevision::new(1).unwrap();
+
+    let states1 = vec![avg_states_batch(&[(
+        "2026-08-13T12:00:00Z",
+        [1u8; 32],
+        a.encode(),
+    )])];
+    let registry1 = vec![registry_batch(&[([1u8; 32], b"US/mobile")])];
+    let expected_rows1: u64 = states1.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let claim1 = publications
+        .claim_run(CUBE_ID, &w1, "run-a", revision, expected_rows1)
+        .await
+        .unwrap();
+    assert!(matches!(claim1, ClaimResult::New(_)));
+    let result1 = AggregateWriter::append_window(
+        catalog.as_ref(),
+        &temporal_table,
+        AppendWindow {
+            window_id: &w1,
+            revision,
+            run_id: "run-a",
+            states: &states1,
+            registry: &registry1,
+        },
+    )
+    .await
+    .unwrap();
+    publications
+        .record_append("run-a", result1.snapshot_id)
+        .await
+        .unwrap();
+    publications.publish("run-a", None).await.unwrap();
+
+    let states2 = vec![avg_states_batch(&[(
+        "2026-08-14T12:00:00Z",
+        [2u8; 32],
+        b.encode(),
+    )])];
+    let registry2 = vec![registry_batch(&[([2u8; 32], b"EU/desktop")])];
+    let expected_rows2: u64 = states2.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let claim2 = publications
+        .claim_run(CUBE_ID, &w2, "run-b", revision, expected_rows2)
+        .await
+        .unwrap();
+    assert!(matches!(claim2, ClaimResult::New(_)));
+    let result2 = AggregateWriter::append_window(
+        catalog.as_ref(),
+        &temporal_table,
+        AppendWindow {
+            window_id: &w2,
+            revision,
+            run_id: "run-b",
+            states: &states2,
+            registry: &registry2,
+        },
+    )
+    .await
+    .unwrap();
+    publications
+        .record_append("run-b", result2.snapshot_id)
+        .await
+        .unwrap();
+    publications.publish("run-b", None).await.unwrap();
+
+    let mut batches =
+        AggregateReader::read_window(catalog.as_ref(), &temporal_table, &publications, &w1)
+            .await
+            .unwrap();
+    batches.extend(
+        AggregateReader::read_window(catalog.as_ref(), &temporal_table, &publications, &w2)
+            .await
+            .unwrap(),
+    );
+
+    let merged = merge_average_column(&batches, "avg_v1").unwrap();
+    assert_eq!(merged, a.merge(&b).unwrap());
 }

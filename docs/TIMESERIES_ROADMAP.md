@@ -723,6 +723,15 @@ into an observed one before Milestones 8-10 build on it.
     of the `CoveragePlan` this milestone lands, calling `read_window` and
     merging via `state_udaf.rs` for each `published` window a
     `SegmentCoverage` reports.
+
+    **Correction (Milestone 10b-1's entry below):** "merging via
+    `state_udaf.rs`" was wrong — `state_udaf.rs` is DataFusion `UDAF`
+    machinery, not a plain callable merge function; the actual reusable API
+    is `cubism_core::aggregate_state::AggregateState`'s `decode`/`merge`.
+    "Milestone 10b" also turned out not to be one bounded slice: split into
+    **10b-1** (the merge primitive alone, `Done`) and **10b-2** (the
+    `SeriesResponse` type plus wiring it to `CoveragePlan`, not yet
+    scoped).
   - **`is_exact` is stricter than "backed by a current published
     revision."** A segment is exact iff it is **both**
     resolution-aligned (`ResolutionSegment::aligned`) **and** every
@@ -771,40 +780,126 @@ into an observed one before Milestones 8-10 build on it.
   plan-line-716 "state/error metadata" — those are Milestone 10b's, per
   the deviations above.
 
+### Milestone 10b-1 — `merge_average_column`: the value-materialization primitive
+
+- **Status:** Done. Landed as `cubism_datafusion::series_merge::merge_average_column`
+  (`crates/cubism-datafusion/src/series_merge.rs:51-91`), the "merging"
+  half of Milestone 10's deferred "Milestone 10b" note. Split from the
+  original "Milestone 10b" text (advisor-confirmed before writing anything,
+  same precedent Milestones 9-10 set for their own deviations): a
+  `SeriesResponse` type carrying value/presentation (plan line 708) and
+  state/error metadata (plan line 716), plus promoting `cubism-iceberg` to
+  a normal `cubism-datafusion` dependency, are **not** part of this
+  milestone — deferred as **"Milestone 10b-2"**, not yet added to this
+  roadmap as its own entry.
+- **Target:** `crates/cubism-datafusion/src/series_merge.rs` (new file).
+- **Deviations from the original "Milestone 10b" note** (advisor-confirmed):
+  - **Only `AverageState`, not all measure kinds.** `VarianceState`/
+    `QuantileState`/the sketch-backed kinds (`CountDistinct`/`TopK`/
+    `ReservoirSample`/`Centroid`) each need their own merge wiring; scoping
+    this milestone to one kind matches the series' "one bounded slice"
+    convention. Widening to the other kinds is left for a later slice, not
+    filed as a separate issue (recorded here per the same precedent).
+  - **`state_udaf.rs`'s merge machinery was not reused.** The original
+    "Milestone 10b" note (Milestone 10's entry, and this section's own
+    former text) said "merging via `state_udaf.rs`" — checked before
+    writing code and found wrong: `state_udaf.rs` is DataFusion `UDAF`
+    machinery (`merge_batch` over `ArrayRef`s inside an execution plan,
+    consumed by SQL aggregation), not a plain decode+merge function callable
+    outside a query plan. The actual reusable API is
+    `cubism_core::aggregate_state::AggregateState`'s `decode`/`merge`
+    (`crates/cubism-core/src/aggregate_state.rs:169,172`), already used by
+    `state_udaf.rs` internally — `merge_average_column` calls that trait
+    directly instead.
+  - **No I/O; `cubism-iceberg` stays a dev-dependency.** Same split
+    Milestone 10 established for `CoveragePlan`: `merge_average_column`
+    takes already-read `RecordBatch`es as input and never calls
+    `AggregateReader::read_window` itself. The async read stays in the
+    caller (this milestone's own integration test).
+  - **A previously-undocumented Arrow-type widening, found while writing
+    this milestone's integration test, not by inspection alone:** the
+    first version of the test failed with "column 'avg_v1' is not a Binary
+    array" even though `temporal_build::temporal_state_schema` declares
+    `AggKind::Avg` as `DataType::Binary`. Root cause, confirmed by reading
+    `iceberg` 0.10.0's own source
+    (`iceberg::arrow::schema`'s `Type`-to-Arrow conversion,
+    `PrimitiveType::Binary => DataType::LargeBinary`): `AggregateReader::read_window`'s
+    scan always widens a Binary column to `LargeBinary` on the way out of
+    Iceberg, regardless of the schema it was written with.
+    `merge_average_column` now branches on the column's actual runtime
+    `DataType` (`Binary` or `LargeBinary`) rather than assuming one; a unit
+    test (`merge_average_column_handles_large_binary_and_mixed_batches`)
+    proves both are accepted, including in the same call. Not filed as a
+    separate issue: it doesn't block anything currently built (`CoveragePlan`
+    never touches this column), and it's now handled, not just discovered
+    — recorded here per the series' "record scope/behavior findings in the
+    roadmap entry" precedent, for whichever slice builds `SeriesResponse`
+    next (Milestone 10b-2 will consume this same widening).
+- **What it does:** decodes and merges every non-null `AverageState` blob
+  in a named column across one or more caller-supplied `RecordBatch`es, in
+  row order, into a single merged `AverageState`. Returns a zero state
+  (not an error) for an empty or all-null input. Fails with
+  `CubismError::AggregateState` if the column is missing, is neither
+  `Binary` nor `LargeBinary`, or a non-null value fails to decode.
+- **Test:** integration test (real `cubism-iceberg` in-memory catalog,
+  `crates/cubism-datafusion/tests/iceberg_bridge.rs:315`
+  `merge_average_column_reads_and_merges_two_published_windows`): two
+  `AverageState` values are encoded into two separately published windows'
+  states rows, both windows are read back via `AggregateReader::read_window`,
+  and `merge_average_column` over the combined batches is asserted equal to
+  merging the two source states directly in memory — proving the decode+merge
+  round-trips through a real Parquet write/scan, not just in-memory logic
+  (six additional pure unit tests in `series_merge.rs` cover the in-memory
+  decode+merge/null-skipping/empty-input/`Binary`-vs-`LargeBinary`/
+  missing-column/wrong-type-column shapes without the async iceberg
+  harness).
+- **Depends on:** Milestone 10 (`Done`, narrowed).
+- **Done when:** the test passes and the full step-4 battery is clean. Met
+  (56 passed in `cubism-datafusion`, up from 49; 196 passed / 2 ignored in
+  workspace, up from 189; full battery clean). **Does not close** plan
+  completion-criterion 772 by itself — see the "Phase 5 done condition"
+  walk below for why a merge primitive existing is not the same as
+  `CoveragePlan` actually using it. Does not build `SeriesResponse` or
+  touch any measure kind besides `AverageState` — both Milestone 10b-2's,
+  per the deviations above.
+
 ### Phase 5 "done" condition (for the milestones above)
 
 Walking the plan's four completion criteria (lines 772-775), the same way
 "Phase 4 done" above walks Phase 4's. Milestones 7-9 are `Done`; Milestone
 10 is `Done` **as narrowed** (see its own entry's "Deviations" — no value
-materialization, deferred to the not-yet-scoped "Milestone 10b"), so this
+materialization, deferred to the not-yet-scoped "Milestone 10b"); Milestone
+10b-1 is `Done` (the merge primitive itself, `AverageState` only). This
 walk is corrected from the original all-4-met assumption to reflect that
 narrowing rather than overclaim it:
 
 - 772 ("answers exact aligned ranges from aggregate state") — **not yet
-  met**. `CoveragePlan` resolves whether a range *can* be answered exactly
-  (`is_exact`, provenance, `missing`), but does not itself decode or merge
-  any `AggregateState` to produce the answer — that's Milestone 10b's
-  `read_window`/`state_udaf.rs` work, not landed here. Corrected from this
-  criterion's original "met by Milestone 10's direct-call path," which
-  assumed value materialization was part of Milestone 10's scope.
+  met**. Milestone 10b-1 landed the decode+merge primitive
+  (`merge_average_column`) a `SeriesResponse` would call, but nothing
+  wires it to `CoveragePlan`'s `published` list yet — no code path in this
+  repo goes from a `CoveragePlan` to an actual answered range. That wiring,
+  plus a `SeriesResponse` type to carry the result, is Milestone 10b-2's
+  job. Corrected from this criterion's original "met by Milestone 10's
+  direct-call path," which assumed value materialization was part of
+  Milestone 10's scope.
 - 773 ("partial-boundary behavior is truthful and tested") — met by
   Milestone 10's `exact=true` failure test (both the missing-window and
   the unaligned-but-published cases).
 - 774 ("range plans prune storage and stay within latency/memory
-  budgets") — **not** met by Milestones 7-10 as scoped; see Milestone 10's
-  "Done when" above. Remains gated on #8 (or a not-yet-scoped multi-window
-  `cubism-iceberg` API).
+  budgets") — **not** met by Milestones 7-10b-1 as scoped; see Milestone
+  10's "Done when" above. Remains gated on #8 (or a not-yet-scoped
+  multi-window `cubism-iceberg` API).
 - 775 ("every result reports sufficient coverage and provenance") —
   **partially met**: `CoveragePlan`'s `published`/`missing` fields report
   coverage and revision provenance per segment. Not fully met until
-  Milestone 10b's `SeriesResponse` actually carries this alongside a
+  Milestone 10b-2's `SeriesResponse` actually carries this alongside a
   value/presentation per plan line 708.
 - The plan's "Unresolved decisions" (lines 779-783) — "SQL table-function
   interface in addition to HTTP" is exactly the #8-gated half and is not
-  resolved by Milestones 7-10; the other four (max raw boundary scan,
+  resolved by Milestones 7-10b-1; the other four (max raw boundary scan,
   multi-XUnit/multi-measure response shape, server-side caching,
   authorization boundary) are not addressed by any milestone above and
-  stay open for a successor roadmap slice once Milestones 7-10(b) land.
+  stay open for a successor roadmap slice once Milestones 7-10b-2 land.
 - `/api/series` itself (`crates/cubism-serve`) and rolling
   comparisons/trend inputs (plan Phase 6) are **not** covered by
   Milestones 7-10 — those are the next roadmap extension once this

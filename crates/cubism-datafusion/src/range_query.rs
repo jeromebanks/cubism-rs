@@ -105,11 +105,12 @@
 //! produce a value/presentation for a segment — the roadmap's own **Test**
 //! bullet for this milestone (`docs/TIMESERIES_ROADMAP.md:689-694`) asserts
 //! only provenance, the `missing` marker, and the `exact=true` failure
-//! behavior, none of which need a decoded value. Value materialization
-//! (`AggregateState::decode`/`merge`, `state_udaf.rs`) is left for a
-//! successor slice (candidate "Milestone 10b" — not yet added to the
-//! roadmap as its own milestone) once `SeriesResponse`'s value/presentation
-//! fields are actually being built.
+//! behavior, none of which need a decoded value. The decode+merge primitive
+//! itself now exists ([`crate::series_merge::merge_average_column`],
+//! Milestone 10b-1), but nothing in this module calls it: wiring a
+//! `CoveragePlan`'s `published` list to an actual materialized value is
+//! `SeriesResponse`'s job (candidate "Milestone 10b-2" — not yet added to
+//! the roadmap as its own milestone).
 //!
 //! A segment is exact iff it is **both** resolution-aligned (`aligned:
 //! true`) **and** every window backing it is published. An unaligned
