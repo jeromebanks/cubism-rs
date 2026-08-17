@@ -20,6 +20,12 @@ issues filed. One real correctness bug caught by the integration test
 itself (not by review): `AggregateReader::read_window`'s scan widens a
 `Binary` column to `LargeBinary` on the way out of Iceberg, undocumented
 until this session — fixed in the same commit, not a follow-up (see below).
+One test-coverage gap caught by the step 8 advisor pass, applied as a
+follow-up commit per this series' convention: the "folds multiple batches
+and rows" unit test never actually put two non-null blobs in one batch, so
+it never exercised the per-batch multi-row fold the function's own inner
+loop exists for — fixed in place, same test strengthened rather than a new
+one added (see "What was actually verified").
 
 (Despite the filename, this doc documents a session slice, not "Phase 21"
 of the implementation plan — same convention every prior handoff in this
@@ -142,12 +148,12 @@ promotion — all Milestone 10b-2's, not this slice's.
 
 Primary files changed:
 
-- **`crates/cubism-datafusion/src/series_merge.rs`** (new file, 207
+- **`crates/cubism-datafusion/src/series_merge.rs`** (new file, 212
   lines): `merge_average_column` (`:51-91`) plus its module doc comment
   (`:1-23`, including the `Binary`/`LargeBinary` widening note) and six
-  unit tests (`:94-207`) covering multi-batch folding, null-skipping,
-  empty input, the `Binary`/`LargeBinary`/mixed-batch shapes, a missing
-  column, and a wrong-type column.
+  unit tests (`:94-212`) covering multi-row-and-multi-batch folding,
+  null-skipping, empty input, the `Binary`/`LargeBinary`/mixed-batch
+  shapes, a missing column, and a wrong-type column.
 - **`crates/cubism-datafusion/src/lib.rs`** (modified, +2 lines): adds
   `pub mod series_merge;` and re-exports `merge_average_column`.
 - **`crates/cubism-datafusion/src/range_query.rs`** (modified, doc comment
@@ -177,8 +183,15 @@ already regular dependencies.
 
 That `merge_average_column` correctly decodes and folds `AverageState`
 blobs for six shapes, all pure unit tests in `series_merge.rs`: folding two
-values across two separate batches produces the same result as merging
-them directly (`merge_average_column_folds_multiple_batches_and_rows`); a
+rows within one batch **and** a second, separate batch produces the same
+result as merging all three source states directly
+(`merge_average_column_folds_multiple_batches_and_rows` — a follow-up
+advisor pass caught that this test's first version put one row per batch,
+so it exercised the "fold across batches" path but never the inner
+`for row in 0..array.len()` loop, i.e. never actually merged two non-null
+blobs out of a single batch, the shape `AggregateReader::read_window`
+returns in practice since rows are per-`(bucket_start, xunit_id)`, not
+per-window; fixed in a follow-up commit, see below); a
 null blob in the column is skipped rather than causing a decode error
 (`merge_average_column_skips_nulls`); an empty or all-null input returns a
 zero state (`AverageState::new()`), not an error
@@ -274,22 +287,39 @@ is now a known, avoidable trigger, not a mystery.
    by running bare `rustfmt --edition 2024 crates/cubism-datafusion/src/lib.rs`
    on a throwaway branch/worktree and diffing the result against Phase 20's
    own five-file diff.
-3. **#17** (append-committed-but-not-recorded recovery) — unchanged; still
+3. **Files not `rustfmt --edition 2024 --check`-clean under this
+   toolchain** (carried forward from Phase 20's own deferred item 3, not
+   yet resolved — Phase 20 confirmed it for `iceberg_bridge.rs`'s
+   pre-existing Milestone 7 test body; this session re-confirmed the same
+   file is still not `--check`-clean, 15 pre-existing diff hunks at lines
+   ≤272, correctly left untouched per the skill's step 2 gate rather than
+   reformatted). This session's own new content in that file
+   (`avg_states_schema`/`avg_states_batch`/the new test) was hand-formatted
+   to match, same workaround as Phase 20's follow-up commit used. Not
+   checked this session for any file besides `iceberg_bridge.rs`/`range_query.rs`
+   (both checked; only `iceberg_bridge.rs` has pre-existing diffs) and
+   `series_merge.rs` (wholly new, `--check`-clean by construction). Whoever
+   builds Milestone 10b-2 will almost certainly add another test to
+   `iceberg_bridge.rs` and needs to run `--check` on it before formatting,
+   same as this session did — see item 2 above for the adjacent, sharper
+   finding about *why* a bare `rustfmt` on the crate root specifically is
+   dangerous here.
+4. **#17** (append-committed-but-not-recorded recovery) — unchanged; still
    needs a design decision before it can be sized into a bounded milestone.
    Not re-read this session (Phase 19/20 already re-confirmed its state; no
    reason to expect it changed).
-4. **#16** (event-time window identification + recompute-equality proof) —
+5. **#16** (event-time window identification + recompute-equality proof) —
    unchanged; not touched by this session's work, which stays inside
    `cubism-datafusion`'s query-serving path, not the correction/rebuild
    path `#16` covers.
-5. **#10** (real object store + Iceberg maintenance) — unchanged.
-6. **#11/#12** — unchanged; not touched this session.
-7. **Plan completion-criterion 774** (storage pruning across many windows)
+6. **#10** (real object store + Iceberg maintenance) — unchanged.
+7. **#11/#12** — unchanged; not touched this session.
+8. **Plan completion-criterion 774** (storage pruning across many windows)
    — unchanged; still gated on #8's SQL/pushdown half.
-8. **`/api/series` (`crates/cubism-serve`) and plan-Phase 6** — unchanged;
+9. **`/api/series` (`crates/cubism-serve`) and plan-Phase 6** — unchanged;
    not reached by Milestones 8-10b-1.
-9. **`#14`** (retry-loop/connection-poisoning gap) — unchanged, still open;
-   not touched this session.
+10. **`#14`** (retry-loop/connection-poisoning gap) — unchanged, still open;
+    not touched this session.
 
 ## Worktree state
 
@@ -348,10 +378,17 @@ cargo clippy --workspace --exclude cubism-py --all-targets --no-deps -- -D warni
 ```
 
 The `cubism-datafusion`/workspace test and clippy lines above were each run
-twice this session: once after the `series_merge.rs`/`iceberg_bridge.rs`
-change (including the `Binary`/`LargeBinary` fix), once more after the
-`range_query.rs` doc-comment correction was added. Both runs produced
-identical figures. Figures shown are from the final run.
+three times this session: once after the `series_merge.rs`/`iceberg_bridge.rs`
+change (including the `Binary`/`LargeBinary` fix); once more after the
+`range_query.rs` doc-comment correction was added; and once more after a
+follow-up advisor pass caught that
+`merge_average_column_folds_multiple_batches_and_rows` never actually
+exercised folding two non-null blobs out of a single batch (it put one row
+per batch, so only the across-batches path was covered) — fixed in a
+follow-up commit that strengthens that one test in place rather than adds a
+new one, so the totals below are unchanged from the first two runs. All
+three runs produced identical figures. Figures shown are from the final
+run.
 
 ## Primary files
 

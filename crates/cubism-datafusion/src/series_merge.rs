@@ -136,17 +136,22 @@ mod tests {
 
     #[test]
     fn merge_average_column_folds_multiple_batches_and_rows() {
-        let mut a = AverageState::new();
-        a.accumulate(3.0).unwrap();
-        a.accumulate(5.0).unwrap();
+        // Two rows in `batch1` (the shape `AggregateReader::read_window`
+        // actually returns — one row per `(bucket_start, xunit_id)`, not
+        // one row per window) plus a second batch, so this proves folding
+        // across both rows *and* batches, not just batches.
+        let mut a1 = AverageState::new();
+        a1.accumulate(3.0).unwrap();
+        let mut a2 = AverageState::new();
+        a2.accumulate(5.0).unwrap();
         let mut b = AverageState::new();
         b.accumulate(10.0).unwrap();
 
-        let batch1 = batch_with_blobs("avg_v1", &[Some(a.encode())]);
+        let batch1 = batch_with_blobs("avg_v1", &[Some(a1.encode()), Some(a2.encode())]);
         let batch2 = batch_with_blobs("avg_v1", &[Some(b.encode())]);
 
         let merged = merge_average_column(&[batch1, batch2], "avg_v1").unwrap();
-        assert_eq!(merged, a.merge(&b).unwrap());
+        assert_eq!(merged, a1.merge(&a2).unwrap().merge(&b).unwrap());
     }
 
     #[test]
