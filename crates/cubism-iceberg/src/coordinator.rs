@@ -62,6 +62,7 @@ use iceberg::Catalog;
 use crate::control::{Publication, PublicationStore, RunState};
 use crate::correction::{CorrectionPlan, CorrectionStrategy};
 use crate::error::{CubismIcebergError, Result};
+use crate::reader::AggregateReader;
 use crate::table::TemporalTable;
 use crate::writer::{AggregateWriter, AppendWindow};
 
@@ -95,21 +96,20 @@ use crate::writer::{AggregateWriter, AppendWindow};
 ///   principle, not by any end-to-end test today.
 /// - [`Self::AwaitingAppend`]: the run was claimed but the control store
 ///   has no append recorded. Recovery: run `execute`, which appends and
-///   publishes. **Important caveat, not fully resolved by this milestone:**
-///   this state is ambiguous between "the append was never attempted" and
-///   "the Iceberg append committed, but the process crashed before
-///   `record_append` persisted that fact." `AggregateWriter::append_window`
+///   publishes. This state is ambiguous between "the append was never
+///   attempted" and "the Iceberg append committed, but the process crashed
+///   before `record_append` persisted that fact" — `AggregateWriter::append_window`
 ///   commits via `fast_append`, which is purely additive and has no
 ///   idempotency check against a prior commit for the same
-///   window/revision/run; `AggregateReader::read_window` filters by
-///   `(window_id, revision)` columns, not by a specific snapshot ID. So
-///   re-running `execute` against a truly-ambiguous `AwaitingAppend` run
-///   can duplicate visible rows for that window/revision. This test suite
-///   only exercises the unambiguous half (a claim that never attempted an
-///   append at all) — see `tests/durability.rs`. The ambiguous half is a
-///   real, currently-unresolved gap, tracked as
-///   [issue #17](https://github.com/jeromebanks/cubism-rs/issues/17)
-///   rather than silently assumed safe.
+///   window/revision/run on its own. **Resolved by
+///   [issue #17](https://github.com/jeromebanks/cubism-rs/issues/17)'s fix:**
+///   `execute` no longer assumes "never attempted" — it asks
+///   [`crate::reader::AggregateReader::run_append_snapshot`] whether a
+///   states row for this exact `(window_id, revision, run_id)` already
+///   exists in the table's current snapshot before deciding whether to
+///   append again. See that function's own doc comment for the one thing
+///   it deliberately does not defend against (concurrent recovery of the
+///   identical run, as opposed to sequential crash-then-retry).
 /// - [`Self::AwaitingPublish`]: the append committed and was recorded, but
 ///   no publication exists yet. Recovery: run `execute`, which skips the
 ///   append (see the append-skip branch below) and publishes. Already
@@ -287,19 +287,44 @@ impl CorrectionCoordinator {
             .await?;
 
         if let ReconciliationRecord::AwaitingAppend { .. } = ReconciliationRecord::classify(Some(claim.state())) {
-            let result = AggregateWriter::append_window(
+            // #17: `Claimed` is ambiguous between "never appended" and
+            // "appended, but crashed before `record_append`." Ask Iceberg's
+            // own committed state directly, rather than assuming the
+            // append never happened — see `AggregateReader::run_append_snapshot`'s
+            // doc comment for exactly what this does and does not prove.
+            let already_committed = AggregateReader::run_append_snapshot(
                 catalog,
                 temporal_table,
-                AppendWindow {
-                    window_id: request.window_id,
-                    revision: request.revision,
-                    run_id: request.run_id,
-                    states: request.states,
-                    registry: request.registry,
-                },
+                request.window_id,
+                request.revision,
+                request.run_id,
             )
             .await?;
-            publications.record_append(request.run_id, result.snapshot_id).await?;
+            let snapshot_id = match already_committed {
+                Some(snapshot_id) => snapshot_id,
+                None => {
+                    // Registry writes are idempotent-to-repeat by design
+                    // (`AggregateWriter::append_window`'s own doc comment:
+                    // content-addressed, safe to re-commit) and this branch
+                    // only runs at all when the *states* half was not
+                    // found — so re-running the whole append here, registry
+                    // included, cannot reintroduce #17's states-side bug.
+                    let result = AggregateWriter::append_window(
+                        catalog,
+                        temporal_table,
+                        AppendWindow {
+                            window_id: request.window_id,
+                            revision: request.revision,
+                            run_id: request.run_id,
+                            states: request.states,
+                            registry: request.registry,
+                        },
+                    )
+                    .await?;
+                    result.snapshot_id
+                }
+            };
+            publications.record_append(request.run_id, snapshot_id).await?;
         }
 
         publications.publish(request.run_id, Some(request.observed_current)).await

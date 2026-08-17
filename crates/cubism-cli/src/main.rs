@@ -227,6 +227,16 @@ fn read_parquet_batches(path: &str) -> Result<Vec<arrow_array::RecordBatch>, Str
 /// build. Omitted, `iceberg-build` behaves exactly as before: an isolated,
 /// non-durable single-process build (see the module doc comment's original
 /// rationale for why that was the only option Phase 3 shipped with).
+///
+/// A second, durable invocation with the same `--run-id` recovers rather
+/// than blindly re-appending: [issue #17](https://github.com/jeromebanks/cubism-rs/issues/17)'s
+/// fix, applied here as well as in `CorrectionCoordinator::execute` —
+/// `RunState::Claimed` alone does not mean the append was never attempted,
+/// since a crash between `AggregateWriter::append_window`'s commit and
+/// `PublicationStore::record_append` leaves exactly that state. This
+/// command checks Iceberg's own committed state
+/// (`AggregateReader::run_append_snapshot`) before deciding whether to
+/// append again, the same as the coordinator does.
 #[allow(clippy::too_many_arguments)]
 async fn iceberg_build(
     spec_path: &str,
@@ -276,33 +286,78 @@ async fn iceberg_build(
         .claim_run(&spec.name, &window_id, run_id, revision, expected_rows)
         .await
         .map_err(|e| e.to_string())?;
-    let already_appended =
-        matches!(claim.state(), cubism_iceberg::RunState::Appended { .. } | cubism_iceberg::RunState::Published { .. });
+    // A recorded snapshot id if this run's append is already known-durable
+    // (`Appended`/`Published`). `Claimed` alone does *not* mean "never
+    // attempted" — see the `run_append_snapshot` check below, #17.
+    let already_recorded_snapshot_id = match claim.state() {
+        cubism_iceberg::RunState::Appended {
+            aggregate_snapshot_id,
+            ..
+        }
+        | cubism_iceberg::RunState::Published {
+            aggregate_snapshot_id,
+            ..
+        } => Some(*aggregate_snapshot_id),
+        cubism_iceberg::RunState::Claimed { .. } => None,
+    };
 
     let started = Instant::now();
-    let result = if already_appended {
-        match claim.state() {
-            cubism_iceberg::RunState::Appended { aggregate_snapshot_id, .. }
-            | cubism_iceberg::RunState::Published { aggregate_snapshot_id, .. } => {
+    let result = if let Some(snapshot_id) = already_recorded_snapshot_id {
+        cubism_iceberg::CommitResult {
+            snapshot_id,
+            states_file_count: 0,
+            registry_file_count: 0,
+            row_count: expected_rows,
+        }
+    } else {
+        // `Claimed` is ambiguous between "append never attempted" and
+        // "append's `fast_append` already committed, but the process
+        // crashed before `record_append` persisted that fact" — the same
+        // gap `CorrectionCoordinator::execute` has, fixed the same way here
+        // rather than assuming this hand-rolled protocol is exempt (#17).
+        let already_committed = AggregateReader::run_append_snapshot(
+            catalog.as_ref(),
+            &table,
+            &window_id,
+            revision,
+            run_id,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        match already_committed {
+            Some(snapshot_id) => {
+                publications
+                    .record_append(run_id, snapshot_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 cubism_iceberg::CommitResult {
-                    snapshot_id: *aggregate_snapshot_id,
+                    snapshot_id,
                     states_file_count: 0,
                     registry_file_count: 0,
                     row_count: expected_rows,
                 }
             }
-            cubism_iceberg::RunState::Claimed { .. } => unreachable!("already_appended excludes Claimed"),
+            None => {
+                let result = AggregateWriter::append_window(
+                    catalog.as_ref(),
+                    &table,
+                    AppendWindow {
+                        window_id: &window_id,
+                        revision,
+                        run_id,
+                        states: &states,
+                        registry: &registry,
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                publications
+                    .record_append(run_id, result.snapshot_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                result
+            }
         }
-    } else {
-        let result = AggregateWriter::append_window(
-            catalog.as_ref(),
-            &table,
-            AppendWindow { window_id: &window_id, revision, run_id, states: &states, registry: &registry },
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        publications.record_append(run_id, result.snapshot_id).await.map_err(|e| e.to_string())?;
-        result
     };
 
     let expected_current =

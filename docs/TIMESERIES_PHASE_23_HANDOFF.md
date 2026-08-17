@@ -36,7 +36,12 @@ and tightened further by this one; the plan's Phase 4
 done — see that roadmap's "Phase 4 done" section, unchanged by this
 session, for what remains.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`TIMESERIES_PHASE_24_HANDOFF.md`](TIMESERIES_PHASE_24_HANDOFF.md),
+a user-directed detour (not the next roadmap milestone pick) fixing
+[#17](https://github.com/jeromebanks/cubism-rs/issues/17) — a real
+correctness gap in crash recovery, unrelated to this session's own Phase 5
+work, found via a separate conversation assessing open GitHub issues for
+tech debt.
 
 ## What this session built
 

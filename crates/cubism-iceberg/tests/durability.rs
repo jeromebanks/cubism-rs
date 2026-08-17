@@ -20,6 +20,7 @@ use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use chrono::DateTime;
 use cubism_core::AggKind;
 use cubism_core::temporal::{WindowId, WindowRevision};
+use cubism_iceberg::table::current_snapshot_id;
 use cubism_iceberg::{
     AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, CorrectionCoordinator,
     CorrectionRequest, CubismIcebergError, PublicationStore, ReconciliationRecord, RevisionStatus, RunInspection,
@@ -456,6 +457,224 @@ async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a
     let read_after_replay =
         AggregateReader::read_window(catalog_c.as_ref(), &table_c, &publications_c, &window_id).await.unwrap();
     assert_eq!(total_rows(&read_after_replay), 2, "replaying a completed correction must not duplicate rows");
+}
+
+/// [Issue #17](https://github.com/jeromebanks/cubism-rs/issues/17)'s fix:
+/// the *ambiguous* half of `AwaitingAppend` the test above deliberately does
+/// not cover — an append whose `fast_append` already committed to Iceberg,
+/// but the process crashed before `record_append` persisted that fact, so a
+/// fresh handle's control store still reports `RunState::Claimed`. Before
+/// the fix, `CorrectionCoordinator::execute` could not distinguish this from
+/// "never attempted" and would re-run `append_window`, committing a second
+/// generation of data files for the same run — silently duplicating every
+/// visible row. `AggregateReader::run_append_snapshot` closes the gap by
+/// asking Iceberg's own committed state directly instead of assuming.
+///
+/// Simulated by calling `AggregateWriter::append_window` directly (a real
+/// Iceberg commit, not a mock) and deliberately never calling
+/// `record_append` — the control store is left exactly where a crash
+/// between those two calls would leave it. A fresh handle then calls
+/// `CorrectionCoordinator::execute` with the identical request.
+///
+/// Proves the fix at the **snapshot** level, not just the row level: the
+/// states table's current snapshot id after recovery is asserted equal to
+/// the id the direct `append_window` call above produced — the strongest
+/// available proof that no second `fast_append` commit happened at all
+/// (row-count equality alone could in principle round-trip a coincidence;
+/// an unchanged snapshot id cannot, since any further commit — duplicate or
+/// not — would produce a new one). Row count is asserted too, but as
+/// corroboration, not the primary claim.
+///
+/// Does **not** prove anything about concurrent recovery of the same run —
+/// `AggregateReader::run_append_snapshot`'s own doc comment states plainly
+/// that two callers racing `execute` for the identical `run_id` could both
+/// observe "not yet committed" before either commits; this test is
+/// sequential (crash, then one retry), matching #17's own scope.
+#[tokio::test]
+async fn sqlite_coordinator_execute_recovers_an_appended_but_unrecorded_claim_after_reopen() {
+    let warehouse = TempDir::new().unwrap();
+    let catalog_dir = TempDir::new().unwrap();
+    let catalog_db = catalog_dir.path().join("catalog.sqlite");
+    let control_dir = TempDir::new().unwrap();
+    let control_db = control_dir.path().join("control.sqlite");
+    let config = CatalogConfig::Sqlite {
+        warehouse: warehouse.path().to_path_buf(),
+        catalog_db: catalog_db.clone(),
+    };
+    let window_id = WindowId::new("2026-08-12").unwrap();
+
+    // An initial revision 1 is published directly (raw protocol) so the
+    // correction below has something to replace — same precondition the
+    // test above establishes, per `CorrectionRequest::observed_current`'s
+    // own contract (a correction only makes sense against an
+    // already-published window).
+    let initial_states = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        1,
+        1.0,
+    )])];
+    let initial_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    {
+        let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
+            .await
+            .unwrap();
+        let publications = PublicationStore::sqlite(&control_db).await.unwrap();
+        publications
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-initial",
+                WindowRevision::new(1).unwrap(),
+                1,
+            )
+            .await
+            .unwrap();
+        let result = AggregateWriter::append_window(
+            catalog.as_ref(),
+            &table,
+            AppendWindow {
+                window_id: &window_id,
+                revision: WindowRevision::new(1).unwrap(),
+                run_id: "run-initial",
+                states: &initial_states,
+                registry: &initial_registry,
+            },
+        )
+        .await
+        .unwrap();
+        publications
+            .record_append("run-initial", result.snapshot_id)
+            .await
+            .unwrap();
+        publications.publish("run-initial", None).await.unwrap();
+    }
+
+    // The correction (revision 2) is claimed, its Iceberg append is
+    // committed directly (bypassing the coordinator entirely, the same way
+    // a real `execute` call would have, just without going through
+    // `execute`), and `record_append` is never called — this is the
+    // "crashed after commit, before recording it" state #17 tracks.
+    let corrected_states = vec![states_batch(&[
+        ("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0),
+        ("2026-08-12T00:20:00Z", xunit_id(2), 2, 2.0),
+    ])];
+    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a"), (xunit_id(2), b"b")])];
+    let expected_rows: u64 = corrected_states
+        .iter()
+        .map(RecordBatch::num_rows)
+        .sum::<usize>() as u64;
+    let crashed_snapshot_id = {
+        let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
+            .await
+            .unwrap();
+        let publications = PublicationStore::sqlite(&control_db).await.unwrap();
+        let claim = publications
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-correction",
+                WindowRevision::new(2).unwrap(),
+                expected_rows,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(claim, ClaimResult::New(_)));
+
+        let result = AggregateWriter::append_window(
+            catalog.as_ref(),
+            &table,
+            AppendWindow {
+                window_id: &window_id,
+                revision: WindowRevision::new(2).unwrap(),
+                run_id: "run-correction",
+                states: &corrected_states,
+                registry: &corrected_registry,
+            },
+        )
+        .await
+        .unwrap();
+        // Deliberately no `publications.record_append(...)` call here — the
+        // control store must still classify this run as `AwaitingAppend`
+        // even though its data is already durably committed to Iceberg.
+        result.snapshot_id
+    };
+
+    // Confirm, through a fresh handle, that the control store really does
+    // still read `AwaitingAppend` — without this the test below could pass
+    // for the wrong reason (e.g. if `record_append` had silently no-opped).
+    let publications_check = PublicationStore::sqlite(&control_db).await.unwrap();
+    let recovered = publications_check
+        .run_state("run-correction")
+        .await
+        .unwrap();
+    assert_eq!(
+        ReconciliationRecord::classify(recovered.as_ref()),
+        ReconciliationRecord::AwaitingAppend {
+            revision: WindowRevision::new(2).unwrap()
+        },
+        "the control store must still read AwaitingAppend even though the Iceberg append already committed"
+    );
+
+    // Fresh handle: replay the identical correction request via
+    // `CorrectionCoordinator::execute`, exactly as a supervisor unaware of
+    // the crash's exact timing would.
+    let request = CorrectionRequest {
+        window_id: &window_id,
+        revision: WindowRevision::new(2).unwrap(),
+        run_id: "run-correction",
+        observed_current: WindowRevision::new(1).unwrap(),
+        kinds: &[AggKind::Sum, AggKind::Count],
+        states: &corrected_states,
+        registry: &corrected_registry,
+    };
+    let catalog_b = cubism_iceberg::config::open_catalog(&config).await.unwrap();
+    let table_b = TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema())
+        .await
+        .unwrap();
+    let publications_b = PublicationStore::sqlite(&control_db).await.unwrap();
+    let publication =
+        CorrectionCoordinator::execute(catalog_b.as_ref(), &table_b, &publications_b, request)
+            .await
+            .unwrap();
+    assert_eq!(publication.revision, WindowRevision::new(2).unwrap());
+
+    // The primary claim: no second `fast_append` commit happened. The
+    // states table's current snapshot id after recovery must be exactly
+    // the one the earlier direct `append_window` call produced.
+    let states_table_after = table_b.states_table(catalog_b.as_ref()).await.unwrap();
+    assert_eq!(
+        current_snapshot_id(states_table_after.metadata()),
+        Some(crashed_snapshot_id),
+        "recovering an appended-but-unrecorded claim must not commit a second fast_append"
+    );
+
+    // Corroborating claim: the row count matches the single correct commit,
+    // not a doubled one.
+    let read_after_recovery =
+        AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id)
+            .await
+            .unwrap();
+    assert_eq!(
+        total_rows(&read_after_recovery),
+        2,
+        "recovering an appended-but-unrecorded claim must not duplicate visible rows"
+    );
+
+    let run_state_after = publications_b
+        .run_state("run-correction")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ReconciliationRecord::classify(Some(&run_state_after)),
+        ReconciliationRecord::Published {
+            revision: WindowRevision::new(2).unwrap(),
+            aggregate_snapshot_id: crashed_snapshot_id
+        }
+    );
 }
 
 /// Roadmap Milestone 6 (`docs/TIMESERIES_ROADMAP.md`): plan lines 666-669

@@ -326,7 +326,9 @@ compiles.
   literal "failure injection at every commit/publication stage is
   recoverable" is therefore met for three of the four interruption points a
   correction can crash at (claimed-and-unattempted, appended-and-recorded,
-  published), not all four.
+  published), not all four. **Resolved by Milestone 5b below** — this
+  bullet is left as-is (this series' additive-pointer convention) rather
+  than rewritten in place.
 - **Test:** narrowed from plan line 638's literal "every stage" — see #17
   for the one stage this doesn't cover.
   `sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a_published_run_after_reopen`
@@ -396,6 +398,96 @@ compiles.
   #13 scope; the plan's four completion criteria are walked individually
   there rather than assumed met from "Milestone 6 done."
 
+### Milestone 5b — Resolve #17: `AwaitingAppend` recovery via a states-table idempotency check
+
+- **Status:** Done. Fixes
+  [#17](https://github.com/jeromebanks/cubism-rs/issues/17) — the one gap
+  Milestone 5 left open in its own "What it does not do."
+- **Target:** `AggregateReader::run_append_snapshot`, a new function in
+  `crates/cubism-iceberg/src/reader.rs`;
+  `CorrectionCoordinator::execute`'s `AwaitingAppend` branch
+  (`crates/cubism-iceberg/src/coordinator.rs`); `cubism-cli`'s
+  `iceberg_build` command (`crates/cubism-cli/src/main.rs`) — see
+  "Two recovery paths, not one" below for why the CLI is in scope too.
+- **The key finding that shrank this below what it might have needed:**
+  every states row `AggregateWriter::append_window` writes already carries
+  its own `window_id`/`revision`/`run_id` columns
+  (`writer.rs`'s `augment_states_batch`) — the exact columns needed to ask
+  "did this run's append already commit?" directly against Iceberg's own
+  state. `AggregateReader::read_window` already showed the predicate-scan
+  pattern to copy (`(window_id, revision)` via
+  `Table::scan().with_filter(...)`); `run_append_snapshot` is the same
+  pattern plus a `run_id` clause. No schema change, no new persisted
+  control-store field, no migration.
+- **What it does:** before `CorrectionCoordinator::execute` (or
+  `cubism-cli`'s `iceberg_build`) re-runs `AggregateWriter::append_window`
+  for a claim classified `AwaitingAppend`, it now calls
+  `AggregateReader::run_append_snapshot` to check whether a states row for
+  the exact `(window_id, revision, run_id)` already exists in the table's
+  *current* snapshot. If found, the append already committed — the caller
+  records that snapshot id via `record_append` and skips re-appending. If
+  not found, it appends exactly as before. The returned snapshot id is the
+  table's current snapshot at scan time, not necessarily the exact one the
+  original (possibly crashed) commit produced — `aggregate_snapshot_id` is
+  provenance-only, never used to filter a read (checked directly in
+  `control.rs`), so this is sufficient; the function's own doc comment says
+  so explicitly rather than implying more precision than it has.
+- **Two recovery paths, not one — checked, not assumed.** #17 was written
+  against `CorrectionCoordinator::execute`, but that function is called
+  nowhere outside its own tests today (confirmed: grepped every crate).
+  `cubism-cli`'s `iceberg_build` command hand-rolls the identical
+  claim/append/record protocol independently (it predates
+  `CorrectionCoordinator` — Phase 3) and had the *same* unfixed gap: its
+  own `already_appended` check only recognized `Appended`/`Published`,
+  treating every `Claimed` state as "never attempted." Since
+  `iceberg_build` is the only one of the two paths any real invocation of
+  this crate goes through today, fixing only `execute` would have closed
+  the issue on paper while leaving the actually-reachable bug in place.
+  Both are fixed the same way, sharing `run_append_snapshot`.
+- **Explicit non-goal, not silently assumed:** no defense against
+  concurrent recovery of the *same* run — two callers racing `execute` (or
+  two `iceberg_build` invocations) for the identical `run_id` could both
+  observe "not yet committed" before either commits, and both then append.
+  This fix closes the *sequential* crash-then-retry gap #17 describes;
+  concurrent recovery of one run was never in #17's scope and is not
+  solved here. Stated in `run_append_snapshot`'s own doc comment.
+- **`expected_rows` checked, not assumed safe:** `RunState::expected_rows`
+  is only ever cross-checked at `claim_run` time, against a *retried
+  claim's own* `expected_rows` argument (`control.rs`'s `RunConflict`).
+  Nothing in `record_append` or `publish` compares `expected_rows` against
+  the actual row count Iceberg committed, on this path or the pre-existing
+  normal append path either — this fix does not weaken an existing
+  invariant, because none exists to weaken. Recorded in
+  `run_append_snapshot`'s own doc comment, not left as an unexamined gap.
+- **Test:** `sqlite_coordinator_execute_recovers_an_appended_but_unrecorded_claim_after_reopen`
+  (`crates/cubism-iceberg/tests/durability.rs`) — the ambiguous half of
+  `AwaitingAppend` Milestone 5's own test suite deliberately did not cover.
+  Simulates the crash by calling `AggregateWriter::append_window` directly
+  (a real Iceberg commit) and never calling `record_append`, then a fresh
+  handle calls `CorrectionCoordinator::execute` with the identical request.
+  Proves the fix at the **snapshot** level: the states table's current
+  snapshot id after recovery is asserted equal to the id the direct
+  `append_window` call produced — stronger than a row-count check alone,
+  since any further commit (duplicate or not) would produce a new snapshot
+  id, where a row count could in principle round-trip a coincidence. Row
+  count is asserted too, as corroboration. The pre-existing
+  `sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a_published_run_after_reopen`
+  (the unambiguous half) re-ran clean, confirming no regression to the
+  `None`-branch (append-for-real) path this fix's `else` arm shares with
+  the original code. `cubism-cli` has no test harness at all (no `tests/`
+  directory, zero `#[test]`s in `main.rs`) — this crate's own established
+  gate is `cargo build -p cubism-cli` + `cargo clippy`, unchanged by this
+  slice; the CLI's fix is a direct, mechanical reuse of the same
+  already-tested `run_append_snapshot` helper and branching shape
+  `CorrectionCoordinator::execute` uses, not new logic of its own.
+- **Depends on:** Milestone 5 (`Done`, narrowed — this closes the one gap
+  it left open).
+- **Done when:** the test passes and the full step-4 battery is clean.
+  Met (34 passed + 1 ignored in `cubism-iceberg`, up from 33; full battery
+  clean). See "Phase 4 done condition" below, criterion 2, for the updated
+  verdict — met for **both** recovery paths this crate has, not narrowed
+  to one.
+
 ## Phase 4 "done" condition
 
 Distinct from "every milestone above is done," per plan lines 650-669:
@@ -414,13 +506,24 @@ Distinct from "every milestone above is done," per plan lines 650-669:
      Milestone 4's own revision-isolation test both prove the replacement
      is atomic and complete from the reader's view.
   2. *"A deterministic recovery run classifies and reconciles every
-     interrupted job."* **Not** met as literally worded — Milestone 5
-     (narrowed) recovers three of the four stages a correction can be
-     interrupted at; the fourth (`AwaitingAppend`'s ambiguous case — append
-     committed but not yet recorded) is not safely recoverable by a naive
-     retry, tracked in
-     [#17](https://github.com/jeromebanks/cubism-rs/issues/17), not fixed
-     by any milestone above.
+     interrupted job."* **Met.** Milestone 5 (narrowed) recovered three of
+     the four stages a correction can be interrupted at; Milestone 5b
+     resolved the fourth (`AwaitingAppend`'s ambiguous case — append
+     committed but not yet recorded), fixing
+     [#17](https://github.com/jeromebanks/cubism-rs/issues/17). Checked
+     against **both** of this crate's real recovery paths, not just
+     `CorrectionCoordinator::execute`: `cubism-cli`'s `iceberg_build`
+     hand-rolls the identical claim/append/record protocol independently
+     and had the same gap, unfixed by Milestone 5 alone — Milestone 5b's
+     own entry records why that mattered (`execute` has zero real callers
+     today; `iceberg_build` is the only path anything actually invokes).
+     Both now share `AggregateReader::run_append_snapshot`. Concurrent
+     recovery of the *same* run (as opposed to sequential crash-then-retry)
+     remains explicitly out of scope — see Milestone 5b's own "Explicit
+     non-goal" bullet — but "every interrupted job" in the plan's wording
+     is about a job being interrupted and later recovered, not about two
+     recovery attempts racing each other, so this does not reopen the
+     criterion.
   3. *"Compaction and retention SLOs are documented and observable."*
      **Not** met — no compaction or retention exists in this roadmap's
      scope at all, by design (this roadmap's "Scope" section above excludes
@@ -429,10 +532,18 @@ Distinct from "every milestone above is done," per plan lines 650-669:
   4. *"No maintenance path changes aggregate answers."* Not applicable yet
      — there is no maintenance path (compaction/retention) to check against,
      for the same reason as (3).
-  Net: only criterion 1 is fully met; 2 is partially met (#17); 3 and 4 are
-  out of this roadmap's scope entirely (#10). Phase 4 as this roadmap
-  defines it (excluding #10) is therefore **not** done purely because
-  Milestone 6 closed — #17 remains a real gap in criterion 2.
+  Net: criteria 1 and 2 are both fully met (2 as of Milestone 5b); 3 and 4
+  are out of this roadmap's scope entirely (#10). **Phase 4 as this
+  roadmap defines it (excluding #10, the same "excluded, not silently
+  dropped" treatment used throughout this doc) is done as of Milestone
+  5b.** Per this series' step 8a
+  (`.claude/skills/timeseries-slice/SKILL.md`), landing Milestone 5b
+  triggers the cross-model phase review — see
+  [`docs/phase-reviews/TIMESERIES_PHASE_4_REVIEW.md`](phase-reviews/TIMESERIES_PHASE_4_REVIEW.md)
+  for that review's findings and disposition. **Phase start (for step
+  8a):** `a253f4f` — the commit immediately before `1836d50` added this
+  roadmap doc's first "## Milestones" section (Milestone 1), the same
+  backfill convention Phase 5's own start (`f0599b2`) used.
 - Plan's "Unresolved decisions" (lines 658-663) are each either resolved (as
   Milestones 1 and 2 do for two of them) or explicitly deferred with a
   reason, not silently dropped.
@@ -471,14 +582,12 @@ Distinct from "every milestone above is done," per plan lines 650-669:
   decision on which crate closes the gap before it can become a milestone
   here or in a successor roadmap doc.
 - Plan line 638's literal "failure injection at every commit/publication
-  stage is recoverable" is **not** fully met by Milestone 5 as narrowed: a
-  correction whose Iceberg append committed but crashed before
-  `record_append` persisted that fact is not safely recoverable by
-  `CorrectionCoordinator::execute` today (a naive retry can duplicate
-  visible rows — see `coordinator.rs`'s `ReconciliationRecord` doc
-  comment). Tracked in
-  [#17](https://github.com/jeromebanks/cubism-rs/issues/17), not assigned to
-  a milestone above.
+  stage is recoverable" is now **met**: a correction whose Iceberg append
+  committed but crashed before `record_append` persisted that fact is
+  safely recoverable by `CorrectionCoordinator::execute` (and, as
+  Milestone 5b's own entry records, `cubism-cli`'s `iceberg_build`) as of
+  Milestone 5b, which fixed
+  [#17](https://github.com/jeromebanks/cubism-rs/issues/17).
 
 ## Phase 5 Milestones
 
@@ -1098,8 +1207,9 @@ tracked against an issue rather than treated as blocking, the same pattern
   manifest. Remains gated on
   [#8](https://github.com/jeromebanks/cubism-rs/issues/8) (or a
   not-yet-scoped multi-window `cubism-iceberg` API) — same "excluded, not
-  silently dropped" treatment "Phase 4 done" gave its own unmet criteria
-  against #10/#17.
+  silently dropped" treatment "Phase 4 done" gives its own unmet criteria
+  against #10 (#17 was Phase 4's other exclusion; Milestone 5b fixed it,
+  so it is no longer a live example of this pattern).
 - 775 ("every result reports sufficient coverage and provenance") — **met
   as narrowed, minus per-point state/error metadata**. `SeriesResponse`'s
   `published`/`missing` fields (copied from `SegmentCoverage`) now sit
@@ -1120,7 +1230,7 @@ tracked against an issue rather than treated as blocking, the same pattern
   done here.
 
 **Net: Phase 5 as this roadmap defines it (excluding #8, the same way
-"Phase 4 done" excludes #10/#17) is done as of Milestone 10b-3.** 773 is
+"Phase 4 done" excludes #10) is done as of Milestone 10b-3.** 773 is
 met without qualification; 775 is met as narrowed (missing per-point
 state/error metadata); 772 is met as narrowed — single-`XUnit`-selector
 queries only, and `AverageState` only — the real multi-cell-merge gap
@@ -1132,8 +1242,8 @@ see Milestone 10b-3's own entry above for the fix and its test. 774 is not
 a gap *in*
 Milestones 7-10b-3's own scope as narrowed — it is a real, load-bearing gap
 in what those milestones answer correctly, tracked rather than silently
-dropped, the same treatment "Phase 4 done" gives #17 (a real,
-unsafe-to-ignore recovery gap) alongside its narrow-close. Per this
+dropped, the same treatment "Phase 4 done" gives #10 (a real, deliberately
+out-of-scope maintenance gap) alongside its narrow-close. Per this
 series' step 8a (`.claude/skills/timeseries-slice/SKILL.md`), landing
 Milestone 10b-2 triggered the cross-model phase review that found #19 —
 see
