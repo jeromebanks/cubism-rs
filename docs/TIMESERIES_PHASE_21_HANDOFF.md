@@ -35,7 +35,7 @@ plan's Phase 4 (`docs/TIMESERIES_IMPLEMENTATION_PLAN.md:582-670`) has every
 done — see that roadmap's "Phase 4 done" section, unchanged by this
 session, for what remains.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`docs/TIMESERIES_PHASE_22_HANDOFF.md`](TIMESERIES_PHASE_22_HANDOFF.md) — lands Milestone 10b-2 (`SeriesResponse`), this doc's deferred item 1, and closes Phase 5 per the roadmap's narrow-close condition.
 
 ## What this session built
 

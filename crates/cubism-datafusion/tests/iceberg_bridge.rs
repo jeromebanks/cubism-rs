@@ -33,7 +33,7 @@ use cubism_core::temporal::{
 };
 use cubism_core::{AggregateState, AverageState};
 use cubism_datafusion::{
-    CoveragePlan, GapPolicy, ResolutionPlan, TemporalQuery, merge_average_column,
+    CoveragePlan, GapPolicy, ResolutionPlan, SeriesResponse, TemporalQuery, merge_average_column,
 };
 use cubism_iceberg::config::open_catalog;
 use cubism_iceberg::{
@@ -407,4 +407,188 @@ async fn merge_average_column_reads_and_merges_two_published_windows() {
 
     let merged = merge_average_column(&batches, "avg_v1").unwrap();
     assert_eq!(merged, a.merge(&b).unwrap());
+}
+
+/// Milestone 10b-2 (`docs/TIMESERIES_ROADMAP.md`): `SeriesResponse` wired to
+/// a real `CoveragePlan` — the "wiring" half of the roadmap's deferred
+/// "Milestone 10b" note that neither Milestone 10 (`CoveragePlan` alone,
+/// provenance only) nor Milestone 10b-1 (`merge_average_column` alone, no
+/// query planning) closes.
+///
+/// Same two-window setup as
+/// `coverage_plan_resolves_real_publication_state_across_two_windows`
+/// (Milestone 10's own test) — one aligned interior segment spanning two
+/// day-resolution windows — except both windows are published here (not one
+/// published/one missing), each carrying a real `AverageState`-encoded
+/// `avg_v1` row (same encoding `merge_average_column_reads_and_merges_two_published_windows`
+/// uses). Proves: `SeriesResponse::new`, fed the real `CoveragePlan` plus
+/// both windows' batches read back via `AggregateReader::read_window`,
+/// produces one point whose `value` equals `a.merge(&b).unwrap().present()`
+/// (the same merge Milestone 10b-1's test verifies, now reached via the
+/// full `ResolutionPlan` -> `CoveragePlan` -> `SeriesResponse` path instead
+/// of a direct call), `is_exact: true`, both windows in `published` with
+/// their real `WindowRevision`s, and `missing` empty. Does not prove
+/// anything about a partially-published segment's `value` (that shape is
+/// `series_response.rs`'s own
+/// `series_response_propagates_missing_and_published_from_partial_segment`
+/// unit test, which does not need real Iceberg I/O to prove it) or about
+/// `gap_policy` (also covered purely in `series_response.rs`'s unit tests).
+#[tokio::test]
+async fn series_response_materializes_two_published_windows_through_a_real_coverage_plan() {
+    let warehouse = TempDir::new().unwrap();
+    let config = CatalogConfig::Memory {
+        warehouse: warehouse.path().to_path_buf(),
+    };
+    let catalog = open_catalog(&config).await.unwrap();
+    let temporal_table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &avg_states_schema())
+        .await
+        .unwrap();
+    let publications = PublicationStore::in_memory();
+
+    let day = FixedResolution::from_micros(86_400_000_000).unwrap();
+    let spec = TemporalSpec {
+        event_time: "ts".into(),
+        ingestion_time: None,
+        base_resolution: Resolution::Fixed(day),
+        origin: BucketOrigin::default(),
+        timezone: "UTC".into(),
+        allowed_lateness: AllowedLateness::from_micros(0).unwrap(),
+        rollups: vec![],
+        retention: None,
+    };
+
+    // [2026-08-13T00:00:00Z, 2026-08-15T00:00:00Z) is exactly two day
+    // buckets (epoch-aligned origin), so ResolutionPlan::decompose keeps it
+    // as one aligned interior segment spanning both, per Milestone 9.
+    let query = TemporalQuery::new(
+        CUBE_ID,
+        vec![XUnit::global()],
+        vec!["avg_v1".into()],
+        EventTime::from_unix_micros(micros("2026-08-13T00:00:00Z")),
+        EventTime::from_unix_micros(micros("2026-08-15T00:00:00Z")),
+        Some(Resolution::Fixed(day)),
+        false,
+        GapPolicy::Missing,
+        &spec,
+    )
+    .unwrap();
+    let plan = ResolutionPlan::new(&query, &spec).unwrap();
+    assert_eq!(
+        plan.segments.len(),
+        1,
+        "two contiguous day buckets must stay one aligned segment"
+    );
+    assert!(plan.segments[0].aligned);
+
+    let mut a = AverageState::new();
+    a.accumulate(3.0).unwrap();
+    a.accumulate(5.0).unwrap();
+    let mut b = AverageState::new();
+    b.accumulate(10.0).unwrap();
+
+    let w1 = WindowId::new("2026-08-13").unwrap();
+    let w2 = WindowId::new("2026-08-14").unwrap();
+    let revision = WindowRevision::new(1).unwrap();
+
+    let states1 = vec![avg_states_batch(&[(
+        "2026-08-13T12:00:00Z",
+        [1u8; 32],
+        a.encode(),
+    )])];
+    let registry1 = vec![registry_batch(&[([1u8; 32], b"US/mobile")])];
+    let expected_rows1: u64 = states1.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let claim1 = publications
+        .claim_run(CUBE_ID, &w1, "run-a", revision, expected_rows1)
+        .await
+        .unwrap();
+    assert!(matches!(claim1, ClaimResult::New(_)));
+    let result1 = AggregateWriter::append_window(
+        catalog.as_ref(),
+        &temporal_table,
+        AppendWindow {
+            window_id: &w1,
+            revision,
+            run_id: "run-a",
+            states: &states1,
+            registry: &registry1,
+        },
+    )
+    .await
+    .unwrap();
+    publications
+        .record_append("run-a", result1.snapshot_id)
+        .await
+        .unwrap();
+    publications.publish("run-a", None).await.unwrap();
+
+    let states2 = vec![avg_states_batch(&[(
+        "2026-08-14T12:00:00Z",
+        [2u8; 32],
+        b.encode(),
+    )])];
+    let registry2 = vec![registry_batch(&[([2u8; 32], b"EU/desktop")])];
+    let expected_rows2: u64 = states2.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let claim2 = publications
+        .claim_run(CUBE_ID, &w2, "run-b", revision, expected_rows2)
+        .await
+        .unwrap();
+    assert!(matches!(claim2, ClaimResult::New(_)));
+    let result2 = AggregateWriter::append_window(
+        catalog.as_ref(),
+        &temporal_table,
+        AppendWindow {
+            window_id: &w2,
+            revision,
+            run_id: "run-b",
+            states: &states2,
+            registry: &registry2,
+        },
+    )
+    .await
+    .unwrap();
+    publications
+        .record_append("run-b", result2.snapshot_id)
+        .await
+        .unwrap();
+    publications.publish("run-b", None).await.unwrap();
+
+    let w1_current = publications.current(CUBE_ID, &w1).await.unwrap();
+    let w2_current = publications.current(CUBE_ID, &w2).await.unwrap();
+    assert_eq!(w1_current, Some(revision));
+    assert_eq!(w2_current, Some(revision));
+    let windows = vec![vec![(w1.clone(), w1_current), (w2.clone(), w2_current)]];
+
+    let coverage = CoveragePlan::new(&plan, false, &windows)
+        .expect("exact: false must not fail when both windows are published");
+    assert_eq!(coverage.segments.len(), 1);
+    assert!(coverage.segments[0].is_exact());
+
+    let w1_batches =
+        AggregateReader::read_window(catalog.as_ref(), &temporal_table, &publications, &w1)
+            .await
+            .unwrap();
+    let w2_batches =
+        AggregateReader::read_window(catalog.as_ref(), &temporal_table, &publications, &w2)
+            .await
+            .unwrap();
+    let mut segment_batches = w1_batches;
+    segment_batches.extend(w2_batches);
+    let batches = vec![segment_batches];
+
+    let response = SeriesResponse::new(&coverage, GapPolicy::Missing, "avg_v1", &batches)
+        .expect("both windows are published and avg_v1 decodes cleanly");
+    assert_eq!(response.source_resolution, Resolution::Fixed(day));
+    assert_eq!(response.points.len(), 1);
+    let point = &response.points[0];
+    assert!(point.is_exact);
+    assert_eq!(
+        point.value,
+        a.merge(&b).unwrap().present(),
+        "value must be the mean of the real merged AverageState read back from both windows"
+    );
+    assert_eq!(
+        point.published,
+        vec![(w1.clone(), revision), (w2.clone(), revision)]
+    );
+    assert!(point.missing.is_empty());
 }

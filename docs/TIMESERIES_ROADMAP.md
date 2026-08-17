@@ -730,8 +730,8 @@ into an observed one before Milestones 8-10 build on it.
     is `cubism_core::aggregate_state::AggregateState`'s `decode`/`merge`.
     "Milestone 10b" also turned out not to be one bounded slice: split into
     **10b-1** (the merge primitive alone, `Done`) and **10b-2** (the
-    `SeriesResponse` type plus wiring it to `CoveragePlan`, not yet
-    scoped).
+    `SeriesResponse` type plus wiring it to `CoveragePlan`, `Done` — see
+    its own entry below).
   - **`is_exact` is stricter than "backed by a current published
     revision."** A segment is exact iff it is **both**
     resolution-aligned (`ResolutionSegment::aligned`) **and** every
@@ -790,8 +790,8 @@ into an observed one before Milestones 8-10 build on it.
   `SeriesResponse` type carrying value/presentation (plan line 708) and
   state/error metadata (plan line 716), plus promoting `cubism-iceberg` to
   a normal `cubism-datafusion` dependency, are **not** part of this
-  milestone — deferred as **"Milestone 10b-2"**, not yet added to this
-  roadmap as its own entry.
+  milestone — deferred as **"Milestone 10b-2"** (`Done`, see its own entry
+  below).
 - **Target:** `crates/cubism-datafusion/src/series_merge.rs` (new file).
 - **Deviations from the original "Milestone 10b" note** (advisor-confirmed):
   - **Only `AverageState`, not all measure kinds.** `VarianceState`/
@@ -863,47 +863,125 @@ into an observed one before Milestones 8-10 build on it.
   touch any measure kind besides `AverageState` — both Milestone 10b-2's,
   per the deviations above.
 
+### Milestone 10b-2 — `SeriesResponse`: wiring `CoveragePlan` to a materialized value
+
+- **Status:** Done. Landed as `cubism_datafusion::series_response::SeriesResponse`
+  (`crates/cubism-datafusion/src/series_response.rs:62-114`), the "wiring"
+  half of the roadmap's deferred "Milestone 10b" note — the half Milestone
+  10b-1 (the merge primitive alone) deliberately left undone.
+- **Target:** `crates/cubism-datafusion/src/series_response.rs` (new file).
+- **Deviations from the original "Milestone 10b" note** (advisor-confirmed,
+  same "one bounded slice" cut Milestone 10b-1 made for its own scope):
+  - **Only `AverageState`**, via `merge_average_column` — no widening to
+    `VarianceState`/`QuantileState`/the sketch-backed kinds. Left for a
+    later slice once `SeriesResponse` needs to carry more than one measure
+    kind.
+  - **No `cubism-iceberg` dependency promotion; no I/O.** Same "async stays
+    in the caller" split every milestone since Milestone 10 has held:
+    `SeriesResponse::new` is pure/sync over caller-supplied
+    `&[Vec<RecordBatch>]`, one entry per `CoveragePlan` segment in the same
+    order — mirroring `CoveragePlan::new`'s own `windows` parameter
+    contract, including its length-mismatch rejection. `cubism-iceberg`
+    stays a `cubism-datafusion` dev-dependency.
+  - **No per-point state/error metadata.** A decode/merge failure for any
+    one segment fails the whole `SeriesResponse::new` call via `?`, not a
+    partial response with an error marker on just that point. Plan line
+    716's "state/error metadata where appropriate" is not implemented at
+    that per-point granularity this slice.
+  - **`gap_policy` is consumed, not deferred.** `TemporalQuery.gap_policy`
+    existed since Milestone 8 but nothing read it until now
+    (`range_query.rs`'s `GapPolicy` doc comment named this as a later
+    milestone's job). `merge_average_column` over a segment with zero
+    published windows returns a zero-count `AverageState`, whose
+    `AggregateState::present()` is already `None` (not `Some(0.0)`) — so
+    "no data" and "a real zero" are distinguished before `gap_policy` is
+    even consulted. `gap_policy` only substitutes `Some(0.0)` for that
+    `None` case when it is `GapPolicy::Zero`; `GapPolicy::Missing` leaves it
+    `None`. A segment with a genuine non-zero-count merge is never touched
+    by this substitution.
+- **What it does:** given a `CoveragePlan` and one already-read batch list
+  per segment, decodes+merges each segment's `avg_v1`-style column via
+  `merge_average_column` and produces one `SeriesPoint` per segment:
+  `bucket_start`/`bucket_end` (from `segment.range`), `is_exact` (from
+  `SegmentCoverage::is_exact`), `value: Option<f64>` (the merged state's
+  `present()`, gap-policy-adjusted per above), and `published`/`missing`
+  (copied straight from `SegmentCoverage`). `SeriesResponse::source_resolution`
+  is `coverage.resolution`.
+- **Test:** integration test (real `cubism-iceberg` in-memory catalog,
+  `crates/cubism-datafusion/tests/iceberg_bridge.rs`
+  `series_response_materializes_two_published_windows_through_a_real_coverage_plan`):
+  the same two-window setup as Milestone 10's own coverage-plan test, except
+  both windows are published with real `AverageState`-encoded `avg_v1` rows;
+  a real `ResolutionPlan` -> `CoveragePlan` is built, both windows are read
+  back via `AggregateReader::read_window`, and `SeriesResponse::new`
+  produces one point whose `value` equals `a.merge(&b).unwrap().present()`,
+  `is_exact: true`, both windows in `published` with their real
+  `WindowRevision`s, and `missing` empty — the decode+merge+wiring
+  round-trips through a real Parquet write/scan, reached via the full
+  `ResolutionPlan` -> `CoveragePlan` -> `SeriesResponse` path rather than a
+  direct `merge_average_column` call. Six pure unit tests in
+  `series_response.rs`'s own test module (no async iceberg harness) cover:
+  one exact fully-published segment; `gap_policy: Missing` producing `None`
+  for a no-data segment; `gap_policy: Zero` producing `Some(0.0)` for the
+  same; that `gap_policy: Zero` does *not* touch a genuine present value;
+  the batches-length-mismatch rejection; and a partially-published segment
+  correctly propagating `published`/`missing`/`is_exact: false`.
+- **Depends on:** Milestone 10b-1 (`Done`).
+- **Done when:** the test passes and the full step-4 battery is clean. Met
+  (63 passed in `cubism-datafusion`, up from 56; 203 passed / 2 ignored in
+  workspace, up from 196; full battery clean). See "Phase 5 'done'
+  condition" below for what landing this milestone does and does not close.
+
 ### Phase 5 "done" condition (for the milestones above)
 
 Walking the plan's four completion criteria (lines 772-775), the same way
-"Phase 4 done" above walks Phase 4's. Milestones 7-9 are `Done`; Milestone
-10 is `Done` **as narrowed** (see its own entry's "Deviations" — no value
-materialization, deferred to the not-yet-scoped "Milestone 10b"); Milestone
-10b-1 is `Done` (the merge primitive itself, `AverageState` only). This
-walk is corrected from the original all-4-met assumption to reflect that
-narrowing rather than overclaim it:
+"Phase 4 done" above walks Phase 4's — narrow-closing with a real gap
+tracked against an issue rather than treated as blocking, the same pattern
+"Phase 4 done" used for its own criteria 2-4. Milestones 7-10b-2 are all
+`Done` (10 and 10b-1 as narrowed, per their own entries' "Deviations"):
 
-- 772 ("answers exact aligned ranges from aggregate state") — **not yet
-  met**. Milestone 10b-1 landed the decode+merge primitive
-  (`merge_average_column`) a `SeriesResponse` would call, but nothing
-  wires it to `CoveragePlan`'s `published` list yet — no code path in this
-  repo goes from a `CoveragePlan` to an actual answered range. That wiring,
-  plus a `SeriesResponse` type to carry the result, is Milestone 10b-2's
-  job. Corrected from this criterion's original "met by Milestone 10's
-  direct-call path," which assumed value materialization was part of
-  Milestone 10's scope.
+- 772 ("answers exact aligned ranges from aggregate state") — **met**.
+  `SeriesResponse::new` (Milestone 10b-2) wires `CoveragePlan`'s `published`
+  list to `merge_average_column` (Milestone 10b-1) and produces a real
+  value; the integration test above proves this end-to-end against a real
+  published window, not just in-memory logic. Scoped to `AverageState`
+  only — widening to other measure kinds is not this criterion's literal
+  wording and is left open (see Milestone 10b-2's "Deviations").
 - 773 ("partial-boundary behavior is truthful and tested") — met by
   Milestone 10's `exact=true` failure test (both the missing-window and
-  the unaligned-but-published cases).
+  the unaligned-but-published cases), unchanged by this milestone.
 - 774 ("range plans prune storage and stay within latency/memory
-  budgets") — **not** met by Milestones 7-10b-1 as scoped; see Milestone
-  10's "Done when" above. Remains gated on #8 (or a not-yet-scoped
-  multi-window `cubism-iceberg` API).
-- 775 ("every result reports sufficient coverage and provenance") —
-  **partially met**: `CoveragePlan`'s `published`/`missing` fields report
-  coverage and revision provenance per segment. Not fully met until
-  Milestone 10b-2's `SeriesResponse` actually carries this alongside a
-  value/presentation per plan line 708.
+  budgets") — **not met**, same gap Milestone 10's "Done when" already
+  recorded: `read_window`'s predicate is a single `(window_id, revision)`
+  equality per call, not a semijoin against every published window's
+  manifest. Remains gated on
+  [#8](https://github.com/jeromebanks/cubism-rs/issues/8) (or a
+  not-yet-scoped multi-window `cubism-iceberg` API) — same "excluded, not
+  silently dropped" treatment "Phase 4 done" gave its own unmet criteria
+  against #10/#17.
+- 775 ("every result reports sufficient coverage and provenance") — **met**.
+  `SeriesResponse`'s `published`/`missing` fields (copied from
+  `SegmentCoverage`) now sit alongside an actual materialized `value`, not
+  just provenance on its own as Milestone 10 alone left it.
 - The plan's "Unresolved decisions" (lines 779-783) — "SQL table-function
-  interface in addition to HTTP" is exactly the #8-gated half and is not
-  resolved by Milestones 7-10b-1; the other four (max raw boundary scan,
+  interface in addition to HTTP" is exactly the #8-gated half and remains
+  unresolved (same gap as 774). The other four (max raw boundary scan,
   multi-XUnit/multi-measure response shape, server-side caching,
-  authorization boundary) are not addressed by any milestone above and
-  stay open for a successor roadmap slice once Milestones 7-10b-2 land.
+  authorization boundary) are not addressed by any milestone above and stay
+  open for a successor roadmap slice.
 - `/api/series` itself (`crates/cubism-serve`) and rolling
   comparisons/trend inputs (plan Phase 6) are **not** covered by
-  Milestones 7-10 — those are the next roadmap extension once this
-  section's milestones close, not assumed done here.
+  Milestones 7-10b-2 — those are the next roadmap extension, not assumed
+  done here.
+
+**Net: Phase 5 as this roadmap defines it (excluding #8, the same way
+"Phase 4 done" excludes #10) is done as of Milestone 10b-2.** Criteria 772,
+773, and 775 are met; 774 and the SQL-table-function unresolved decision
+remain #8's scope, not a gap in Milestones 7-10b-2 themselves. Per this
+series' step 8a (`.claude/skills/timeseries-slice/SKILL.md`), landing
+Milestone 10b-2 triggers the cross-model phase review — see
+[`docs/phase-reviews/TIMESERIES_PHASE_5_REVIEW.md`](phase-reviews/TIMESERIES_PHASE_5_REVIEW.md)
+for that review's findings and disposition.
 
 ## Deferred (not in scope for this roadmap doc)
 

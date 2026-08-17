@@ -109,8 +109,7 @@
 //! itself now exists ([`crate::series_merge::merge_average_column`],
 //! Milestone 10b-1), but nothing in this module calls it: wiring a
 //! `CoveragePlan`'s `published` list to an actual materialized value is
-//! `SeriesResponse`'s job (candidate "Milestone 10b-2" — not yet added to
-//! the roadmap as its own milestone).
+//! [`crate::series_response::SeriesResponse`]'s job (Milestone 10b-2).
 //!
 //! A segment is exact iff it is **both** resolution-aligned (`aligned:
 //! true`) **and** every window backing it is published. An unaligned

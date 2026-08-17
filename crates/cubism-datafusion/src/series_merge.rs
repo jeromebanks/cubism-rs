@@ -16,11 +16,10 @@
 //!   input, the same "async I/O stays in the caller" split `CoveragePlan`
 //!   established for Milestone 10. `cubism-iceberg` stays a
 //!   `cubism-datafusion` dev-dependency; this module does not change that.
-//! - **No `SeriesResponse` type.** Building that presentation/provenance
-//!   wrapper around this merge (and deciding how it carries
-//!   `CoveragePlan`'s `missing`/`is_exact` fields alongside a value) is left
-//!   for a successor slice ("Milestone 10b-2", not yet added to the
-//!   roadmap).
+//! - **No `SeriesResponse` type.** That presentation/provenance wrapper
+//!   around this merge (`CoveragePlan`'s `missing`/`is_exact` fields
+//!   alongside a value) is [`crate::series_response::SeriesResponse`]
+//!   (Milestone 10b-2) — not built in this module.
 
 use cubism_core::{AggregateState, AverageState, CubismError};
 use datafusion::arrow::array::{Array, BinaryArray, LargeBinaryArray, RecordBatch};
