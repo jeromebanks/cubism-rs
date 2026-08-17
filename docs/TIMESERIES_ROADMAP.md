@@ -1033,8 +1033,11 @@ into an observed one before Milestones 8-10 build on it.
   10b-2 used) — proving the fix through the full `ResolutionPlan` ->
   `CoveragePlan` -> `SeriesResponse` path against a real Parquet
   write/scan, not just the pure unit tests. All six of Milestone 10b-2's
-  pre-existing unit tests were updated to pass the new `selectors` parameter
-  and a real (not sentinel) `xunit_id`.
+  pre-existing unit tests were updated to pass the new `selectors`
+  parameter; five of the six (every one that constructs a batch) also now
+  tag their `avg_v1` rows with a real, not sentinel, `xunit_id` — the sixth
+  (`series_response_rejects_batches_length_mismatch`) passes zero batches,
+  so no `xunit_id` is involved.
 - **Depends on:** Milestone 10b-2 (`Done`).
 - **Done when:** the tests pass and the full step-4 battery is clean. Met
   (67 passed in `cubism-datafusion`, up from 65: +2 new unit tests; the
@@ -1052,9 +1055,9 @@ tracked against an issue rather than treated as blocking, the same pattern
 `Done` (10, 10b-1, and 10b-3 as narrowed, per their own entries'
 "Deviations"):
 
-- 772 ("answers exact aligned ranges from aggregate state") — **met, for a
-  single-`XUnit`-selector query — the only case `SeriesResponse::new`
-  supports.** Milestone 10b-2 wired `CoveragePlan`'s `published` list to
+- 772 ("answers exact aligned ranges from aggregate state") — **met as
+  narrowed: single-`XUnit`-selector queries only, and `AverageState` only.**
+  Milestone 10b-2 wired `CoveragePlan`'s `published` list to
   `merge_average_column` (Milestone 10b-1) and produced a real value, but
   originally merged every row in a window's batch unconditionally with no
   filtering by the query's `XUnit` selector — a real correctness gap
@@ -1119,13 +1122,14 @@ tracked against an issue rather than treated as blocking, the same pattern
 **Net: Phase 5 as this roadmap defines it (excluding #8, the same way
 "Phase 4 done" excludes #10/#17) is done as of Milestone 10b-3.** 773 is
 met without qualification; 775 is met as narrowed (missing per-point
-state/error metadata); 772 is met for the single-selector case
-`SeriesResponse::new` supports — the real multi-cell-merge gap Milestone
-10b-2's own phase review found (#19) was fixed by Milestone 10b-3, and a
-multi-selector query is now rejected outright rather than silently
-answered wrong; 774 and the SQL-table-function unresolved decision remain
-#8's scope. #19 is closed, not merely narrowed around — see Milestone
-10b-3's own entry above for the fix and its test. 774 is not a gap *in*
+state/error metadata); 772 is met as narrowed — single-`XUnit`-selector
+queries only, and `AverageState` only — the real multi-cell-merge gap
+Milestone 10b-2's own phase review found (#19) was fixed by Milestone
+10b-3, and a multi-selector query is now rejected outright rather than
+silently answered wrong; 774 and the SQL-table-function unresolved
+decision remain #8's scope. #19 is closed, not merely narrowed around —
+see Milestone 10b-3's own entry above for the fix and its test. 774 is not
+a gap *in*
 Milestones 7-10b-3's own scope as narrowed — it is a real, load-bearing gap
 in what those milestones answer correctly, tracked rather than silently
 dropped, the same treatment "Phase 4 done" gives #17 (a real,

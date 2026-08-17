@@ -127,14 +127,17 @@ naturally for the "exactly one" invariant); a new private
 `filter_batches_by_xunit` helper filters each segment's batches before
 `merge_average_column` runs.
 
-**Test-fixture correctness, not just code correctness.** All six of
-Milestone 10b-2's pre-existing unit tests in `series_response.rs`
-constructed their one-column `avg_v1` batches with no `xunit_id` column at
-all — they would have failed outright once filtering became mandatory, not
-silently passed. Fixed by adding an `xunit_id` column to the test schema and
-tagging every row with a real content id computed via a new `content_id`
-test helper (the same `CanonicalXUnit::from` + `canonical_xunit_content_id`
-pair production code calls), not an arbitrary sentinel. Two new tests were
+**Test-fixture correctness, not just code correctness.** Five of Milestone
+10b-2's six pre-existing unit tests in `series_response.rs` constructed
+their one-column `avg_v1` batches with no `xunit_id` column at all (the
+sixth, the batches-length-mismatch rejection test, passes zero batches and
+constructs none) — the five would have failed outright once filtering
+became mandatory, not silently passed. Fixed by adding an `xunit_id` column
+to the test schema and tagging every row with a real content id computed
+via a new `content_id` test helper (the same `CanonicalXUnit::from` +
+`canonical_xunit_content_id` pair production code calls), not an arbitrary
+sentinel; all six tests were updated to pass the new `selectors` parameter.
+Two new tests were
 added: `series_response_filters_batches_to_the_resolved_selector_before_merging`
 (a batch carrying rows for two distinct real `XUnitContentId`s — a global
 cell and a `device=mobile` cell — asserts only the selector's cell's row is
@@ -303,7 +306,8 @@ this series' established convention):
   `selectors` parameter on `SeriesResponse::new`, new
   `filter_batches_by_xunit` helper, updated module/function doc comments,
   two new unit tests, all six pre-existing unit tests updated for the new
-  parameter and a real `xunit_id`), `crates/cubism-datafusion/src/series_merge.rs`
+  `selectors` parameter and five of them for a real `xunit_id`),
+  `crates/cubism-datafusion/src/series_merge.rs`
   (doc-comment-only update recording where the #19 fix landed, no code
   change), `crates/cubism-datafusion/tests/iceberg_bridge.rs` (new
   `content_id` helper, the existing `SeriesResponse` integration test
@@ -352,10 +356,15 @@ cargo test --workspace --exclude cubism-py                                # 207 
 cargo clippy --workspace --exclude cubism-py --all-targets --no-deps -- -D warnings  # clean
 ```
 
-Run twice this session: once immediately after the code + test changes
-landed (catching the `FixedSizeBinaryArray::try_from_iter`-on-empty-iterator
-bug), and once more after that fix and the roadmap edits, to confirm the
-fix introduced no regression. Figures shown are from the final, clean run.
+The `cargo test -p cubism-datafusion --lib series_response` line ran twice
+this session: once immediately after the code + test changes landed, which
+failed and caught the `FixedSizeBinaryArray::try_from_iter`-on-empty-iterator
+bug, and once more after that fix, which passed. The rest of the battery
+above — `cubism-iceberg`'s full suite plus `concurrency`/`durability`, both
+`cubism-cli` steps, the full `cubism-datafusion` suite, and the full
+workspace test + clippy — ran once each, after the `try_from_iter` fix was
+already in place, on the tree as committed. Figures shown are from that
+run.
 
 ## Primary files
 
