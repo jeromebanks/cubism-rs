@@ -27,11 +27,12 @@ use std::sync::Arc;
 
 use chrono::DateTime;
 use cubism_core::XUnit;
+use cubism_core::encoding::canonical_xunit_content_id;
 use cubism_core::temporal::{
     AllowedLateness, BucketOrigin, EventTime, FixedResolution, Resolution, TemporalSpec, WindowId,
     WindowRevision,
 };
-use cubism_core::{AggregateState, AverageState};
+use cubism_core::{AggregateState, AverageState, CanonicalXUnit};
 use cubism_datafusion::{
     CoveragePlan, GapPolicy, ResolutionPlan, SeriesResponse, TemporalQuery, merge_average_column,
 };
@@ -49,6 +50,20 @@ const CUBE_ID: &str = "web_analytics";
 
 fn micros(timestamp: &str) -> i64 {
     DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp_micros()
+}
+
+/// The real `XUnitContentId` a selector resolves to — same two calls
+/// `SeriesResponse::new` itself makes (`CanonicalXUnit::from` +
+/// `canonical_xunit_content_id`), and the same two calls the build side's
+/// `cubism_xunit_content_id` UDF makes over a decoded `xunit_id`
+/// (`crates/cubism-datafusion/src/temporal_build.rs`'s
+/// `XUnitContentIdUdf::invoke_with_args`). Used so this file's hand-built
+/// states batches carry byte-identical ids to what a real build would have
+/// written for the same logical cell, not arbitrary sentinel bytes.
+fn content_id(xunit: &XUnit) -> [u8; 32] {
+    *canonical_xunit_content_id(&CanonicalXUnit::from(xunit))
+        .unwrap()
+        .as_bytes()
 }
 
 /// Mirrors `cubism_datafusion::temporal_build::temporal_state_schema`'s
@@ -490,12 +505,21 @@ async fn series_response_materializes_two_published_windows_through_a_real_cover
     let w2 = WindowId::new("2026-08-14").unwrap();
     let revision = WindowRevision::new(1).unwrap();
 
+    // Both windows' one row is tagged with the real global-cell content id
+    // (not an arbitrary sentinel) so the query's `XUnit::global()` selector
+    // — resolved to the same id inside `SeriesResponse::new` — actually
+    // matches these rows; see `content_id`'s doc comment. Milestone 10b-1's
+    // own test above (`merge_average_column_reads_and_merges_two_published_windows`)
+    // calls `merge_average_column` directly, bypassing `SeriesResponse`'s
+    // filter entirely, so its sentinel `[1u8; 32]`/`[2u8; 32]` ids are
+    // unaffected and deliberately left as-is.
+    let global_id = content_id(&XUnit::global());
     let states1 = vec![avg_states_batch(&[(
         "2026-08-13T12:00:00Z",
-        [1u8; 32],
+        global_id,
         a.encode(),
     )])];
-    let registry1 = vec![registry_batch(&[([1u8; 32], b"US/mobile")])];
+    let registry1 = vec![registry_batch(&[(global_id, b"/G")])];
     let expected_rows1: u64 = states1.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
     let claim1 = publications
         .claim_run(CUBE_ID, &w1, "run-a", revision, expected_rows1)
@@ -523,10 +547,10 @@ async fn series_response_materializes_two_published_windows_through_a_real_cover
 
     let states2 = vec![avg_states_batch(&[(
         "2026-08-14T12:00:00Z",
-        [2u8; 32],
+        global_id,
         b.encode(),
     )])];
-    let registry2 = vec![registry_batch(&[([2u8; 32], b"EU/desktop")])];
+    let registry2 = vec![registry_batch(&[(global_id, b"/G")])];
     let expected_rows2: u64 = states2.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
     let claim2 = publications
         .claim_run(CUBE_ID, &w2, "run-b", revision, expected_rows2)
@@ -575,8 +599,14 @@ async fn series_response_materializes_two_published_windows_through_a_real_cover
     segment_batches.extend(w2_batches);
     let batches = vec![segment_batches];
 
-    let response = SeriesResponse::new(&coverage, GapPolicy::Missing, "avg_v1", &batches)
-        .expect("both windows are published and avg_v1 decodes cleanly");
+    let response = SeriesResponse::new(
+        &coverage,
+        GapPolicy::Missing,
+        "avg_v1",
+        &[XUnit::global()],
+        &batches,
+    )
+    .expect("both windows are published and avg_v1 decodes cleanly");
     assert_eq!(response.source_resolution, Resolution::Fixed(day));
     assert_eq!(response.points.len(), 1);
     let point = &response.points[0];

@@ -51,7 +51,11 @@ condition walk; the plan's Phase 4
 done — see that roadmap's "Phase 4 done" section, unchanged by this
 session, for what remains.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`TIMESERIES_PHASE_23_HANDOFF.md`](TIMESERIES_PHASE_23_HANDOFF.md),
+which lands Milestone 10b-3 — fixing this session's own deferred item 1
+(and the "highest-priority" item in its list),
+[#19](https://github.com/jeromebanks/cubism-rs/issues/19)'s `XUnit`
+selector filtering gap.
 
 ## What this session built
 
