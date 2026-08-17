@@ -273,11 +273,17 @@ fn auto_select_resolution(
     spec: &TemporalSpec,
     range: TimeRange,
 ) -> Result<FixedResolution, CubismError> {
-    let duration_micros = range.end().unix_micros() - range.start().unix_micros();
+    // i128, not i64: `TimeRange::new` only enforces `start < end`, so a
+    // caller-supplied range near `[i64::MIN, i64::MAX)` would overflow a
+    // plain i64 subtraction here (panic in debug, silent wraparound in
+    // release) — caught by a cross-model phase review
+    // (`docs/phase-reviews/TIMESERIES_PHASE_5_REVIEW.md`), not exercised by
+    // any test until this fix's own regression test.
+    let duration_micros = range.end().unix_micros() as i128 - range.start().unix_micros() as i128;
     let mut chosen = as_fixed(spec.base_resolution)?;
     for rollup in &spec.rollups {
         if let Resolution::Fixed(candidate) = rollup
-            && candidate.micros() <= duration_micros
+            && i128::from(candidate.micros()) <= duration_micros
             && candidate.micros() > chosen.micros()
         {
             chosen = *candidate;
@@ -360,11 +366,20 @@ pub struct SegmentCoverage {
 }
 
 impl SegmentCoverage {
-    /// True iff this segment is resolution-aligned and every window backing
-    /// it is published. See the module doc comment for why an unaligned
-    /// segment is never exact, regardless of publication state.
+    /// True iff this segment is resolution-aligned, every window backing it
+    /// is published, and at least one window actually backs it. See the
+    /// module doc comment for why an unaligned segment is never exact,
+    /// regardless of publication state.
+    ///
+    /// The `!self.published.is_empty()` conjunct guards a real gap a
+    /// cross-model phase review caught (`docs/phase-reviews/TIMESERIES_PHASE_5_REVIEW.md`):
+    /// without it, a segment whose caller-supplied window list is entirely
+    /// empty (`windows[i] == []` in `CoveragePlan::new`, as opposed to
+    /// containing entries with `None` revisions) has both `published` and
+    /// `missing` empty, so `missing.is_empty()` alone was vacuously `true`
+    /// — an aligned segment backed by *zero* windows was reported exact.
     pub fn is_exact(&self) -> bool {
-        self.segment.aligned && self.missing.is_empty()
+        self.segment.aligned && self.missing.is_empty() && !self.published.is_empty()
     }
 }
 
@@ -662,6 +677,33 @@ mod tests {
         assert_exact_cover(&plan, query.range);
     }
 
+    /// Regression test for a gap a cross-model phase review caught
+    /// (`docs/phase-reviews/TIMESERIES_PHASE_5_REVIEW.md`): `TimeRange::new`
+    /// only enforces `start < end`, so nothing stops a caller from
+    /// constructing a range near `[i64::MIN, i64::MAX)`. Before the fix,
+    /// `auto_select_resolution`'s duration computation was a plain `i64`
+    /// subtraction that would panic (debug) or silently wrap (release) on
+    /// exactly this input. Calls the private `auto_select_resolution`
+    /// directly (not through `ResolutionPlan::new`) so this test isolates
+    /// the duration-overflow fix from `FixedResolution::bucket`'s own,
+    /// already-`i128`-safe overflow handling in `decompose`.
+    #[test]
+    fn auto_select_resolution_does_not_overflow_on_extreme_range() {
+        let spec = spec_with(minute(), vec![hour()]);
+        let range = TimeRange::new(
+            EventTime::from_unix_micros(i64::MIN),
+            EventTime::from_unix_micros(i64::MAX),
+        )
+        .unwrap();
+        let chosen = auto_select_resolution(&spec, range)
+            .expect("must not panic or error on an astronomically large duration");
+        assert_eq!(
+            Resolution::Fixed(chosen),
+            hour(),
+            "the hour rollup fits comfortably within an i64::MIN..i64::MAX span"
+        );
+    }
+
     #[test]
     fn resolution_plan_rejects_calendar_resolution() {
         // `TemporalQuery::new`'s membership check only checks equality/
@@ -807,6 +849,34 @@ mod tests {
 
         let err = CoveragePlan::new(&plan, false, &[])
             .expect_err("one segment but zero window-list entries must be rejected");
+        assert!(matches!(err, CubismError::Temporal(_)));
+    }
+
+    /// Regression test for a gap a cross-model phase review caught
+    /// (`docs/phase-reviews/TIMESERIES_PHASE_5_REVIEW.md`): an aligned
+    /// segment whose caller-supplied window list is entirely empty (as
+    /// opposed to a list containing entries with `None` revisions) must
+    /// not be reported exact — `missing.is_empty()` alone is vacuously true
+    /// when there are zero entries to iterate, so `is_exact()` needs the
+    /// `!published.is_empty()` conjunct this test pins down.
+    #[test]
+    fn coverage_plan_empty_window_list_is_not_exact() {
+        let spec = spec_with(minute(), vec![hour()]);
+        let query = query_with(0, 3_600_000_000, Some(hour()), &spec);
+        let plan = ResolutionPlan::new(&query, &spec).expect("aligned hour range");
+        let windows: Vec<Vec<(WindowId, Option<WindowRevision>)>> = vec![vec![]];
+
+        let coverage = CoveragePlan::new(&plan, false, &windows)
+            .expect("exact: false must not fail on a segment backed by zero windows");
+        assert!(
+            !coverage.segments[0].is_exact(),
+            "aligned but backed by zero windows must never be exact, even though missing is also empty"
+        );
+        assert!(coverage.segments[0].published.is_empty());
+        assert!(coverage.segments[0].missing.is_empty());
+
+        let err = CoveragePlan::new(&plan, true, &windows)
+            .expect_err("exact: true must fail when a segment has no backing windows at all");
         assert!(matches!(err, CubismError::Temporal(_)));
     }
 }

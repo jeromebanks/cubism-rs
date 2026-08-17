@@ -20,15 +20,26 @@ one new integration test wiring a real `ResolutionPlan` -> `CoveragePlan` ->
 roadmap; two stale cross-references in `series_merge.rs` and
 `range_query.rs`'s own doc comments (each previously saying `SeriesResponse`
 "is not yet added to the roadmap") corrected to point at the landed type
-and milestone. No new GitHub issues filed.
+and milestone.
 
-Landing this milestone satisfies the roadmap's Phase 5 "done" condition
-(criteria 772/775, narrow-closed the same way "Phase 4 done" narrow-closes
-against #10/#17, with criterion 774 excluded and pointed at #8) — this is
-the first time in this series that step 8a's cross-model phase review
-applies, flagged explicitly at this session's own step 1 per Phase 21's own
-deferred item 1. That review ran this session; see "GitHub issues touched"
-and the linked review file below for its outcome.
+Landing this milestone triggered this series' first-ever step 8a
+cross-model phase review (flagged explicitly at this session's own step 1
+per Phase 21's own deferred item 1), which found three real issues the
+advisor's own earlier pass (same-session context, same reasoning) had not
+caught: an `is_exact` overclaim on zero-backing-window segments in
+`CoveragePlan` (Milestone 10, pre-existing — fixed this session), an
+`i64` duration-subtraction overflow in `ResolutionPlan`'s auto-resolution
+selection (Milestone 9, pre-existing — fixed this session), and a real,
+not-fixed-this-slice correctness gap: `SeriesResponse`/`merge_average_column`
+merge every row in a window's batch with no `XUnit` selector filtering,
+silently over-merging across lattice cells for any real multi-dimensional
+cube (filed as [#19](https://github.com/jeromebanks/cubism-rs/issues/19)).
+See "What this session built" and the linked review file below for the
+full findings and dispositions. Phase 5's "done" condition is still
+narrow-closed (criteria 772/775, the same pattern "Phase 4 done" uses
+against #10/#17) — but 772 is now stated as met only for the
+single-lattice-cell-per-window case this milestone's test actually
+exercises, with #19 excluded from the close the same way #8 already is.
 
 (Despite the filename, this doc documents a session slice, not "Phase 22"
 of the implementation plan — same convention every prior handoff in this
@@ -121,35 +132,119 @@ whole `SeriesResponse::new` call via `?`, not a partial response with an
 error marker on just that point — recorded as a deliberate scope cut in the
 roadmap entry, not a gap discovered later).
 
+**Step 8 (same-session advisor) follow-up, applied as its own commit before
+step 8a:** the advisor's second pass (after the slice's own code landed)
+caught two documentation gaps neither the original design nor its own
+first pass had flagged — `is_exact` reads as unconditionally trustworthy
+unless a reader is told otherwise, and criteria 772/775 read as
+unqualified "met" verdicts unless the narrowing is stated as part of the
+verdict, not a footnote after it. Both fixed by documenting (not code
+changes): `series_response.rs`'s module doc comment and the `SeriesPoint`
+field doc now state plainly that `is_exact` is copied from `CoveragePlan`
+and never re-verified against `batches`, with two existing unit tests
+(`series_response_no_data_is_none_under_missing_gap_policy`,
+`series_response_no_data_is_zero_under_zero_gap_policy`) strengthened with
+an explicit `assert!(is_exact)` to make the caveat's shape visible instead
+of implied; the roadmap's 772/775 bullets reworded to `met as narrowed …`
+so the qualifier is part of the verdict.
+
+**Step 8a (cross-model phase review) findings and dispositions.** This
+session's own Codex review (`--scope branch --base f0599b2`, the full
+Phase 5 diff, Milestones 7 through 10b-2) found three real issues the
+same-session advisor passes above had not caught — exactly the failure
+mode step 8a exists to catch, since `advisor()` always sees this session's
+own reasoning and a blank-diff reviewer does not:
+
+1. **[P1, fixed this session as a follow-up commit] `CoveragePlan`'s
+   `is_exact()` returned `true` for a segment backed by zero windows.**
+   Pre-existing since Milestone 10, not introduced this session:
+   `SegmentCoverage::is_exact()` was `aligned && missing.is_empty()`; for a
+   segment whose caller-supplied window list is entirely empty (as opposed
+   to containing entries with `None` revisions), both `published` and
+   `missing` are empty, so `missing.is_empty()` was vacuously `true`. Fixed
+   by adding a `!self.published.is_empty()` conjunct
+   (`crates/cubism-datafusion/src/range_query.rs`); a regression test
+   (`coverage_plan_empty_window_list_is_not_exact`) pins down both the
+   `exact: false` and `exact: true` shapes. Only now consequential because
+   `SeriesResponse` turns "exact" into an actual materialized (wrong)
+   answer instead of just unused provenance.
+2. **[P2, fixed this session as a follow-up commit] `auto_select_resolution`'s
+   duration computation could panic or wrap on an extreme `TimeRange`.**
+   Pre-existing since Milestone 9: `range.end().unix_micros() -
+   range.start().unix_micros()` is a plain `i64` subtraction, and
+   `TimeRange::new` only enforces `start < end`, so a range near
+   `[i64::MIN, i64::MAX)` would overflow it. Fixed by widening the
+   subtraction to `i128`; a regression test
+   (`auto_select_resolution_does_not_overflow_on_extreme_range`) calls the
+   private function directly against exactly that input.
+3. **[P1, NOT fixed this session, tracked as
+   [#19](https://github.com/jeromebanks/cubism-rs/issues/19)]
+   `SeriesResponse`/`merge_average_column` merge across `XUnit` lattice
+   cells with no selector filtering.** A states table row's `xunit_id` is
+   a content hash of one specific lattice cell
+   (`cubism_core::encoding::canonical_xunit_content_id`) — the global
+   rollup and each per-dimension cell are separately aggregated rows, not
+   derivable from each other by summing. `merge_average_column` and
+   `SeriesResponse::new` both merge every row in a batch unconditionally,
+   with no awareness of `xunit_id` or the query's `TemporalQuery.selectors`
+   at all. Any window whose states table contains more than one distinct
+   `xunit_id` — the common case for a real multi-dimensional cube, not an
+   edge case — gets silently over-merged regardless of which cell the
+   query asked for. This session's own integration test does not exercise
+   this: each of its two windows is constructed with exactly one
+   `xunit_id` row. **Disposition: deferred, filed as #19** rather than
+   fixed in-session — a correct fix needs to resolve `TemporalQuery`'s
+   selectors to their `XUnitContentId`s (which needs the cube's dimension
+   structure, not just the batches already in hand) before filtering,
+   which is more than "one bounded slice" per this series' own convention;
+   see #19 for the suggested design. Both `series_merge.rs` and
+   `series_response.rs`'s doc comments, and the roadmap's Milestone 10b-2
+   entry and 772 criterion, now state this gap explicitly rather than let
+   "met as narrowed, `AverageState` only" imply more correctness than
+   exists — 772 is now stated as met only for the single-cell-per-window
+   case this milestone's test actually demonstrates.
+
+Full review text, findings, and this disposition record are in
+[`docs/phase-reviews/TIMESERIES_PHASE_5_REVIEW.md`](phase-reviews/TIMESERIES_PHASE_5_REVIEW.md).
+
 Primary files changed:
 
-- **`crates/cubism-datafusion/src/series_response.rs`** (new file, 288
-  lines): `SeriesPoint` (`:46-57`), `SeriesResponse` (`:62-65`), and
-  `SeriesResponse::new` (`:67-114`, the constructor at `:74-113`) plus six
-  unit tests (`:188-287`) covering one exact fully-published segment, both
-  `gap_policy` branches for a no-data segment, gap_policy not touching a
-  real present value, the batches-length-mismatch rejection, and a
-  partially-published segment's `published`/`missing`/`is_exact: false`
+- **`crates/cubism-datafusion/src/series_response.rs`** (new file, 343
+  lines): `SeriesPoint` (`:61-76`), `SeriesResponse` (`:81-84`), and
+  `SeriesResponse::new` (`:86-155`, the constructor at `:115-154`) plus six
+  unit tests (`:229-342`) covering one exact fully-published segment, both
+  `gap_policy` branches for a no-data segment (with the `is_exact` caveat
+  now asserted explicitly, see step 8's follow-up below), gap_policy not
+  touching a real present value, the batches-length-mismatch rejection, and
+  a partially-published segment's `published`/`missing`/`is_exact: false`
   propagation.
 - **`crates/cubism-datafusion/src/lib.rs`** (modified, +2 lines): adds
   `pub mod series_response;` and re-exports `SeriesPoint`/`SeriesResponse`.
-- **`crates/cubism-datafusion/src/range_query.rs`** (modified, doc comment
-  only, `:104-112`): corrected the stale "`SeriesResponse`'s job (candidate
-  ... not yet added to the roadmap)" note to point at the landed
-  `crate::series_response::SeriesResponse` and Milestone 10b-2 by name.
-- **`crates/cubism-datafusion/src/series_merge.rs`** (modified, doc comment
-  only, `:19-22`): same correction — "No `SeriesResponse` type" bullet now
-  points at the landed type instead of an unscoped future slice.
+- **`crates/cubism-datafusion/src/range_query.rs`** (modified): doc-comment
+  correction (`:104-112`) pointing the stale "`SeriesResponse`'s job
+  (candidate ... not yet added to the roadmap)" note at the landed
+  `crate::series_response::SeriesResponse` and Milestone 10b-2 by name;
+  plus, from step 8a's own findings (see below), a real code fix to
+  `SegmentCoverage::is_exact()` (`:368-384`) and to
+  `auto_select_resolution`'s duration computation (`:272-293`), each with
+  its own new regression test (`auto_select_resolution_does_not_overflow_on_extreme_range`
+  at `:691`, `coverage_plan_empty_window_list_is_not_exact` at `:863`).
+- **`crates/cubism-datafusion/src/series_merge.rs`** (modified): doc-comment
+  correction (`:19-22`, same stale-reference fix as `range_query.rs`) plus,
+  from step 8a's findings, a new doc-comment caveat on
+  `merge_average_column` (`:51-60`) recording the `XUnit`-filtering gap
+  (#19, not a code change).
 - **`crates/cubism-datafusion/tests/iceberg_bridge.rs`** (modified): added
   `series_response_materializes_two_published_windows_through_a_real_coverage_plan`
   (`:437-594`) — the real end-to-end wiring test, and one import-line
   addition pulling in `SeriesResponse`.
 - **`docs/TIMESERIES_ROADMAP.md`** (modified): added the "Milestone 10b-2"
-  section (`:866-933`), flipped to `Done`; corrected Milestone 10's and
+  section (`:866-958`), flipped to `Done`; corrected Milestone 10's and
   Milestone 10b-1's own stale "not yet scoped"/"not yet added" bullets
-  pointing at 10b-2; rewrote the "Phase 5 done condition" walk (`:935-984`)
-  to narrow-close Phase 5 (excluding #8, same pattern "Phase 4 done" uses
-  for #10/#17) and link this session's phase-review file.
+  pointing at 10b-2; rewrote the "Phase 5 done condition" walk
+  (`:959-1040`) to narrow-close Phase 5 (excluding #8 and #19, same pattern
+  "Phase 4 done" uses for #10/#17) and link this session's phase-review
+  file.
 - **`docs/TIMESERIES_PHASE_21_HANDOFF.md`** (modified): added
   `**Superseded by:**` line.
 
@@ -204,16 +299,29 @@ the wiring itself, not just that the merge primitive or the coverage
 planner each work in isolation (both already proven by Milestones 10 and
 10b-1's own tests).
 
+That `CoveragePlan::new`'s `is_exact()` correctly rejects a segment backed
+by zero windows (`coverage_plan_empty_window_list_is_not_exact`,
+`range_query.rs:863`) — both the `exact: false` shape (`is_exact()` false,
+`published`/`missing` both empty) and the `exact: true` shape (a hard
+`CubismError::Temporal` rather than silently succeeding). That
+`auto_select_resolution` does not panic or wrap on an astronomically large
+`TimeRange`
+(`auto_select_resolution_does_not_overflow_on_extreme_range`,
+`range_query.rs:691`, calling the private function directly against
+`[i64::MIN, i64::MAX)`). Both are step 8a findings, not part of the
+original slice design — see below.
+
 That the full step-4 verification battery — including `cargo clippy … -D
 warnings` — is clean with this change in place, run fresh this session
-twice: once after the `series_response.rs`/`lib.rs`/`iceberg_bridge.rs`
-change, and once more after the `range_query.rs`/`series_merge.rs`
-doc-comment corrections and the roadmap edits were added, to confirm those
-follow-up edits introduced no regression. `git status` was checked after
-each verification pass; no out-of-band reformat of any untouched file
-occurred (the `lib.rs`-triggers-module-tree-rustfmt hazard Phase 21
-identified was avoided the same way: `lib.rs`'s own two-line diff was
-verified by eye, not run through `rustfmt`).
+three times: once after the `series_response.rs`/`lib.rs`/`iceberg_bridge.rs`
+change; once more after the `range_query.rs`/`series_merge.rs` doc-comment
+corrections and the roadmap edits; and once more after step 8a's own two
+code fixes (`is_exact`, the duration overflow) and their regression tests
+were added, to confirm those follow-up edits introduced no regression.
+`git status` was checked after each verification pass; no out-of-band
+reformat of any untouched file occurred (the `lib.rs`-triggers-module-tree-
+rustfmt hazard Phase 21 identified was avoided the same way: `lib.rs`'s own
+two-line diff was verified by eye, not run through `rustfmt`).
 
 It does **not** prove: anything about `VarianceState`/`QuantileState`/the
 sketch-backed kinds — `SeriesResponse`/`merge_average_column` only handle
@@ -224,18 +332,31 @@ recorded explicitly as excluded from Phase 5's narrow-close, not silently
 dropped). It does not prove anything about `/api/series`
 (`crates/cubism-serve`) actually calling `SeriesResponse` — no HTTP-layer
 wiring exists yet; that's the next roadmap extension once Phase 5 closes,
-per the roadmap's own "Phase 5 done condition" text. It does not, by
-itself, establish that Phase 5's narrow-close judgment call (excluding #8)
-is sound — that judgment is what this session's step 8a cross-model phase
-review exists to check independently; see below for that review's outcome.
+per the roadmap's own "Phase 5 done condition" text. **It does not prove
+`SeriesResponse` answers a multi-`XUnit`-cell window correctly** — the
+integration test's own two windows each carry exactly one `xunit_id` row,
+so it cannot and does not exercise the #19 gap (see "What this session
+built" above); a real multi-dimensional cube's window would silently
+over-merge under this exact test's own assertions if that gap were
+triggered. This is the one place where "the test passes" reads as more
+coverage than it has unless this caveat is stated plainly, matching this
+series' own standing convention.
 
 ## GitHub issues touched
 
-- No new issues filed. `gap_policy` consumption, the per-point
-  state/error-metadata scope cut, and the `AverageState`-only scope cut are
-  all recorded in the roadmap's Milestone 10b-2 entry, per this series'
-  "record scope/behavior findings in the roadmap entry" precedent
-  (Milestones 9-10b-1 set it for their own cuts).
+- **Filed [#19](https://github.com/jeromebanks/cubism-rs/issues/19)** —
+  `SeriesResponse`/`merge_average_column` merge across `XUnit` lattice
+  cells with no selector filtering. Found by this session's own step 8a
+  cross-model phase review, not by the advisor or by writing the code
+  itself. Full body covers the `XUnitContentId`/`canonical_xunit_content_id`
+  mechanism, why it's a real gap (not an edge case), and a suggested fix;
+  cross-linked from `series_response.rs`, `series_merge.rs`, and the
+  roadmap's Milestone 10b-2 entry and 772 criterion.
+- `gap_policy` consumption, the per-point state/error-metadata scope cut,
+  and the `AverageState`-only scope cut needed no new issue — all recorded
+  in the roadmap's Milestone 10b-2 entry, per this series' "record
+  scope/behavior findings in the roadmap entry" precedent (Milestones
+  9-10b-1 set it for their own cuts).
 - No comments added to any other open issue. `#8` was not re-read this
   session (Phase 21 already read it in full to confirm no overlap with
   value materialization, which is a different seam than 774's SQL/pushdown
@@ -243,38 +364,48 @@ review exists to check independently; see below for that review's outcome.
 
 ## Deferred / not done this session
 
-1. **Widening past `AverageState`** (`VarianceState`/`QuantileState`/the
+1. **[#19](https://github.com/jeromebanks/cubism-rs/issues/19)
+   (`XUnit`-selector filtering)** — the highest-priority item in this list.
+   `SeriesResponse`/`merge_average_column` merge every row in a window's
+   batch regardless of `xunit_id`, silently over-merging across lattice
+   cells for any real multi-dimensional cube. Not fixed this session
+   (needs `TemporalQuery.selectors` resolved to `XUnitContentId`s against
+   the cube's dimension structure — genuinely more than "one bounded
+   slice"). Whoever picks this up next should read #19's "Suggested next
+   steps" and `crates/cubism-core/src/encoding.rs` before designing.
+2. **Widening past `AverageState`** (`VarianceState`/`QuantileState`/the
    sketch-backed kinds `CountDistinct`/`TopK`/`ReservoirSample`/`Centroid`)
    — not scoped to any milestone yet. Each needs its own merge-primitive
    work analogous to `merge_average_column` before `SeriesResponse` (or a
    sibling type) can carry it. Natural next roadmap extension once a
    concrete consumer needs a non-average measure.
-2. **`cubism-iceberg` dependency promotion to non-dev** — confirmed again
+3. **`cubism-iceberg` dependency promotion to non-dev** — confirmed again
    this session (implicitly, by not needing it) that `SeriesResponse` has
    no reason to call `AggregateReader::read_window` itself; still
    unpromoted. Would only become necessary if a future slice wants
    `SeriesResponse`/a successor to own its own I/O rather than taking
    caller-supplied batches.
-3. **`/api/series` (`crates/cubism-serve`) and plan-Phase 6** — unchanged;
+4. **`/api/series` (`crates/cubism-serve`) and plan-Phase 6** — unchanged;
    not reached by Milestones 7-10b-2. This is the natural next roadmap
    extension now that Phase 5 is narrow-closed: wiring an HTTP handler that
    builds a `TemporalQuery`, resolves windows, and calls
    `SeriesResponse::new`.
-4. **Plan completion-criterion 774** (storage pruning across many windows)
+5. **Plan completion-criterion 774** (storage pruning across many windows)
    and the plan's SQL-table-function unresolved decision — unchanged,
    explicitly excluded from Phase 5's narrow-close, still gated on #8.
-5. **#17** (append-committed-but-not-recorded recovery) — unchanged; not
+6. **#17** (append-committed-but-not-recorded recovery) — unchanged; not
    re-read this session (Phase 19-21 already re-confirmed its state).
-6. **#16** (event-time window identification + recompute-equality proof) —
+7. **#16** (event-time window identification + recompute-equality proof) —
    unchanged; not touched by this session's work.
-7. **#10** (real object store + Iceberg maintenance) — unchanged.
-8. **#11/#12** — unchanged; not touched this session.
-9. **#14** (retry-loop/connection-poisoning gap) — unchanged, still open;
-   not touched this session.
-10. **A successor roadmap slice for what's beyond Phase 5** — with Phase 5
+8. **#10** (real object store + Iceberg maintenance) — unchanged.
+9. **#11/#12** — unchanged; not touched this session.
+10. **#14** (retry-loop/connection-poisoning gap) — unchanged, still open;
+    not touched this session.
+11. **A successor roadmap slice for what's beyond Phase 5** — with Phase 5
     narrow-closed, the natural next step is deciding what the roadmap's own
-    next section covers: `/api/series` (item 3 above), or continuing to
-    widen `SeriesResponse` (item 1), or something else. Not decided this
+    next section covers: #19's `XUnit`-filtering fix (item 1 above, the
+    most consequential gap), `/api/series` (item 4), or continuing to widen
+    `SeriesResponse` past `AverageState` (item 2). Not decided this
     session; left for the next slice's own step 1/advisor call.
 
 ## Worktree state
@@ -287,13 +418,15 @@ this series' established convention):
   `crates/cubism-datafusion/src/series_response.rs`,
   `docs/phase-reviews/TIMESERIES_PHASE_5_REVIEW.md`.
 - Modified: `crates/cubism-datafusion/src/lib.rs` (module declaration +
-  re-export), `crates/cubism-datafusion/src/range_query.rs` (doc comment
-  correction only), `crates/cubism-datafusion/src/series_merge.rs` (doc
-  comment correction only), `crates/cubism-datafusion/tests/iceberg_bridge.rs`
-  (new integration test + import), `docs/TIMESERIES_ROADMAP.md` (Milestone
-  10b-2 added, Milestone 10/10b-1 entries corrected, Phase 5 done-condition
-  walk rewritten), `docs/TIMESERIES_PHASE_21_HANDOFF.md` (added
-  `**Superseded by:**` line).
+  re-export), `crates/cubism-datafusion/src/range_query.rs` (doc-comment
+  correction plus, from step 8a, the `is_exact`/duration-overflow fixes and
+  their two regression tests), `crates/cubism-datafusion/src/series_merge.rs`
+  (doc-comment correction plus the step 8a `XUnit`-filtering caveat, no code
+  change), `crates/cubism-datafusion/tests/iceberg_bridge.rs` (new
+  integration test + import), `docs/TIMESERIES_ROADMAP.md` (Milestone 10b-2
+  added, Milestone 10/10b-1 entries corrected, Phase 5 done-condition walk
+  rewritten twice — once for the slice, once more for step 8a's findings),
+  `docs/TIMESERIES_PHASE_21_HANDOFF.md` (added `**Superseded by:**` line).
 - Untouched: `crates/cubism-core/src`, `crates/cubism-iceberg/src`,
   `crates/cubism-datafusion/src/{build,state_udaf,temporal_build,udaf,udf}.rs`
   (confirmed untouched via `git status` after every verification pass this
@@ -304,22 +437,26 @@ Also present, deliberately uncommitted per prior-session convention:
 `.serena/` (local tooling state), `examples/web_analytics_demo/events.csv`
 (generated demo output).
 
-## Tests (33 passed + 1 ignored in `cubism-iceberg`, unchanged; 63 passed in `cubism-datafusion`, up from 56; 203 passed / 2 ignored in workspace, up from 196)
+## Tests (33 passed + 1 ignored in `cubism-iceberg`, unchanged; 65 passed in `cubism-datafusion`, up from 56; 205 passed / 2 ignored in workspace, up from 196)
 
 All figures re-run fresh this session, not carried forward from Phase 21,
-and re-run a second full time after the doc-comment corrections and
-roadmap edits. `cargo test -p cubism-iceberg` reports 33 passed, 1 ignored
-(6 suites) — identical to Phase 21, expected since no source in that crate
-changed this session. `cargo test -p cubism-datafusion` reports 63 passed
-(3 suites) — up from Phase 21's 56 by exactly the seven new tests (six
-`series_response` unit tests plus the one new integration test). `cargo
-test --workspace --exclude cubism-py` reports 203 passed, 2 ignored (23
-suites) — up from Phase 21's 196 by exactly the same seven.
+across three full battery runs (see "Verification performed" below).
+`cargo test -p cubism-iceberg` reports 33 passed, 1 ignored (6 suites) —
+identical to Phase 21, expected since no source in that crate changed this
+session. `cargo test -p cubism-datafusion` reports 65 passed (3 suites) —
+up from Phase 21's 56 by nine: the seven new tests from the
+`SeriesResponse` slice itself (six `series_response` unit tests plus one
+integration test), plus two more from step 8a's own regression tests
+(`coverage_plan_empty_window_list_is_not_exact`,
+`auto_select_resolution_does_not_overflow_on_extreme_range`, both in
+`range_query.rs`). `cargo test --workspace --exclude cubism-py` reports 205
+passed, 2 ignored (23 suites) — up from Phase 21's 196 by the same nine.
 
 ## Verification performed
 
 ```text
 cargo test -p cubism-datafusion --lib series_response                    # 6 passed
+cargo test -p cubism-datafusion --lib range_query                        # 19 passed (17 prior + 2 new)
 cargo test -p cubism-datafusion --test iceberg_bridge                    # 4 passed (3 prior + 1 new)
 cargo test -p cubism-iceberg                                              # 33 passed, 1 ignored (6 suites)
 cargo test -p cubism-iceberg --test concurrency                           # 4 passed, 1 ignored
@@ -327,17 +464,18 @@ cargo test -p cubism-iceberg --test durability                            # 7 pa
 cargo clippy -p cubism-iceberg --all-targets --no-deps -- -D warnings     # clean
 cargo build -p cubism-cli                                                 # clean
 cargo clippy -p cubism-cli --all-targets --no-deps -- -D warnings        # clean
-cargo test -p cubism-datafusion                                           # 63 passed (3 suites)
+cargo test -p cubism-datafusion                                           # 65 passed (3 suites)
 cargo clippy -p cubism-datafusion --all-targets --no-deps -- -D warnings  # clean
-cargo test --workspace --exclude cubism-py                                # 203 passed, 2 ignored (23 suites)
+cargo test --workspace --exclude cubism-py                                # 205 passed, 2 ignored (23 suites)
 cargo clippy --workspace --exclude cubism-py --all-targets --no-deps -- -D warnings  # clean
 ```
 
-The full battery above was run twice this session: once after the
+The full battery above was run three times this session: once after the
 `series_response.rs`/`lib.rs`/`iceberg_bridge.rs` change; once more after
 the `range_query.rs`/`series_merge.rs` doc-comment corrections and the
-roadmap edits. Both runs produced identical figures and zero warnings.
-Figures shown are from the final run.
+roadmap edits (step 8's own follow-up); and once more after step 8a's own
+`is_exact`/duration-overflow fixes and their regression tests. All three
+runs produced zero warnings; figures shown are from the final run.
 
 ## Primary files
 
@@ -346,18 +484,23 @@ Figures shown are from the final run.
 - [`../crates/cubism-datafusion/src/lib.rs`](../crates/cubism-datafusion/src/lib.rs)
   (module declaration + re-export)
 - [`../crates/cubism-datafusion/src/range_query.rs`](../crates/cubism-datafusion/src/range_query.rs)
-  (module doc comment correction, lines 104-112)
+  (module doc comment correction, lines 104-112; step 8a's `is_exact` fix,
+  lines 368-384; step 8a's duration-overflow fix, lines 272-293)
 - [`../crates/cubism-datafusion/src/series_merge.rs`](../crates/cubism-datafusion/src/series_merge.rs)
-  (module doc comment correction, lines 19-22)
+  (module doc comment correction, lines 19-22; step 8a's `XUnit`-filtering
+  caveat, lines 51-60)
 - [`../crates/cubism-datafusion/tests/iceberg_bridge.rs`](../crates/cubism-datafusion/tests/iceberg_bridge.rs)
   (new integration test, line 437)
 - [`../docs/TIMESERIES_ROADMAP.md`](TIMESERIES_ROADMAP.md) (Milestone
-  10b-2, lines 866-933; "Phase 5 'done' condition," lines 935-984)
+  10b-2, lines 866-958; "Phase 5 'done' condition," lines 959-1040)
 - [`TIMESERIES_PHASE_21_HANDOFF.md`](TIMESERIES_PHASE_21_HANDOFF.md) (prior
   handoff, superseded by this one)
 - [`phase-reviews/TIMESERIES_PHASE_5_REVIEW.md`](phase-reviews/TIMESERIES_PHASE_5_REVIEW.md)
   (this session's step 8a cross-model phase review, the first to run in
   this series)
+- GitHub issue [`#19`](https://github.com/jeromebanks/cubism-rs/issues/19)
+  (`SeriesResponse`/`merge_average_column` merge across `XUnit` cells with
+  no selector filtering — the one step 8a finding not fixed this session)
 - GitHub issue [`#8`](https://github.com/jeromebanks/cubism-rs/issues/8)
   (SQL/pushdown gap — completion-criterion 774 and the SQL-table-function
   unresolved decision stay excluded from Phase 5's narrow-close against

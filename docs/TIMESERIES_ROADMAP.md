@@ -866,7 +866,7 @@ into an observed one before Milestones 8-10 build on it.
 ### Milestone 10b-2 — `SeriesResponse`: wiring `CoveragePlan` to a materialized value
 
 - **Status:** Done. Landed as `cubism_datafusion::series_response::SeriesResponse`
-  (`crates/cubism-datafusion/src/series_response.rs:62-114`), the "wiring"
+  (`crates/cubism-datafusion/src/series_response.rs:86-155`), the "wiring"
   half of the roadmap's deferred "Milestone 10b" note — the half Milestone
   10b-1 (the merge primitive alone) deliberately left undone.
 - **Target:** `crates/cubism-datafusion/src/series_response.rs` (new file).
@@ -909,6 +909,20 @@ into an observed one before Milestones 8-10 build on it.
     gets `is_exact: true` back, with `value: None`/`Some(0.0)` depending on
     `gap_policy` — see "Phase 5 done condition" below, criterion 772, for
     the full statement of this caveat.
+  - **No `XUnit` selector filtering — a real correctness gap, caught by
+    this milestone's own cross-model phase review, tracked as
+    [#19](https://github.com/jeromebanks/cubism-rs/issues/19), not fixed
+    this slice.** `SeriesResponse::new` merges every row in `batches`
+    unconditionally; it has no awareness of `xunit_id` and does not filter
+    to the query's `TemporalQuery.selectors`. A states table row's
+    `xunit_id` is a content hash of one specific lattice cell — the global
+    rollup and each per-dimension cell are separately aggregated rows, not
+    derivable from each other by summing — so a window containing more
+    than one distinct `xunit_id` (the common case for any real
+    multi-dimensional cube) gets silently over-merged regardless of which
+    cell the query asked for. This session's own integration test does not
+    exercise this: each window it constructs has exactly one `xunit_id`
+    row. See #19 for the finding in full and the suggested fix.
 - **What it does:** given a `CoveragePlan` and one already-read batch list
   per segment, decodes+merges each segment's `avg_v1`-style column via
   `merge_average_column` and produces one `SeriesPoint` per segment:
@@ -950,23 +964,33 @@ tracked against an issue rather than treated as blocking, the same pattern
 "Phase 4 done" used for its own criteria 2-4. Milestones 7-10b-2 are all
 `Done` (10 and 10b-1 as narrowed, per their own entries' "Deviations"):
 
-- 772 ("answers exact aligned ranges from aggregate state") — **met as
-  narrowed, `AverageState` only**. `SeriesResponse::new` (Milestone 10b-2)
-  wires `CoveragePlan`'s `published` list to `merge_average_column`
-  (Milestone 10b-1) and produces a real value; the integration test above
-  proves this end-to-end against a real published window, not just
-  in-memory logic. Widening to other measure kinds is not this criterion's
-  literal wording and is left open (see Milestone 10b-2's "Deviations").
-  **Caveat, not a gap in this criterion but worth stating plainly:**
-  `SeriesResponse::new` does not verify that `batches` actually corresponds
-  to the windows `coverage` reports as published — `is_exact: true` is
-  copied straight from `SegmentCoverage::is_exact()`, which reflects only
-  the caller-supplied `published`/`missing` lists. A caller that
-  mis-supplies `batches` (e.g. hands an empty list for a segment it itself
-  reported as published) gets an `is_exact: true` point with no data behind
-  it; the correspondence is entirely the caller's responsibility, same as
-  the segment→`WindowId` mapping `CoveragePlan` already doesn't derive
-  (`series_response.rs`'s own module doc comment records this).
+- 772 ("answers exact aligned ranges from aggregate state") — **not met as
+  literally worded; met only for the single-`XUnit`-cell-per-window case
+  this milestone's own test demonstrates.** `SeriesResponse::new`
+  (Milestone 10b-2) wires `CoveragePlan`'s `published` list to
+  `merge_average_column` (Milestone 10b-1) and produces a real value, but
+  merges every row in a window's batch unconditionally with no filtering
+  by the query's `XUnit` selector — a real correctness gap this milestone's
+  own cross-model phase review caught, tracked as
+  [#19](https://github.com/jeromebanks/cubism-rs/issues/19), not fixed this
+  slice. A window containing more than one distinct lattice cell (the
+  global rollup and each per-dimension cell are separately aggregated
+  rows, not derivable from each other — the common case for any real
+  multi-dimensional cube, not an edge case) gets silently over-merged
+  regardless of which cell the query asked for. Additionally scoped to
+  `AverageState` only — widening to other measure kinds is a separate,
+  not-yet-scoped follow-on (see Milestone 10b-2's "Deviations").
+  **Second, narrower caveat, not itself a further gap in this criterion but
+  worth stating plainly:** `SeriesResponse::new` also does not verify that
+  `batches` actually corresponds to the windows `coverage` reports as
+  published — `is_exact: true` is copied straight from
+  `SegmentCoverage::is_exact()`, which reflects only the caller-supplied
+  `published`/`missing` lists. A caller that mis-supplies `batches` (e.g.
+  hands an empty list for a segment it itself reported as published) gets
+  an `is_exact: true` point with no data behind it; the correspondence is
+  entirely the caller's responsibility, same as the segment→`WindowId`
+  mapping `CoveragePlan` already doesn't derive (`series_response.rs`'s own
+  module doc comment records this).
 - 773 ("partial-boundary behavior is truthful and tested") — met by
   Milestone 10's `exact=true` failure test (both the missing-window and
   the unaligned-but-published cases), unchanged by this milestone.
@@ -998,14 +1022,19 @@ tracked against an issue rather than treated as blocking, the same pattern
   Milestones 7-10b-2 — those are the next roadmap extension, not assumed
   done here.
 
-**Net: Phase 5 as this roadmap defines it (excluding #8, the same way
-"Phase 4 done" excludes #10) is done as of Milestone 10b-2.** Criteria 772
-and 775 are met as narrowed (see their own bullets above for exactly what
-"narrowed" excludes); 773 is met without qualification; 774 and the
-SQL-table-function unresolved decision remain #8's scope, not a gap in
-Milestones 7-10b-2 themselves. Per this series' step 8a
-(`.claude/skills/timeseries-slice/SKILL.md`), landing Milestone 10b-2
-triggers the cross-model phase review — see
+**Net: Phase 5 as this roadmap defines it (excluding #8 and #19, the same
+way "Phase 4 done" excludes #10/#17) is done as of Milestone 10b-2.**
+773 is met without qualification; 775 is met as narrowed (missing
+per-point state/error metadata); 772 is met only for the single-cell case
+this milestone's test demonstrates, with the real multi-cell-merge gap
+tracked as #19, not fixed this slice; 774 and the SQL-table-function
+unresolved decision remain #8's scope. None of these are gaps *in*
+Milestones 7-10b-2's own scope as narrowed — they are real, load-bearing
+gaps in what those milestones answer correctly, tracked rather than
+silently dropped, the same treatment "Phase 4 done" gives #17 (a real,
+unsafe-to-ignore recovery gap) alongside its narrow-close. Per this
+series' step 8a (`.claude/skills/timeseries-slice/SKILL.md`), landing
+Milestone 10b-2 triggers the cross-model phase review — see
 [`docs/phase-reviews/TIMESERIES_PHASE_5_REVIEW.md`](phase-reviews/TIMESERIES_PHASE_5_REVIEW.md)
 for that review's findings and disposition.
 

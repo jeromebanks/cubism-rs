@@ -47,6 +47,17 @@ use datafusion::arrow::datatypes::DataType;
 /// batch's schema, is neither a `Binary` nor a `LargeBinary` array, or a
 /// non-null value fails to decode as an `AverageState` (a corrupt or
 /// wrong-measure-kind blob).
+///
+/// **No `XUnit` filtering — tracked as
+/// [#19](https://github.com/jeromebanks/cubism-rs/issues/19).** Every
+/// non-null blob in every row of `batches` is folded in, with no awareness
+/// of the row's `xunit_id`. A states table can carry rows for more than one
+/// distinct lattice cell in the same window (the global rollup and each
+/// per-dimension cell are separately aggregated rows, not derivable from
+/// each other); this function does not distinguish them. Callers must
+/// pre-filter `batches` to the rows for the cell(s) they actually want
+/// before calling this — nothing here enforces that. See #19 for the
+/// suggested fix.
 pub fn merge_average_column(
     batches: &[RecordBatch],
     column: &str,

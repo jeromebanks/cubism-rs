@@ -90,6 +90,28 @@ impl SeriesResponse {
     /// returns, concatenated across every published window backing the
     /// segment). Mirrors `CoveragePlan::new`'s own `windows` parameter
     /// contract, including the length-mismatch rejection.
+    ///
+    /// **Known correctness gap, caught by a cross-model phase review, not
+    /// fixed this slice — tracked as
+    /// [#19](https://github.com/jeromebanks/cubism-rs/issues/19):** every
+    /// row in `batches` is merged unconditionally, with no filtering by the
+    /// originating query's `XUnit` selector(s). A states table row's
+    /// `xunit_id` column is a content hash of one specific lattice cell
+    /// (`cubism_core::encoding::canonical_xunit_content_id`) — the global
+    /// rollup (`XUnit::global()`) and each per-dimension cell are written as
+    /// their own *separate* rows, not derivable from one another by
+    /// summing. If a window's batch contains more than one distinct
+    /// `xunit_id` (any real multi-dimensional cube, once more than one
+    /// lattice cell has been aggregated into the same window), this
+    /// function silently merges across all of them regardless of which
+    /// cell the query actually asked for — including over-counting a
+    /// global query against its own already-published global row plus
+    /// every other cell's row. This session's own integration test does
+    /// not exercise this: it constructs each window with exactly one
+    /// `xunit_id` row, which sidesteps the bug rather than proving its
+    /// absence. See #19 for the suggested fix (resolve the query's
+    /// selectors to their `XUnitContentId`s and filter `batches` to
+    /// matching rows before merging).
     pub fn new(
         coverage: &CoveragePlan,
         gap_policy: GapPolicy,
