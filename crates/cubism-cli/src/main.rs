@@ -435,7 +435,8 @@ async fn serve(
             } else {
                 PublicationStore::in_memory()
             };
-            let series = cubism_serve::SeriesState::open(spec, &config, publications).await?;
+            let series =
+                cubism_serve::SeriesState::open(spec, &config, publications).await.map_err(|e| e.to_string())?;
             cubism_serve::serve_with_series(store, series, port).await.map_err(|e| e.to_string())
         }
         _ => Err("--spec and --warehouse must be given together, or neither".into()),

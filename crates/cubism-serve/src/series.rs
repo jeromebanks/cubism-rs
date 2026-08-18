@@ -55,6 +55,20 @@ use serde_json::{json, Value};
 
 use crate::api::ApiError;
 
+/// `SeriesState::open`'s error type — typed, matching this workspace's own
+/// convention (`CubeStore::from_path` -> `StoreError`,
+/// `PublicationStore::sqlite` -> `cubism_iceberg`'s own `Result`) rather
+/// than the untyped `String` an earlier draft of this module used.
+#[derive(Debug, thiserror::Error)]
+pub enum SeriesStateError {
+    #[error("cube '{0}' has no temporal spec")]
+    NoTemporalSpec(String),
+    #[error("cannot build states schema: {0}")]
+    Schema(#[from] cubism_datafusion::datafusion::error::DataFusionError),
+    #[error(transparent)]
+    Iceberg(#[from] cubism_iceberg::CubismIcebergError),
+}
+
 /// Everything `/api/series` needs to answer a query: an open Iceberg
 /// catalog, the cube's two temporal tables, the publication/control store,
 /// and the `CubeSpec` (for its `TemporalSpec` and measure list). One
@@ -74,15 +88,13 @@ impl SeriesState {
         spec: CubeSpec,
         catalog_config: &CatalogConfig,
         publications: PublicationStore,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, SeriesStateError> {
         if spec.temporal.is_none() {
-            return Err(format!("cube '{}' has no temporal spec", spec.name));
+            return Err(SeriesStateError::NoTemporalSpec(spec.name));
         }
-        let catalog = open_catalog(catalog_config).await.map_err(|e| e.to_string())?;
-        let schema = temporal_state_schema(&spec).map_err(|e| e.to_string())?;
-        let table = TemporalTable::create(catalog.as_ref(), &spec.name, &schema)
-            .await
-            .map_err(|e| e.to_string())?;
+        let catalog = open_catalog(catalog_config).await?;
+        let schema = temporal_state_schema(&spec)?;
+        let table = TemporalTable::create(catalog.as_ref(), &spec.name, &schema).await?;
         Ok(Self { catalog, table, publications, spec })
     }
 }

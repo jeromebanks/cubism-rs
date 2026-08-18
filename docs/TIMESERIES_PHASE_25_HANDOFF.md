@@ -105,6 +105,26 @@ Supporting changes, all additive:
   session (verified: the `(None, None)` match arm calls the same
   `cubism_serve::serve` the old one-argument function called directly).
 
+**Advisor follow-up (applied in-session, before push, as this series'
+convention prescribes — not a rewrite of the landing work above):**
+`SeriesState::open` originally returned `Result<Self, String>`, off-
+convention next to `CubeStore::from_path` -> `StoreError` and
+`PublicationStore::sqlite` -> `cubism_iceberg`'s own typed `Result`, in a
+crate that already depends on `thiserror`. Replaced with a new
+`SeriesStateError` enum (`NoTemporalSpec`, `Schema` from
+`datafusion::error::DataFusionError`, `Iceberg` from
+`CubismIcebergError`, both via `#[from]`); `cubism-cli`'s one call site
+gained an explicit `.map_err(|e| e.to_string())` to bridge back to its own
+`Result<(), String>`. Also fixed: `crates/cubism-serve/Cargo.toml`'s
+pre-existing `arrow = "58.3"` comment ("must track the arrow version
+DataFusion 54 ships") read as contradicted by this session's own new
+comment on `cubism-datafusion` just below it — resolved by stating plainly
+that both the direct `arrow`/`parquet` deps (real, used by `store.rs`/`api.rs`
+directly, confirmed not redundant with `cubism-datafusion`'s re-export) and
+the version pin (keeping the "one unified arrow version" property
+`cubism-iceberg`'s own top-level doc comment describes true rather than
+accidental) are still load-bearing.
+
 ## What was actually verified
 
 `crates/cubism-serve/tests/series.rs`'s single integration test,
