@@ -22,7 +22,13 @@ was done, per #15's own suggested steps). Phase 5's SQL/pushdown-generality
 half stays gated on [#8](https://github.com/jeromebanks/cubism-rs/issues/8)
 (DataFusion 53/54 convergence for `iceberg-datafusion`'s `TableProvider`);
 its direct-call functional half is not — see "Phase 5 Milestones" for the
-evidence and the boundary between them.
+evidence and the boundary between them. **Plus "POC Milestones"** (added
+2026-08-18, once Phase 4 and Phase 5 above were both narrow-closed): serving,
+demo, and documentation work that makes the now-complete engine legible to
+someone outside this session, not itself part of the implementation plan's
+phase numbering — see that section for why it's named "POC" rather than
+"Phase 6" (plan Phase 6 is rolling comparisons/trend inputs, a different,
+later thing).
 
 ## How `timeseries-slice` step 1 should use this doc
 
@@ -44,18 +50,18 @@ this doc existed:
    one, it doesn't replace the advisor's scope/locking-model check (skill
    step 1, item 3).
 4. **Once every milestone below is marked done** (Phase 4's six plus Phase
-   5's, see "Phase 5 Milestones"), this roadmap's milestone list is
-   exhausted — not the same claim as Phase 4 (`#13`'s scope) or Phase 5
-   being finished; see "Phase 4 done" and "Phase 5 Milestones" below for
-   why (as of Milestone 6 closing, Phase 4 is not: criterion 2 is open via
-   #17, criteria 3-4 are out of this roadmap's scope via #10; Phase 5's own
-   completion criteria are walked in that section). At that point step 1
-   has no more milestones to consult here and should fall back to its
-   original behavior: scan open issues and the latest handoff's deferred
-   list directly, starting with #10 (compaction/retention/object-store,
-   still out of this roadmap's scope) — the Phase 5 fallback this line
-   used to point to is resolved now that Phase 5 has its own milestones
-   below.
+   5's, see "Phase 5 Milestones", plus the "POC Milestones" section), this
+   roadmap's milestone list is exhausted — not the same claim as Phase 4
+   (`#13`'s scope) or Phase 5 being finished; see "Phase 4 done" and "Phase
+   5 Milestones" below for why (as of Milestone 6 closing, Phase 4 is not:
+   criterion 2 is open via #17, criteria 3-4 are out of this roadmap's scope
+   via #10; Phase 5's own completion criteria are walked in that section).
+   At that point step 1 has no more milestones to consult here and should
+   fall back to its original behavior: scan open issues and the latest
+   handoff's deferred list directly, starting with #10
+   (compaction/retention/object-store, still out of this roadmap's scope) —
+   the Phase 5 fallback this line used to point to is resolved now that
+   Phase 5 has its own milestones below.
 
 ## Current state (read before drafting Milestone 1's implementation)
 
@@ -1264,6 +1270,161 @@ Milestone 10b-2 triggered the cross-model phase review that found #19 —
 see
 [`docs/phase-reviews/TIMESERIES_PHASE_5_REVIEW.md`](phase-reviews/TIMESERIES_PHASE_5_REVIEW.md)
 for that review's findings and disposition.
+
+## POC Milestones — serving, demo, and documentation
+
+Added 2026-08-18, once Phase 4 and Phase 5 above were both narrow-closed
+(Milestone 5b and Milestone 10b-3 respectively). Same decomposition
+convention as the milestones above: target file(s), the one test it adds
+(where "test" applies — Milestones 12 and 13 are demo/documentation assets
+and define "done" behaviorally instead), its dependencies, its
+done-condition. **Doc-only when added** — none of the three milestones
+below is implemented yet; every "Status" is `Not started`.
+
+Not part of `docs/TIMESERIES_IMPLEMENTATION_PLAN.md`'s own phase numbering:
+the plan's Phase 6 is rolling comparisons/trend inputs, a later and
+unrelated thing. This section exists because the engine built by Phases 1-5
+(narrowed) has no path to being seen or understood by anyone outside this
+session series — `crates/cubism-serve` (`api.rs`, `store.rs`) has zero
+references to `cubism-iceberg`, `SeriesResponse`, or `CoveragePlan`
+(confirmed via `rtk proxy grep -rl`), `examples/web_analytics_demo` still
+builds through the pre-timeseries static `cubism-cli run` path (its own
+`README.md`), and no single doc walks the pipeline `TIMESERIES_IMPLEMENTATION_PLAN.md`'s
+"Outcome and delivery principles" describes end to end against what's
+actually landed.
+
+**Does not supersede [#20](https://github.com/jeromebanks/cubism-rs/issues/20).**
+#20 (a delayed correction replay can silently undo an intentional rollback)
+remains the highest-priority item on `docs/TIMESERIES_PHASE_24_HANDOFF.md`'s
+deferred list — a real correctness gap needing a design decision, not a
+mechanical fix, and therefore not sized to this series' slice shape. This
+section is a parallel track (making the already-correct engine legible),
+not a claim that correctness work is finished.
+
+**Not 8a-gated.** `.claude/skills/timeseries-slice/SKILL.md` step 8a's
+cross-model phase review fires when a slice closes a roadmap `## Phase N
+"done" condition` section — this section has no such subsection and isn't
+meant to grow one: it isn't one of `TIMESERIES_IMPLEMENTATION_PLAN.md`'s
+phases (see above) and its milestones aren't completion criteria from that
+plan. Ordinary per-slice advisor review (skill step 8) still applies to
+each of the three milestones below, same as everywhere else in this doc.
+
+### Milestone 11 — Minimal `/api/series` wiring in `crates/cubism-serve`
+
+- **Status:** Not started.
+- **Why this is a prerequisite, not scope creep:** Milestone 12's demo needs
+  something to query against; without this, "demo" is a CLI build log (row
+  counts printed by `iceberg-build`), not a dashboard or even a curl-able
+  endpoint. This is the "next roadmap extension" `/api/series` gap already
+  named in "Phase 5 done condition" above.
+- **Target:** `crates/cubism-serve` — a new route handler opening a durable
+  `PublicationStore` + Iceberg catalog from CLI-supplied paths (mirroring
+  `iceberg_build`'s `CatalogConfig::Sqlite` wiring in
+  `crates/cubism-cli/src/main.rs`) and calling
+  `cubism_datafusion::SeriesResponse::new`, at the same narrowed scope
+  Phase 5 already has: single `XUnit` selector, `AverageState` only. Not a
+  general-purpose API — matches what Milestone 10b-3 actually answers
+  correctly, no wider. `cubism-iceberg` moves from `crates/cubism-serve`'s
+  dev-dependencies to a real dependency (it's only a dev-dep today, for
+  `tests/api.rs`'s static-cube fixture via `cubism-datafusion`).
+- **Request-supplied windows, not server-derived ones — a scope decision,
+  not an oversight.** `crates/cubism-datafusion/src/range_query.rs:79-85`
+  records that `CoveragePlan::new`'s segment→`WindowId` mapping is
+  deliberately a caller-supplied input, because no canonical encoding from
+  a `TimeRange`/`Resolution` pair to a `WindowId` exists anywhere in this
+  codebase, and inventing one was already considered and rejected once as
+  "a durable `cubism-core` API decision smuggled into a Phase-5 milestone."
+  Milestone 11 does not relitigate that: the request body carries an
+  explicit per-segment window list (`window_id` + optional revision),
+  mirroring `CoveragePlan::new`'s own contract exactly, and the handler is
+  a thin composition — `TemporalQuery::new` -> `ResolutionPlan::new` ->
+  `CoveragePlan::new(windows from request)` -> `AggregateReader::read_window`
+  per published window -> `SeriesResponse::new`. This pushes bucket->`WindowId`
+  derivation to the caller (Milestone 12's demo build script for its own
+  dataset, not a general rule this milestone establishes).
+- **A request naming a window that was never appended must not read as
+  `is_exact: true` with no data behind it.** `SegmentCoverage::is_exact()`
+  trusts the caller's `published` list, and `SeriesResponse` never
+  re-verifies `batches` against it — both already-documented caveats
+  (Milestone 10's and Milestone 10b-2/10b-3's own entries above). Over HTTP
+  the caller is an untrusted client, which is a new exposure for the same
+  caveat, not a new bug class. In scope for this milestone: an unappended
+  window resolves to `missing`/non-exact via a normal `AggregateReader::read_window`
+  miss, not a 500 and not a falsely-exact point. Out of scope: any broader
+  request validation against catalog state beyond what `read_window`
+  already does.
+- **Test:** an integration test posting a request against a real published
+  window (reuse the `iceberg_bridge.rs` fixture pattern — build, append,
+  publish, then query through the route handler via the raw-TCP `get`
+  helper `crates/cubism-serve/tests/api.rs` already has) asserting the
+  returned response's value and coverage fields, plus one assertion for the
+  never-appended-window case above.
+- **Depends on:** Milestone 10b-3 (`Done`).
+- **Done when:** the tests pass, the full step-4 verification battery is
+  clean, and a manual request against a locally served demo table returns a
+  real value plus `is_exact`/coverage metadata — not just a 200 status.
+
+### Milestone 12 — Time-series web analytics demo
+
+- **Status:** Not started.
+- **Target:** `examples/web_analytics_demo/` — regenerate `events.csv` (or
+  add a variant alongside it) with event timestamps that arrive out of
+  order / late relative to processing time, so the demo actually exercises
+  `LatenessPolicy` and `CorrectionPlan` rather than only the current
+  strictly-in-order dataset; add a build script driving `temporal-build`
+  then `iceberg-build` with `--catalog-db`/`--control-db` (durable mode)
+  instead of the static `cubism-cli run` path the current `README.md`
+  documents; update `site/` or add a small query view that hits Milestone
+  11's endpoint instead of (or alongside) the existing static-cube
+  dashboard.
+- **Owns the bucket->`WindowId` convention Milestone 11 deliberately did
+  not invent.** Because Milestone 11's endpoint takes windows as a request
+  parameter rather than deriving them, this milestone's build script must
+  pick its own deterministic mapping (e.g. one window per day, `WindowId`
+  = the bucket's start date) and use that same mapping on both sides: the
+  `--window-id` values passed to `iceberg-build` per bucket, and the
+  window list the demo's query view sends to `/api/series`. This is
+  demo-local, not a codebase-wide convention — the open question Milestone
+  11's entry cites stays open.
+- **Test:** none in the workspace `cargo test` sense — this milestone
+  produces a demo asset, not library code. "Done" is defined behaviorally
+  below instead, the same way Milestone 11 is not exempt from a done
+  condition just because it isn't a unit test.
+- **Depends on:** Milestone 11.
+- **Done when:** `examples/web_analytics_demo/README.md` documents a run,
+  reproducible from a clean checkout, that (a) ingests events including at
+  least one late-arriving correction, (b) publishes at least two window
+  revisions for the same `window_id`, visibly showing the revision bump,
+  and (c) serves a real query through Milestone 11's endpoint that returns
+  a value plus `is_exact`/coverage metadata reflecting the correction.
+- **Note:** the current dataset's `time` dimension (`web_analytics.yaml`'s
+  `week`/`day` levels) is a static lattice dimension, not event-time
+  bucketing — this milestone's regenerated data and build path are what
+  make it a time-series demo rather than a relabeling of the existing one.
+
+### Milestone 13 — Time-series architecture and implementation documentation
+
+- **Status:** Not started.
+- **Target:** a new `docs/TIMESERIES_ARCHITECTURE.md` (name provisional)
+  covering the full `observed event -> allowed sparse XUnits -> event-time
+  bucket -> versioned mergeable aggregate state -> immutable Iceberg window
+  revision -> atomically published range-query visibility` pipeline from
+  `TIMESERIES_IMPLEMENTATION_PLAN.md`'s "Outcome and delivery principles" —
+  but written as a synthesis of what is actually built (Phases 1-5,
+  narrowed, plus Milestones 11-12 once landed) rather than the plan's
+  forward-looking spec. The plan describes intent and stays the
+  authoritative spec (same relationship this roadmap doc already has to
+  it, per its own opening paragraph); this new doc describes what's true
+  today, cross-linked to the specific phase handoffs and milestone entries
+  that landed each piece, so a reader isn't required to read all 24+
+  handoffs to reconstruct the architecture.
+- **Test:** none — documentation.
+- **Depends on:** none functionally (the architecture it describes already
+  exists), but should be written after Milestone 12 lands so it can use the
+  demo as a worked example rather than a hypothetical one.
+- **Done when:** a reader unfamiliar with this session series can trace a
+  single event from ingestion through to a served query answer using this
+  doc alone, without reading every phase handoff to do it.
 
 ## Deferred (not in scope for this roadmap doc)
 
