@@ -11,7 +11,15 @@
 //!     --registry-input <registry.parquet> --window-id <id> --revision <n>
 //!     --run-id <id> --warehouse <path>
 //!     [--catalog-db <path> --control-db <path>]
+//! cubism serve <cube.parquet> [--port 8080]
+//!     [--spec <spec.yaml> --warehouse <path> [--catalog-db <path> --control-db <path>]]
 //! ```
+//!
+//! `serve`'s `--spec`/`--warehouse` pair is optional and, when given,
+//! additionally serves `/api/series` against that cube's Iceberg-backed
+//! temporal tables (`docs/TIMESERIES_ROADMAP.md`'s Milestone 11) alongside
+//! the static-cube routes `<cube.parquet>` already provides. Same
+//! `--catalog-db`/`--control-db` durability switch as `iceberg-build`.
 //!
 //! `iceberg-build` creates the tables (if needed), claims, appends,
 //! publishes, and reads the published rows back — all in one process. This
@@ -46,7 +54,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "usage:\n  cubism validate <spec.yaml>\n  cubism run <spec.yaml> --input <events.parquet|csv> [--output cube.parquet] [--show N]\n  cubism temporal-build <spec.yaml> --input <events.parquet|csv> [--window-start <RFC3339>] [--window-end <RFC3339>] [--states-output <path> --registry-output <path>] [--null-policy reject|quarantine] [--explain]\n  cubism iceberg-build <spec.yaml> --states-input <path> --registry-input <path> --window-id <id> --revision <n> --run-id <id> --warehouse <path> [--catalog-db <path> --control-db <path>]\n  cubism serve <cube.parquet> [--port 8080]";
+const USAGE: &str = "usage:\n  cubism validate <spec.yaml>\n  cubism run <spec.yaml> --input <events.parquet|csv> [--output cube.parquet] [--show N]\n  cubism temporal-build <spec.yaml> --input <events.parquet|csv> [--window-start <RFC3339>] [--window-end <RFC3339>] [--states-output <path> --registry-output <path>] [--null-policy reject|quarantine] [--explain]\n  cubism iceberg-build <spec.yaml> --states-input <path> --registry-input <path> --window-id <id> --revision <n> --run-id <id> --warehouse <path> [--catalog-db <path> --control-db <path>]\n  cubism serve <cube.parquet> [--port 8080] [--spec <spec.yaml> --warehouse <path> [--catalog-db <path> --control-db <path>]]";
 
 fn load_spec(path: &str) -> Result<CubeSpec, String> {
     let yaml = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -390,9 +398,48 @@ async fn iceberg_build(
     Ok(())
 }
 
-async fn serve(cube_path: &str, port: u16) -> Result<(), String> {
+/// `--spec`/`--warehouse` (plus optionally `--catalog-db`/`--control-db`,
+/// same durability switch `iceberg-build` uses) also serve `/api/series`
+/// against that cube's temporal tables, alongside the static-cube routes
+/// `cube_path` already provides. Without them, behaves exactly as before —
+/// static-cube serving only (`docs/TIMESERIES_ROADMAP.md`'s Milestone 11).
+#[allow(clippy::too_many_arguments)]
+async fn serve(
+    cube_path: &str,
+    port: u16,
+    spec_path: Option<&str>,
+    warehouse: Option<&str>,
+    catalog_db: Option<&str>,
+    control_db: Option<&str>,
+) -> Result<(), String> {
     let store = cubism_serve::CubeStore::from_path(cube_path).map_err(|e| e.to_string())?;
-    cubism_serve::serve(store, port).await.map_err(|e| e.to_string())
+    match (spec_path, warehouse) {
+        (None, None) => cubism_serve::serve(store, port).await.map_err(|e| e.to_string()),
+        (Some(spec_path), Some(warehouse)) => {
+            let spec = load_spec(spec_path)?;
+            let durable = catalog_db.is_some() || control_db.is_some();
+            let (catalog_db, control_db) = match (catalog_db, control_db) {
+                (Some(c), Some(p)) => (c, p),
+                _ if durable => {
+                    return Err("--catalog-db and --control-db must both be given, or neither".into());
+                }
+                _ => ("", ""),
+            };
+            let config = if durable {
+                CatalogConfig::Sqlite { warehouse: PathBuf::from(warehouse), catalog_db: PathBuf::from(catalog_db) }
+            } else {
+                CatalogConfig::Memory { warehouse: PathBuf::from(warehouse) }
+            };
+            let publications = if durable {
+                PublicationStore::sqlite(std::path::Path::new(control_db)).await.map_err(|e| e.to_string())?
+            } else {
+                PublicationStore::in_memory()
+            };
+            let series = cubism_serve::SeriesState::open(spec, &config, publications).await?;
+            cubism_serve::serve_with_series(store, series, port).await.map_err(|e| e.to_string())
+        }
+        _ => Err("--spec and --warehouse must be given together, or neither".into()),
+    }
 }
 
 #[tokio::main]
@@ -402,6 +449,10 @@ async fn main() -> ExitCode {
         Some("validate") if args.len() == 2 => validate(&args[1]),
         Some("serve") if args.len() >= 2 => {
             let mut port = 8080u16;
+            let mut spec_path = None;
+            let mut warehouse = None;
+            let mut catalog_db = None;
+            let mut control_db = None;
             let mut flag_err = None;
             let mut i = 2;
             while i < args.len() {
@@ -410,13 +461,27 @@ async fn main() -> ExitCode {
                         Ok(p) => port = p,
                         Err(_) => flag_err = Some(format!("--port expects a number, got '{v}'")),
                     },
+                    ("--spec", Some(v)) => spec_path = Some(v.clone()),
+                    ("--warehouse", Some(v)) => warehouse = Some(v.clone()),
+                    ("--catalog-db", Some(v)) => catalog_db = Some(v.clone()),
+                    ("--control-db", Some(v)) => control_db = Some(v.clone()),
                     (flag, _) => flag_err = Some(format!("unknown or incomplete flag '{flag}'")),
                 }
                 i += 2;
             }
             match flag_err {
                 Some(e) => Err(e),
-                None => serve(&args[1], port).await,
+                None => {
+                    serve(
+                        &args[1],
+                        port,
+                        spec_path.as_deref(),
+                        warehouse.as_deref(),
+                        catalog_db.as_deref(),
+                        control_db.as_deref(),
+                    )
+                    .await
+                }
             }
         }
         Some("run") if args.len() >= 2 => {

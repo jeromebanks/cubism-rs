@@ -105,7 +105,12 @@ fn fixed_resolution(temporal: &TemporalSpec) -> Result<FixedResolution> {
 /// in the Phase 0B benchmark harness, extended to per-measure names since a
 /// general spec (unlike that harness's fixed sum/count/kmv trio) can declare
 /// several measures.
-fn measure_column_name(measure: &MeasureSpec) -> String {
+///
+/// `pub` since `docs/TIMESERIES_ROADMAP.md`'s Milestone 11: `crates/cubism-serve/src/series.rs`
+/// resolves a request's measure name to its states-table column the same
+/// way this module does when building the schema, rather than
+/// re-implementing the naming rule at the call site.
+pub fn measure_column_name(measure: &MeasureSpec) -> String {
     format!("{}_v{}", measure.name, measure.state.version.get())
 }
 

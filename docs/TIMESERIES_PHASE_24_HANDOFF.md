@@ -50,7 +50,12 @@ already narrow-closed by `docs/TIMESERIES_PHASE_22_HANDOFF.md`'s session and
 tightened further by `docs/TIMESERIES_PHASE_23_HANDOFF.md`'s, unchanged by
 this one.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`docs/TIMESERIES_PHASE_25_HANDOFF.md`](TIMESERIES_PHASE_25_HANDOFF.md) —
+landed Milestone 11 (`/api/series` wiring), the first milestone of a new
+"POC Milestones" roadmap section added that session (per an explicit user
+request, not picked from this doc's own deferred list below). This
+doc's own deferred list stays otherwise live: `#20` (item 1) is still that
+session's own top pick for whichever slice comes after Milestones 12-13.
 
 ## What this session built
 

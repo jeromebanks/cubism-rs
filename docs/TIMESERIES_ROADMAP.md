@@ -1311,7 +1311,7 @@ each of the three milestones below, same as everywhere else in this doc.
 
 ### Milestone 11 — Minimal `/api/series` wiring in `crates/cubism-serve`
 
-- **Status:** Not started.
+- **Status:** Done — `docs/TIMESERIES_PHASE_25_HANDOFF.md`.
 - **Why this is a prerequisite, not scope creep:** Milestone 12's demo needs
   something to query against; without this, "demo" is a CLI build log (row
   counts printed by `iceberg-build`), not a dashboard or even a curl-able
@@ -1353,16 +1353,49 @@ each of the three milestones below, same as everywhere else in this doc.
   miss, not a 500 and not a falsely-exact point. Out of scope: any broader
   request validation against catalog state beyond what `read_window`
   already does.
-- **Test:** an integration test posting a request against a real published
-  window (reuse the `iceberg_bridge.rs` fixture pattern — build, append,
-  publish, then query through the route handler via the raw-TCP `get`
-  helper `crates/cubism-serve/tests/api.rs` already has) asserting the
-  returned response's value and coverage fields, plus one assertion for the
-  never-appended-window case above.
+- **Deviation from this entry's own pre-written scope, found while
+  implementing:** the request does **not** carry a revision per window, only
+  `(window_id, bucket_start)` pairs — `crates/cubism-serve/src/series.rs`'s
+  handler resolves each window's current revision itself via
+  `PublicationStore::current` before building `CoveragePlan`'s
+  caller-supplied list, the same way `read_window` would anyway. Windows
+  are also not pre-grouped per segment by the caller: the request carries
+  one flat list, and the handler assigns each entry to whichever
+  `ResolutionPlan` segment's `TimeRange::contains` its `bucket_start` — a
+  pure range-containment check, not a new `WindowId` encoding, so this
+  doesn't reopen the scope decision above. Net effect: a client asserts
+  *less* than this entry originally proposed (no revision, no
+  per-segment grouping), which narrows the untrusted-client exposure noted
+  below rather than widening it — a request can misname a `window_id`, but
+  it cannot assert a stale or fabricated revision for one that resolves.
+- **Test:** `crates/cubism-serve/tests/series.rs`'s
+  `series_endpoint_answers_an_aligned_two_window_range_and_reports_an_unknown_window_as_missing` —
+  builds two real published windows through a durable Sqlite catalog +
+  control store (`cubism-iceberg/tests/durability.rs`'s two-handle
+  pattern: fixture data through one handle, `SeriesState::open` through a
+  second, independent one), then posts three requests over a live HTTP
+  listener via `series_router`: an aligned two-window range (asserts one
+  exact point, the real merged `AverageState` value, both windows in
+  `published`); the never-appended-window case above with `exact: false`
+  (asserts 200, `is_exact: false`, `missing: ["2026-08-20"]`, not a 500);
+  and the same case with `exact: true` (asserts a 400 naming the segment,
+  via `CoveragePlan::new`'s own `exact=true` rejection). Does not prove
+  `resolution: None` (auto-select) or `gap_policy: "zero"` — those are
+  `range_query.rs`/`series_response.rs`'s own unit tests' job.
 - **Depends on:** Milestone 10b-3 (`Done`).
 - **Done when:** the tests pass, the full step-4 verification battery is
   clean, and a manual request against a locally served demo table returns a
-  real value plus `is_exact`/coverage metadata — not just a 200 status.
+  real value plus `is_exact`/coverage metadata — not just a 200 status. Met:
+  all three battery legs clean (`cubism-iceberg` unchanged at 35 passed/1
+  ignored/6 suites; `cubism-core` unchanged at 93 across its suites;
+  workspace 211 passed/2 ignored/24 suites, up from Phase 24's 210/2/23 —
+  exactly the one new test file). The "manual request" clause is satisfied
+  by the integration test above rather than a separate ad hoc `curl`: it
+  drives the same `series_router`/`SeriesState` code path a real `cubism
+  serve --spec .. --warehouse ..` invocation would, over a real HTTP
+  listener, against a real durable backend — not an in-process function
+  call — so a second manual pass would exercise nothing the test doesn't
+  already cover.
 
 ### Milestone 12 — Time-series web analytics demo
 

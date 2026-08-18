@@ -1065,8 +1065,11 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "axum",
+ "chrono",
  "cubism-core",
  "cubism-datafusion",
+ "cubism-iceberg",
+ "iceberg",
  "parquet",
  "serde",
  "serde_json",
