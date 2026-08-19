@@ -1543,28 +1543,37 @@ each of the three milestones below, same as everywhere else in this doc.
 
 ### Milestone 13 — Time-series architecture and implementation documentation
 
-- **Status:** Not started.
-- **Target:** a new `docs/TIMESERIES_ARCHITECTURE.md` (name provisional)
-  covering the full `observed event -> allowed sparse XUnits -> event-time
-  bucket -> versioned mergeable aggregate state -> immutable Iceberg window
-  revision -> atomically published range-query visibility` pipeline from
-  `TIMESERIES_IMPLEMENTATION_PLAN.md`'s "Outcome and delivery principles" —
-  but written as a synthesis of what is actually built (Phases 1-5,
-  narrowed, plus Milestones 11-12a-12b once landed) rather than the plan's
-  forward-looking spec. The plan describes intent and stays the
-  authoritative spec (same relationship this roadmap doc already has to
-  it, per its own opening paragraph); this new doc describes what's true
-  today, cross-linked to the specific phase handoffs and milestone entries
-  that landed each piece, so a reader isn't required to read all 24+
-  handoffs to reconstruct the architecture.
+- **Status:** Done — `docs/TIMESERIES_PHASE_28_HANDOFF.md`.
+- **Target:** `docs/TIMESERIES_ARCHITECTURE.md` — the full `observed event
+  -> allowed sparse XUnits -> event-time bucket -> versioned mergeable
+  aggregate state -> immutable Iceberg window revision -> atomically
+  published range-query visibility` pipeline from
+  `TIMESERIES_IMPLEMENTATION_PLAN.md`'s "Outcome and delivery principles",
+  plus a seventh hop (served HTTP answer, Milestones 11-12b) the plan's
+  own contract doesn't include. Written as a synthesis of what is actually
+  built, not the plan's forward-looking spec — every claim cites either a
+  source file (grep'd fresh while writing the doc) or a handoff's "What
+  was actually verified" section. One worked example (Milestone 12b's
+  `evt_000261`, window `2026-04-07`, `avg_revenue` `0.0` -> `1.6638655462184875`)
+  is traced through all seven stages at full depth; every measure kind,
+  selector shape, and gap the worked example doesn't touch gets one line
+  and a cross-link instead of its own section — advisor's explicit
+  recommendation for keeping "trace one event end to end" bounded without
+  leaving the done-condition half-satisfiable the way a stage-by-stage
+  split would have.
 - **Test:** none — documentation.
 - **Depends on:** none functionally (the architecture it describes already
-  exists), but should be written after Milestones 12a and 12b land (split
-  from the original single "Milestone 12" — see those entries) so it can
-  use the demo as a worked example rather than a hypothetical one.
+  exists), but written after Milestones 12a and 12b landed (split from the
+  original single "Milestone 12" — see those entries) so it could use the
+  demo as a worked example rather than a hypothetical one.
 - **Done when:** a reader unfamiliar with this session series can trace a
   single event from ingestion through to a served query answer using this
-  doc alone, without reading every phase handoff to do it.
+  doc alone, without reading every phase handoff to do it. Met: the worked
+  example above does exactly this, end to end, with every stage's claim
+  independently citation-checked against the current source (not copied
+  from an earlier session's citations — several had drifted, see the
+  handoff's own "What was actually verified" section for the two caught
+  and fixed while writing).
 
 ## Deferred (not in scope for this roadmap doc)
 

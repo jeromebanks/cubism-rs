@@ -50,7 +50,9 @@ resolution collapses to one merged point (Milestone 11's own test
 demonstrates this), which would blur exactly the before/after delta this
 milestone exists to show.
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_28_HANDOFF.md`, which picked up
+this doc's deferred item 2 (Milestone 13) and landed it — closing the
+roadmap's tracked milestone list at 18/18.
 
 ## What this session built
 
