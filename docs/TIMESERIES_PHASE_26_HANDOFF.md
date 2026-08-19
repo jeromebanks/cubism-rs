@@ -167,6 +167,18 @@ sensible way — this session verified the *revision bump mechanism*, not
 the resulting value; Milestone 12b's query view is what will surface the
 actual before/after numbers.
 
+**Two claims this README/roadmap entry make were independently checked,
+not just asserted, per the follow-up advisor pass after the first commit:**
+"reproducible from a clean checkout" was verified by running
+`build_temporal_demo.sh` a second time from `/tmp` (not the repo root) —
+identical output, exit code 0, confirming the script's own `cd
+"$(dirname "$0")"` makes it cwd-independent rather than accidentally
+working only because every prior run happened from the repo root.
+"Deterministic (seeded)" was verified by running
+`generate_temporal_events.py` twice with identical arguments to separate
+output paths and comparing `shasum` — both the full and initial CSVs
+matched byte-for-byte across the two runs.
+
 Since this slice touches no `.rs` file, the standard test-count claims are
 **unchanged from Phase 25**: `cargo test -p cubism-iceberg` reports 35
 passed, 1 ignored (6 suites); `cargo test -p cubism-core` reports 83
@@ -232,7 +244,7 @@ series' established convention).
   entry), `docs/TIMESERIES_PHASE_25_HANDOFF.md` (`Superseded by` line
   added), `docs/handoff_latest.md` (symlink retarget).
 - Untouched: every crate under `crates/` — this slice changed no `.rs`
-  file, confirmed via `git status` after every step this session.
+  file, confirmed via `git status` before staging and after commit.
 
 Also present, deliberately uncommitted: `.serena/` (local tooling state,
 prior-session convention); `examples/web_analytics_demo/events.csv` (the

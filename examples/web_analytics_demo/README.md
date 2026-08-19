@@ -77,8 +77,9 @@ This single script:
 3. prints the resulting `control_runs`/`control_publications` rows for
    that window directly from the sqlite control store.
 
-Captured output from a real run (`git log` for the commit this was
-captured in):
+Verbatim output from `build_temporal_demo.sh`'s own final `sqlite3` step,
+captured from a real run (re-run it yourself to confirm — the generator
+is seeded, so the numbers below reproduce exactly):
 
 ```text
 == control_runs rows for window 2026-04-07 (revision bump) ==
