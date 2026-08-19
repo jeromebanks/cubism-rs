@@ -1,0 +1,27 @@
+# Time-series variant of web_analytics.yaml (`docs/TIMESERIES_ROADMAP.md`
+# Milestone 12a). apiVersion v1 (the original spec) rejects a `temporal`
+# section outright, so this is a separate file rather than an edit to
+# web_analytics.yaml — the static demo keeps working unchanged against its
+# own spec and events.csv.
+#
+# Narrowed on purpose to match what `crates/cubism-serve`'s /api/series
+# (Milestone 11) actually answers: one XUnit dimension (`geo`), one
+# AverageState measure (`avg_revenue`). Not a general-purpose replacement
+# for web_analytics.yaml's richer dimension/measure set.
+apiVersion: cubism/v2alpha1
+name: northstar_web_analytics_temporal
+dimensions:
+  - name: geo
+    levels: [country]
+measures:
+  - name: avg_revenue
+    agg: avg
+    input: revenue
+includeGlobal: true
+temporal:
+  eventTime: timestamp
+  baseResolution: 1d
+  origin: unix
+  timezone: UTC
+  allowedLateness: 2h
+  rollups: []

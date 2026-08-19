@@ -41,7 +41,9 @@ prerequisite (12 needs something to query; 13 wants 12 as a worked
 example), and this series' own sizing convention is one bounded slice per
 session, not three.
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_26_HANDOFF.md` — picked up this
+doc's deferred item 2 (Milestone 12), and found before implementing that
+it needed splitting into 12a/12b first; landed 12a.
 
 ## What this session built
 

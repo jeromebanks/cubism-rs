@@ -1399,7 +1399,16 @@ each of the three milestones below, same as everywhere else in this doc.
 
 ### Milestone 12 — Time-series web analytics demo
 
-- **Status:** Not started.
+- **Status:** Superseded before implementation by **Milestone 12a** and
+  **Milestone 12b** below (added 2026-08-18, same session as this entry —
+  found not to be one bounded slice before any code was written, same
+  "10b turned out not to be one bounded slice" pattern as Milestone 10's
+  own deviations section). 12a covers this entry's done-condition clauses
+  (a) and (b) (late-arriving data ingested, two published window
+  revisions); 12b covers clause (c) (a real `/api/series` query
+  reflecting the correction). The text below is kept as the original,
+  unsplit scope for the historical record — see 12a/12b for what actually
+  landed/remains.
 - **Target:** `examples/web_analytics_demo/` — regenerate `events.csv` (or
   add a variant alongside it) with event timestamps that arrive out of
   order / late relative to processing time, so the demo actually exercises
@@ -1435,6 +1444,85 @@ each of the three milestones below, same as everywhere else in this doc.
   bucketing — this milestone's regenerated data and build path are what
   make it a time-series demo rather than a relabeling of the existing one.
 
+### Milestone 12a — Time-series demo dataset and durable build showing a revision bump
+
+- **Status:** Done — `docs/TIMESERIES_PHASE_26_HANDOFF.md`.
+- **Why split from Milestone 12:** the advisor step-1 review (this
+  session) found Milestone 12 as originally written was not one bounded
+  slice — three independent done-condition clauses spanning a Python
+  generator, a build script, and `site/` wiring, cross-language and
+  multi-deliverable, unlike every prior slice's "one integration test plus
+  supporting code" sizing. Split into 12a (this entry: clauses (a) and
+  (b), no code beyond a spec/generator/script, no Rust changes) and 12b
+  below (clause (c): the `/api/series` query view).
+- **Target:** `examples/web_analytics_demo/` — a new
+  `web_analytics_temporal.yaml` (`apiVersion: cubism/v2alpha1`, one `geo`
+  dimension, one `avg_revenue` `Avg` measure — matches Milestone 11's own
+  narrowing: single `XUnit` selector, `AverageState` only); a new
+  `generate_temporal_events.py` (separate from the static demo's
+  `generate_events.py`, which is untouched) producing a small (~1,000-row,
+  3-day) event stream plus a "held back" variant simulating a late
+  arrival; `build_temporal_demo.sh` driving `temporal-build` +
+  `iceberg-build` (durable mode) once per day, twice for the middle day.
+- **Does not exercise `LatenessPolicy` or `CorrectionPlan` — a scope
+  narrowing found while implementing, not in the original Milestone 12
+  text above.** `iceberg-build` never consults `temporal.allowedLateness`,
+  and `CorrectionCoordinator` is not in this script's call path
+  (confirmed via `rtk proxy grep -rn "CorrectionPlan\|CorrectionCoordinator\|LatenessPolicy"
+  crates/cubism-cli/src`, no matches in executable code). The revision
+  bump is produced by re-running the build over a fuller event set with a
+  manually-supplied `--revision 2`, not by any policy/coordinator
+  deciding to admit late data. This demonstrates *what a landed
+  correction looks like*, not the admission-policy machinery — see
+  `examples/web_analytics_demo/README.md`'s own "What this does and does
+  not prove" note.
+- **Owns the bucket->`WindowId` convention Milestone 11 deliberately did
+  not invent** (same note as original Milestone 12's text): one window
+  per day, `WindowId` = the bucket's start date (`2026-04-06`,
+  `2026-04-07`, `2026-04-08`).
+- **Test:** none in the workspace `cargo test` sense — a demo asset, not
+  library code, same as Milestone 12's own "Test" bullet already noted.
+  "Done" is a captured, reproducible command transcript instead (see
+  `examples/web_analytics_demo/README.md`'s "Time-series variant"
+  section) — this entry's own verification is that transcript, not an
+  unchanged `cargo test` count.
+- **Depends on:** Milestone 11 (`Done`).
+- **Done when:** `build_temporal_demo.sh`, run from a clean checkout,
+  (a) ingests events including 6 late-arriving `signup_completed` rows for
+  window `2026-04-07`, and (b) publishes that window at revision 1 then
+  revision 2, with the control store's `control_runs`/`control_publications`
+  tables showing both revisions `published` and the current pointer moved
+  to revision 2. Met — verbatim captured output in
+  `examples/web_analytics_demo/README.md`; full step-4 battery re-run and
+  clean (unchanged counts throughout: no `.rs` file touched).
+
+### Milestone 12b — Query view onto Milestone 12a's demo, hitting `/api/series`
+
+- **Status:** Not started.
+- **Target:** `examples/web_analytics_demo/site/` (or a small standalone
+  script/README section, whichever turns out cheaper) issuing a real
+  `/api/series` request (Milestone 11) against Milestone 12a's durable
+  build, before and after the revision-2 correction, and showing the
+  returned value change alongside `is_exact`/coverage metadata. Needs a
+  `cubism serve --spec web_analytics_temporal.yaml --warehouse
+  .temporal_build/warehouse --catalog-db .temporal_build/catalog.sqlite
+  --control-db .temporal_build/control.sqlite` process (Milestone 11's CLI
+  wiring) running against 12a's output.
+- **Owns the request's `windows` list** (Milestone 11's flat
+  `(window_id, bucket_start)` list, per that entry's own deviation note):
+  at minimum `{"window_id": "2026-04-07", "bucket_start": <2026-04-07T00:00:00Z
+  in micros>}`, `resolution: "1d"`, `selector: "/G"`, `measure:
+  "avg_revenue"`.
+- **Test:** none — demo/documentation, same as 12a.
+- **Depends on:** Milestone 12a (`Done`).
+- **Done when:** a captured request/response pair (curl or equivalent)
+  against a `cubism serve --spec .. --warehouse ..` process shows
+  `avg_revenue`'s value differing between a query made against revision 1
+  and one made after revision 2 was published, both with `is_exact: true`
+  and the window's real revision in `published` — proving Milestone 12's
+  original clause (c) (a real query reflecting the correction) rather
+  than asserting it from the control-store rows alone.
+
 ### Milestone 13 — Time-series architecture and implementation documentation
 
 - **Status:** Not started.
@@ -1444,7 +1532,7 @@ each of the three milestones below, same as everywhere else in this doc.
   revision -> atomically published range-query visibility` pipeline from
   `TIMESERIES_IMPLEMENTATION_PLAN.md`'s "Outcome and delivery principles" —
   but written as a synthesis of what is actually built (Phases 1-5,
-  narrowed, plus Milestones 11-12 once landed) rather than the plan's
+  narrowed, plus Milestones 11-12a-12b once landed) rather than the plan's
   forward-looking spec. The plan describes intent and stays the
   authoritative spec (same relationship this roadmap doc already has to
   it, per its own opening paragraph); this new doc describes what's true
@@ -1453,8 +1541,9 @@ each of the three milestones below, same as everywhere else in this doc.
   handoffs to reconstruct the architecture.
 - **Test:** none — documentation.
 - **Depends on:** none functionally (the architecture it describes already
-  exists), but should be written after Milestone 12 lands so it can use the
-  demo as a worked example rather than a hypothetical one.
+  exists), but should be written after Milestones 12a and 12b land (split
+  from the original single "Milestone 12" — see those entries) so it can
+  use the demo as a worked example rather than a hypothetical one.
 - **Done when:** a reader unfamiliar with this session series can trace a
   single event from ingestion through to a served query answer using this
   doc alone, without reading every phase handoff to do it.
