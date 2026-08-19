@@ -40,9 +40,8 @@ before writing the script rather than reasoning about them:
    revision 1, a second, independent `iceberg-build` invocation published
    revision 2 while the server stayed up, and the very next `/api/series`
    request against that same server returned `published: [{"revision":
-   2, ...}]` — no restart needed. `SeriesState` re-resolves the control
-   store's `current` pointer per request rather than caching it at open
-   time. This decided the script's shape: one server, two builds
+   2, ...}]` and the corrected value — no restart needed. This decided
+   the script's shape: one server, two builds
    interleaved around two queries.
 
 Advisor also flagged: use the single-window request (`window_id:

@@ -1395,7 +1395,13 @@ each of the three milestones below, same as everywhere else in this doc.
   serve --spec .. --warehouse ..` invocation would, over a real HTTP
   listener, against a real durable backend — not an in-process function
   call — so a second manual pass would exercise nothing the test doesn't
-  already cover.
+  already cover **at the `series_router`/`SeriesState` layer**. It does
+  not cover `cubism-cli`'s own `serve` subcommand — argument parsing, the
+  `--spec`/`--warehouse` durability wiring in `crates/cubism-cli/src/main.rs`,
+  or the CLI's separate, always-required `cube_path` argument — since the
+  test never runs that binary. Milestone 12b (below) does run it, as a
+  real process, and is what actually found the `cube_path` requirement
+  this entry's text doesn't mention.
 
 ### Milestone 12 — Time-series web analytics demo
 
@@ -1508,10 +1514,10 @@ each of the three milestones below, same as everywhere else in this doc.
   since `/api/series` never reads it but `CubeStore::from_path` still
   requires a real `xunit`-column parquet), POSTs `/api/series`, builds
   revision 2 against the same running server, and POSTs again.
-- **Confirmed empirically before writing the script, not assumed:** a
-  `cubism serve` process answers a second request with the newly
-  published revision with no restart — it re-resolves the control store's
-  `current` pointer per request rather than caching it at open time.
+- **Confirmed empirically before writing the script, not assumed:** the
+  next request against an already-running `cubism serve` process returns
+  the newly published revision and the corrected value, with no process
+  restart in between.
 - **Owns the request's `windows` list** (Milestone 11's flat
   `(window_id, bucket_start)` list, per that entry's own deviation note):
   `{"window_id": "2026-04-07", "bucket_start": 1775520000000000}`,

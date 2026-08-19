@@ -141,6 +141,12 @@ than depend on the *static* demo's `web_analytics_cube.parquet`
 would silently fail from a clean checkout), this script writes its own
 throwaway one-row placeholder parquet into `.temporal_build/`.
 
+**Requires `pyarrow`** (`pip install pyarrow`) to write that placeholder
+parquet — the only non-stdlib Python dependency anywhere in this demo
+(`generate_events.py` and `generate_temporal_events.py` are both stdlib-
+only). Also requires `python3`, `curl`, and `sqlite3` on `PATH`, same as
+`build_temporal_demo.sh`.
+
 Verbatim output from a real run (re-run it yourself to confirm — the
 generator is seeded, so the request/response pair reproduces exactly;
 `snapshot`/timing values in the build steps above it will differ run to
@@ -158,12 +164,17 @@ run, but are not part of what this section proves):
 `1.6638655462184875` once the 6 held-back `signup_completed` events are
 included — every revenue-bearing event that day happened to be among the
 6 chosen as "late" by the generator's seed, so revision 1 has zero
-revenue rows in view (not a bug, a property of this seed). Both responses
+revenue rows in view (not a bug, a property of this seed). `0.0` here is
+a real average over revenue-free rows, not a masked empty read: Milestone
+11's own integration test shows what an empty/unknown-window read
+actually looks like over this API — `value: null`, `is_exact: false` —
+which is a different shape than what's captured above. Both responses
 report `is_exact: true` and the correct real revision in `published`,
 same server process throughout — the second query was answered without a
-restart, because the running process re-resolves the control store's
-`current` pointer per request rather than caching it at startup (verified
-empirically before writing this script, not assumed).
+restart: this session confirmed empirically, before writing the script,
+that the next request against an already-running `cubism serve` process
+returns the newly published revision and the corrected value, with no
+process restart in between.
 
 **What this does and does not prove:** a real HTTP client querying
 `avg_revenue` before and after Milestone 12a's revision bump sees the

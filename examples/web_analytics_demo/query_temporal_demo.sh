@@ -87,6 +87,11 @@ trap 'kill "$SERVE_PID" 2>/dev/null; wait "$SERVE_PID" 2>/dev/null || true' EXIT
 
 echo "== waiting for the server to accept connections =="
 for _ in $(seq 1 50); do
+  if ! kill -0 "$SERVE_PID" 2>/dev/null; then
+    echo "server process exited before becoming ready -- see $OUT/serve.log" >&2
+    cat "$OUT/serve.log" >&2
+    exit 1
+  fi
   if curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then
     break
   fi
