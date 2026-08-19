@@ -1,8 +1,9 @@
 # Time-Series Architecture
 
 Status: describes what is actually built on `feature/timeseries-phase-0a`
-as of `docs/TIMESERIES_PHASE_27_HANDOFF.md` (Milestone 12b). This is
-Milestone 13 in `docs/TIMESERIES_ROADMAP.md`'s "POC Milestones" section.
+as of `docs/TIMESERIES_PHASE_28_HANDOFF.md`, the session that wrote this
+doc (Milestone 13, `docs/TIMESERIES_ROADMAP.md`'s "POC Milestones"
+section).
 
 This doc has one job: let a reader unfamiliar with this session series
 trace a single event from ingestion through to a served query answer,
@@ -107,6 +108,17 @@ own module doc comment (lines 1-16) states it generates "the *same*
 row-local XUnits the static path would (same `level_columns`/
 `cubism_xunit_keys` UDF, same lattice/rules code in `cubism-core`)".
 
+Concretely, for this spec (one `geo`/`country` dimension, `includeGlobal:
+true`): `evt_000261` lands in exactly two cells, the global rollup `/G`
+and the per-country cell `/geo/country=DE` — confirmed empirically by
+reading window `2026-04-07`'s own registry parquet
+(`examples/web_analytics_demo/.temporal_build/registry_2026-04-07_r1.parquet`),
+which contains six distinct canonical `XUnit`s total: the global rollup
+plus one per-country cell for each of the demo's five countries (`AU`,
+`CA`, `DE`, `GB`, `US`). This is the concrete fact Stage 6's selector
+filtering (below) depends on: a query for `/G` alone must not silently
+average across the other five per-country cells too.
+
 ## Stage 3: event-time bucket
 
 `evt_000261`'s `timestamp` field is evaluated as the spec's
@@ -133,9 +145,13 @@ decided to admit them based on lateness. `LatenessPolicy`
 (`crates/cubism-core/src/temporal.rs`, Milestone 1) and `CorrectionPlan`
 (`crates/cubism-iceberg/src/correction.rs`, Milestone 3) both exist and
 are tested, but nothing wires either into the CLI build path this demo
-drives — that gap is
-[#20](https://github.com/jeromebanks/cubism-rs/issues/20), the
-highest-priority open item in this series.
+drives — that's the "Public API: submit/schedule a correction" bullet
+[#13](https://github.com/jeromebanks/cubism-rs/issues/13) still lists as
+open scope, not a separate untracked gap. (Not
+[#20](https://github.com/jeromebanks/cubism-rs/issues/20) — that issue is
+a specific replay bug in `CorrectionCoordinator::execute`'s own CAS call,
+a different defect from "nothing calls `execute` outside its own tests"
+in the first place.)
 
 ## Stage 4: versioned mergeable aggregate state
 
@@ -147,11 +163,13 @@ authoritative merge state (the module's own doc comment, lines 1-5).
 `encode`/`decode`, lines 164-172) that every measure kind implements;
 `AverageState::encode` writes a 3-byte magic (`AVG`,
 `aggregate_state.rs:176`), a 1-byte format version (line 179), then the
-raw `sum`/`count` bytes (lines 255-262) — framing with no negotiated
-capability handshake, i.e. a reader either recognizes the magic+version
-or fails typed, never guesses
-([#9](https://github.com/jeromebanks/cubism-rs/issues/9) tracks widening
-this). The temporal build (`crates/cubism-datafusion/src/temporal_build.rs`)
+raw `sum`/`count` bytes (lines 255-262) — a reader either recognizes the
+magic+version or fails typed, never guesses. What this framing does
+*not* have: a checksum of the payload bytes, so it detects an
+unrecognized version but not corruption of an otherwise-recognized one —
+tracked as [#9](https://github.com/jeromebanks/cubism-rs/issues/9), open
+since Phase 3, not yet decided whether it's worth the byte-layout change.
+The temporal build (`crates/cubism-datafusion/src/temporal_build.rs`)
 runs this accumulation per `(bucket, xunit)` group via a DataFusion state
 UDAF, emits Arrow batches sorted by `(bucket_start, xunit_id)`
 (`temporal_state_schema`, line 139), and separately builds an
@@ -282,6 +300,27 @@ what `cubism-cli`'s `serve` subcommand
 subcommand's build-side counterparts, invoked by name at lines 513 and
 577.
 
+This is the actual `POST /api/series` request the worked example sends —
+note the `windows` list's flat `(window_id, bucket_start)` shape, the
+concrete form of Stage 3's "this convention is owned by the caller, not
+`cubism-core`" claim:
+
+```json
+{"selector":"/G","measure":"avg_revenue","start":1775520000000000,"end":1775606400000000,"resolution":"1d","exact":false,"gap_policy":"missing","windows":[{"window_id":"2026-04-07","bucket_start":1775520000000000}]}
+```
+
+The two responses, same request, same running server, only the control
+store's state between them changed (verbatim, re-captured this session
+via `query_temporal_demo.sh`, not copied from an earlier session):
+
+```json
+{"cube":"northstar_web_analytics_temporal","measure":"avg_revenue","points":[{"bucket_end":1775606400000000,"bucket_start":1775520000000000,"is_exact":true,"missing":[],"published":[{"revision":1,"window_id":"2026-04-07"}],"value":0.0}],"source_resolution":"1d"}
+```
+
+```json
+{"cube":"northstar_web_analytics_temporal","measure":"avg_revenue","points":[{"bucket_end":1775606400000000,"bucket_start":1775520000000000,"is_exact":true,"missing":[],"published":[{"revision":2,"window_id":"2026-04-07"}],"value":1.6638655462184875}],"source_resolution":"1d"}
+```
+
 **Confirmed empirically for the worked example, not assumed:** the
 running `cubism serve` process answered the "after" query with the newly
 published revision and the corrected value on the very next request,
@@ -310,7 +349,7 @@ real explanation.
 
 | Gap | Where it's real | Tracking |
 |---|---|---|
-| `LatenessPolicy`/`CorrectionPlan` not wired into any CLI build path | Stage 3 above | [#20](https://github.com/jeromebanks/cubism-rs/issues/20) |
+| `LatenessPolicy`/`CorrectionPlan` not wired into any CLI build path | Stage 3 above | [#13](https://github.com/jeromebanks/cubism-rs/issues/13) ("Public API" bullet) |
 | Only `AverageState` reachable via `/api/series` | Stage 4, Stage 6 above | `docs/TIMESERIES_ROADMAP.md`'s Milestone 10b-2 "Deviations" |
 | Range reads don't semijoin every published window's manifest | Stage 6 above (774) | [#8](https://github.com/jeromebanks/cubism-rs/issues/8) |
 | Exactly one `XUnit` selector per query, no multi-selector shape | Stage 6 above | `docs/TIMESERIES_ROADMAP.md:1242-1247` (unresolved decision) |

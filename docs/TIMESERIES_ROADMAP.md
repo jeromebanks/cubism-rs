@@ -56,6 +56,11 @@ this doc existed:
    5 Milestones" below for why (as of Milestone 6 closing, Phase 4 is not:
    criterion 2 is open via #17, criteria 3-4 are out of this roadmap's scope
    via #10; Phase 5's own completion criteria are walked in that section).
+   (Corrected: criterion 2 is now **Met** — Milestone 5b fixed #17, see
+   "Phase 4 done condition" below. As of Milestone 13 landing, Phase 4 as
+   this roadmap defines it has been done since Milestone 5b; the only
+   still-open criteria are 3-4, out of scope via #10 by design, not a gap
+   this roadmap tracks toward.)
    At that point step 1 has no more milestones to consult here and should
    fall back to its original behavior: scan open issues and the latest
    handoff's deferred list directly, starting with #10
