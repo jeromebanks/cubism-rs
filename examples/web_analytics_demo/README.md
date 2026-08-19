@@ -108,5 +108,68 @@ script's call path at all. The "late" event is simply absent from
 demo simulates *what a late correction looks like once it has already
 arrived and been rebuilt*, not the policy machinery that would decide
 whether to admit it. Querying the corrected value back out over HTTP
-(`/api/series`) is Milestone 12b's job, not this one's — see
-`docs/TIMESERIES_ROADMAP.md` for that entry.
+(`/api/series`) is Milestone 12b's job — see the next section.
+
+## Query view (`docs/TIMESERIES_ROADMAP.md` Milestone 12b)
+
+`build_temporal_demo.sh` above proves the revision bump landed in the
+control store. This script proves it's visible to a real client: it
+builds window `2026-04-07` at revision 1 (the initial, late-events-held-
+back stream), starts a real `cubism serve --spec .. --warehouse ..`
+process, POSTs `/api/series`, then builds revision 2 (the full stream)
+**against that same running server** and POSTs the identical request
+again.
+
+```bash
+# From the cubism/ directory:
+./examples/web_analytics_demo/query_temporal_demo.sh
+```
+
+This script is self-contained — it does not require
+`build_temporal_demo.sh` to have run first, and builds only window
+`2026-04-07` (both revisions), not the two ordinary days. Both scripts
+share the `.temporal_build/` output directory; each does its own `rm -rf`
+at the top, so the last one run "wins" as that directory's current state
+(same ephemeral-output convention Milestone 12a established).
+
+`cubism serve` requires a positional `cube_path` argument even when only
+`--spec`/`--warehouse` (the `/api/series` routes) are wanted —
+`CubeStore::from_path` still requires a real parquet with an `xunit`
+column, though nothing in `/api/series`'s own handler reads it. Rather
+than depend on the *static* demo's `web_analytics_cube.parquet`
+(untracked — only present if that demo has been built locally, which
+would silently fail from a clean checkout), this script writes its own
+throwaway one-row placeholder parquet into `.temporal_build/`.
+
+Verbatim output from a real run (re-run it yourself to confirm — the
+generator is seeded, so the request/response pair reproduces exactly;
+`snapshot`/timing values in the build steps above it will differ run to
+run, but are not part of what this section proves):
+
+```text
+== /api/series BEFORE the correction (window 2026-04-07 at revision 1) ==
+{"cube":"northstar_web_analytics_temporal","measure":"avg_revenue","points":[{"bucket_end":1775606400000000,"bucket_start":1775520000000000,"is_exact":true,"missing":[],"published":[{"revision":1,"window_id":"2026-04-07"}],"value":0.0}],"source_resolution":"1d"}
+
+== /api/series AFTER the correction (window 2026-04-07 at revision 2, same server, no restart) ==
+{"cube":"northstar_web_analytics_temporal","measure":"avg_revenue","points":[{"bucket_end":1775606400000000,"bucket_start":1775520000000000,"is_exact":true,"missing":[],"published":[{"revision":2,"window_id":"2026-04-07"}],"value":1.6638655462184875}],"source_resolution":"1d"}
+```
+
+`avg_revenue` for `/G` on window `2026-04-07` moves from `0.0` to
+`1.6638655462184875` once the 6 held-back `signup_completed` events are
+included — every revenue-bearing event that day happened to be among the
+6 chosen as "late" by the generator's seed, so revision 1 has zero
+revenue rows in view (not a bug, a property of this seed). Both responses
+report `is_exact: true` and the correct real revision in `published`,
+same server process throughout — the second query was answered without a
+restart, because the running process re-resolves the control store's
+`current` pointer per request rather than caching it at startup (verified
+empirically before writing this script, not assumed).
+
+**What this does and does not prove:** a real HTTP client querying
+`avg_revenue` before and after Milestone 12a's revision bump sees the
+value change, both times `is_exact: true` with the correct revision
+reported. It does not prove anything about concurrent requests racing a
+publish (the read-after-plan non-atomicity `crate::series`'s own module
+doc comment already documents), about resolutions other than `1d`, or
+about any selector other than the global `/G` rollup — narrower than a
+real client would use, matching Milestone 11's own narrowing.

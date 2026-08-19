@@ -48,7 +48,10 @@ changes at all; 12b (still `Not started`) is the `/api/series` query view
 on top of it. This slice has **no `.rs` file changes** — see "What was
 actually verified" below for what that means for the step-4 battery.
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_27_HANDOFF.md`, which picked up
+this doc's deferred item 2 (Milestone 12b) and landed it, also satisfying
+deferred item 4 (a real CLI end-to-end smoke test for `cubism serve
+--spec .. --warehouse ..`).
 
 ## What this session built
 

@@ -1498,21 +1498,27 @@ each of the three milestones below, same as everywhere else in this doc.
 
 ### Milestone 12b — Query view onto Milestone 12a's demo, hitting `/api/series`
 
-- **Status:** Not started.
-- **Target:** `examples/web_analytics_demo/site/` (or a small standalone
-  script/README section, whichever turns out cheaper) issuing a real
-  `/api/series` request (Milestone 11) against Milestone 12a's durable
-  build, before and after the revision-2 correction, and showing the
-  returned value change alongside `is_exact`/coverage metadata. Needs a
-  `cubism serve --spec web_analytics_temporal.yaml --warehouse
-  .temporal_build/warehouse --catalog-db .temporal_build/catalog.sqlite
-  --control-db .temporal_build/control.sqlite` process (Milestone 11's CLI
-  wiring) running against 12a's output.
+- **Status:** Done — `docs/TIMESERIES_PHASE_27_HANDOFF.md`.
+- **Target:** `examples/web_analytics_demo/query_temporal_demo.sh` (a
+  standalone script, not `site/` wiring — cheaper, and does not require
+  `build_temporal_demo.sh` to have run first): builds window `2026-04-07`
+  at revision 1, starts a real `cubism serve --spec .. --warehouse ..`
+  process (the CLI's required positional `cube_path` argument satisfied
+  with a throwaway one-row placeholder parquet the script writes itself,
+  since `/api/series` never reads it but `CubeStore::from_path` still
+  requires a real `xunit`-column parquet), POSTs `/api/series`, builds
+  revision 2 against the same running server, and POSTs again.
+- **Confirmed empirically before writing the script, not assumed:** a
+  `cubism serve` process answers a second request with the newly
+  published revision with no restart — it re-resolves the control store's
+  `current` pointer per request rather than caching it at open time.
 - **Owns the request's `windows` list** (Milestone 11's flat
   `(window_id, bucket_start)` list, per that entry's own deviation note):
-  at minimum `{"window_id": "2026-04-07", "bucket_start": <2026-04-07T00:00:00Z
-  in micros>}`, `resolution: "1d"`, `selector: "/G"`, `measure:
-  "avg_revenue"`.
+  `{"window_id": "2026-04-07", "bucket_start": 1775520000000000}`,
+  `resolution: "1d"`, `selector: "/G"`, `measure: "avg_revenue"` — the
+  single-window form, not a wider range (a multi-day range at `1d`
+  resolution collapses to one merged point, which would blur the before/
+  after delta this milestone exists to show).
 - **Test:** none — demo/documentation, same as 12a.
 - **Depends on:** Milestone 12a (`Done`).
 - **Done when:** a captured request/response pair (curl or equivalent)
@@ -1521,7 +1527,13 @@ each of the three milestones below, same as everywhere else in this doc.
   and one made after revision 2 was published, both with `is_exact: true`
   and the window's real revision in `published` — proving Milestone 12's
   original clause (c) (a real query reflecting the correction) rather
-  than asserting it from the control-store rows alone.
+  than asserting it from the control-store rows alone. Met: `avg_revenue`
+  for `/G` on window `2026-04-07` moves from `0.0` (revision 1 — every
+  revenue-bearing event that day happened to be among the 6 held back by
+  this seed) to `1.6638655462184875` (revision 2), both responses
+  `is_exact: true` with the correct revision in `published`. Verbatim
+  transcript in `examples/web_analytics_demo/README.md`'s "Query view"
+  section.
 
 ### Milestone 13 — Time-series architecture and implementation documentation
 
