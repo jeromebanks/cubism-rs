@@ -398,10 +398,14 @@ async fn coordinator_skips_a_redundant_append_when_the_run_was_already_appended(
 /// original `Publication` — same `revision` *and* `aggregate_snapshot_id`
 /// — not an error. This is Milestone 5's own idempotent-replay contract
 /// (`ReconciliationRecord::Published`'s doc comment), which the #20 guard
-/// must preserve exactly. Before this test, no integration test replayed
-/// `execute` against an already-`Published` run at all (the append-skip
-/// test above leaves the run `Appended`, not `Published`) — so this is new
-/// coverage, not a regression check on existing behavior.
+/// must preserve exactly. This specific benign shape is not entirely new
+/// coverage — `tests/durability.rs`'s
+/// `sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a_published_run_after_reopen`'s
+/// "Leg 2" already replays `execute` against an already-`Published` run on
+/// the SQLite backend across a restart — but this is the first coverage of
+/// it in this file, against the in-memory backend, with no restart
+/// involved (isolating the #20 guard's own logic from durability/restart
+/// concerns, which is that other test's job).
 #[tokio::test]
 async fn coordinator_replaying_a_published_correction_with_nothing_changed_returns_the_same_publication() {
     let window_id = WindowId::new("2026-08-12").unwrap();

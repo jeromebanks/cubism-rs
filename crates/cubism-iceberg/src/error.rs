@@ -58,9 +58,9 @@ pub enum CubismIcebergError {
     UnsupportedCorrectionStrategy(crate::correction::CorrectionStrategy),
 
     #[error(
-        "run '{run_id}' (window '{window_id}', revision {revision}) already published, but is no longer window \
-         '{window_id}''s current revision (found {current:?}) — refusing to replay its correction request \
-         rather than risk resurrecting a superseded or rolled-back-past revision"
+        "run '{run_id}' (window '{window_id}', revision {revision}) already published, but is no longer that \
+         window's current revision (found {current:?}) — refusing to replay its correction request rather \
+         than risk resurrecting a superseded or rolled-back-past revision"
     )]
     RunNoLongerCurrent {
         run_id: String,

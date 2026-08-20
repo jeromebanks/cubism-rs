@@ -78,6 +78,15 @@ step 8a that need more than "one bounded slice" to resolve correctly (the
 same disposition Phase 5's own review gave `#19` before its later,
 separate fix).
 
+**(Corrected: #20 is resolved as of `docs/TIMESERIES_PHASE_29_HANDOFF.md`
+— `execute` now live-checks a `Published` run's revision against
+`PublicationStore::current` before this same final publish call and
+returns a new `CubismIcebergError::RunNoLongerCurrent` instead of
+republishing when something else has moved `current` since. That fix
+found and deliberately scoped out a sibling gap for a run still
+`AwaitingPublish`, filed separately as
+[#21](https://github.com/jeromebanks/cubism-rs/issues/21).)**
+
 **[P2] — fixed this session, follow-up commit.** Verified by reading
 `temporal.rs:490-492` directly: `LatenessPolicy::classify` computes
 `bucket_end.unix_micros() + self.allowed.micros()` as a plain `i64`

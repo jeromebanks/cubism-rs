@@ -59,7 +59,7 @@ would read as nonsense.
 tests:
 
 1. `coordinator_rejects_a_replayed_correction_after_a_rollback_restored_its_observed_current`
-   (line 475) — reproduces `#20`'s exact bug shape end to end: publish
+   (line 479) — reproduces `#20`'s exact bug shape end to end: publish
    revision A, correct to revision B (moving `current` to B), roll back to
    A via the existing CAS `publish` mechanism
    (`docs/TIMESERIES_PHASE_13_HANDOFF.md`, not new code), then replay the
@@ -68,15 +68,19 @@ tests:
    `RunNoLongerCurrent { revision: 2, current: Some(1), .. }` instead of
    silently republishing B, and that `current` is still A afterward.
 2. `coordinator_replaying_a_published_correction_with_nothing_changed_returns_the_same_publication`
-   (line 406) — the benign side: replaying `execute` against an
+   (line 410) — the benign side: replaying `execute` against an
    already-`Published` run when nothing else has touched `current` must
    still return the identical `Publication` (same `revision` and
    `aggregate_snapshot_id`), preserving Milestone 5's idempotent-replay
-   contract. No existing integration test replayed `execute` against an
-   already-`Published` run before this session — the closest prior test,
-   `coordinator_skips_a_redundant_append_when_the_run_was_already_appended`,
-   leaves the run `Appended`, not `Published` — so this is new coverage,
-   not a re-proof of something already covered.
+   contract. This exact benign shape already had coverage before this
+   session — `tests/durability.rs`'s
+   `sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a_published_run_after_reopen`'s
+   "Leg 2" replays `execute` against an already-`Published` run on the
+   SQLite backend across a restart. What's new here is coverage in
+   `tests/coordinator.rs` against the in-memory backend, isolating the
+   #20 guard's own logic from that other test's restart/durability
+   concerns — not the first test to exercise a `Published`-run replay at
+   all, a claim this handoff's first draft made in error.
 
 ## What was actually verified
 
@@ -91,6 +95,12 @@ benign-replay test's assertion is on both `revision` and
 `aggregate_snapshot_id` specifically (not just success/failure), so it
 would catch a fix that accidentally performed a second append or a
 different publish path on replay, not just one that happened to error.
+The full suite re-run (below) includes `tests/durability.rs`'s own
+Published-replay coverage (`sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a_published_run_after_reopen`'s
+"Leg 2"), which passed unchanged — that's independent evidence the #20
+guard's benign path (fall through when `current` still equals the run's
+own revision) also holds on the SQLite backend across a real restart, not
+just the in-memory backend the two new tests above use.
 
 **What this does not prove:**
 
