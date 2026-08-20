@@ -130,9 +130,15 @@ use crate::writer::{AggregateWriter, AppendWindow};
 ///   revision can retake `current` while this run's own `RunState` still
 ///   reads `Published`, unchanged, because rollback never touches the
 ///   run it rolls back past
-///   ([issue #18](https://github.com/jeromebanks/cubism-rs/issues/18)). Use
-///   [`RunInspection::inspect`] for a live cross-check against `current`
-///   rather than trusting this variant standalone.
+///   ([issue #18](https://github.com/jeromebanks/cubism-rs/issues/18)).
+///   **Resolved for `execute` itself by [issue #20](https://github.com/jeromebanks/cubism-rs/issues/20)'s
+///   fix:** `execute` now performs this live cross-check against `current`
+///   before its final publish call and refuses the replay
+///   ([`CubismIcebergError::RunNoLongerCurrent`]) rather than trusting this
+///   variant standalone — see `execute`'s own doc comment. A caller
+///   inspecting a run's status *without* going through `execute` still
+///   needs [`RunInspection::inspect`] for the same live cross-check; this
+///   variant alone remains insufficient outside of `execute`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconciliationRecord {
     NotStarted,
@@ -264,6 +270,18 @@ impl CorrectionCoordinator {
     ///
     /// A rejected CAS (`Err(CubismIcebergError::StaleRevision)`) is returned
     /// to the caller as-is, with no retry — see the module doc comment.
+    ///
+    /// **[Issue #20](https://github.com/jeromebanks/cubism-rs/issues/20):**
+    /// if the run is already [`ReconciliationRecord::Published`], `execute`
+    /// live-checks that its revision is still the window's `current` one
+    /// before touching `publish` again, and returns
+    /// [`CubismIcebergError::RunNoLongerCurrent`] instead of calling
+    /// `publish` if something else (a later correction, or a rollback) has
+    /// since moved `current` away from it — see the implementation comment
+    /// at that check for the ABA replay it closes. This does not cover the
+    /// same shape against a run still `AwaitingPublish` (crashed before its
+    /// own publish); that's a distinct, deferred gap, tracked as
+    /// [#21](https://github.com/jeromebanks/cubism-rs/issues/21).
     pub async fn execute(
         catalog: &dyn Catalog,
         temporal_table: &TemporalTable,
@@ -286,7 +304,9 @@ impl CorrectionCoordinator {
             )
             .await?;
 
-        if let ReconciliationRecord::AwaitingAppend { .. } = ReconciliationRecord::classify(Some(claim.state())) {
+        let record = ReconciliationRecord::classify(Some(claim.state()));
+
+        if let ReconciliationRecord::AwaitingAppend { .. } = record {
             // #17: `Claimed` is ambiguous between "never appended" and
             // "appended, but crashed before `record_append`." Ask Iceberg's
             // own committed state directly, rather than assuming the
@@ -325,6 +345,39 @@ impl CorrectionCoordinator {
                 }
             };
             publications.record_append(request.run_id, snapshot_id).await?;
+        }
+
+        // #20: a `Published` `RunState` alone does not prove this run's
+        // revision is still the window's live `current` one — a rollback
+        // (`docs/TIMESERIES_PHASE_13_HANDOFF.md`) can repoint `current` back
+        // to exactly this request's `observed_current` without touching
+        // this run's own `RunState`. Blindly falling through to the CAS
+        // publish below in that case is a classic ABA: `current` went
+        // A -> B -> A, so a stale replay of the original request (still
+        // carrying `observed_current: A`) passes the CAS a second time and
+        // silently republishes B, undoing the rollback. Read `current`
+        // live and require it still be this run's own revision before
+        // proceeding; if a later correction or a rollback moved `current`
+        // to anything else since, refuse rather than guess which way to
+        // resolve it — that's a decision for the caller, not this replay.
+        // (Live-checking here, not calling `RunInspection::inspect`, since
+        // this function already holds the `RunState` `claim_run` returned;
+        // re-reading it through `inspect` risks observing a different one.)
+        //
+        // This closes the gap only for a run already `Published`. The same
+        // A -> B -> A shape against a run still `AwaitingPublish` (crashed
+        // before its own publish) is not covered — deliberately deferred,
+        // tracked as #21, not silently out of scope.
+        if let ReconciliationRecord::Published { revision, .. } = record {
+            let current = publications.current(&temporal_table.cube_id, request.window_id).await?;
+            if current != Some(revision) {
+                return Err(CubismIcebergError::RunNoLongerCurrent {
+                    run_id: request.run_id.to_string(),
+                    window_id: request.window_id.as_str().to_string(),
+                    revision: revision.get(),
+                    current: current.map(WindowRevision::get),
+                });
+            }
         }
 
         publications.publish(request.run_id, Some(request.observed_current)).await

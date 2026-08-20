@@ -47,7 +47,11 @@ doesn't — the "POC Milestones" section states outright it isn't
 8a-gated, `docs/TIMESERIES_ROADMAP.md:1304-1310`, and Milestone 13 closes
 no `## Phase N "done" condition` section).
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_29_HANDOFF.md` — picked up this
+handoff's deferred-list item 2 (the roadmap's tracked milestones being
+exhausted, falling back to the open-issue scan) and fixed
+[#20](https://github.com/jeromebanks/cubism-rs/issues/20), this handoff's
+deferred-list item 1 and the top-priority open issue at the time.
 
 ## What this session built
 

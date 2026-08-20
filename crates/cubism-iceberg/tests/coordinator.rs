@@ -391,3 +391,151 @@ async fn coordinator_skips_a_redundant_append_when_the_run_was_already_appended(
     let read = fixture.read(&window_id).await.unwrap();
     assert_eq!(total_rows(&read), 2, "a retried append-skip path must not duplicate rows");
 }
+
+/// Proves the benign side of `coordinator.rs`'s #20 fix: replaying
+/// `execute` for a run that is already `Published`, with nothing else
+/// having changed `current` in the meantime, must still return the
+/// original `Publication` — same `revision` *and* `aggregate_snapshot_id`
+/// — not an error. This is Milestone 5's own idempotent-replay contract
+/// (`ReconciliationRecord::Published`'s doc comment), which the #20 guard
+/// must preserve exactly. Before this test, no integration test replayed
+/// `execute` against an already-`Published` run at all (the append-skip
+/// test above leaves the run `Appended`, not `Published`) — so this is new
+/// coverage, not a regression check on existing behavior.
+#[tokio::test]
+async fn coordinator_replaying_a_published_correction_with_nothing_changed_returns_the_same_publication() {
+    let window_id = WindowId::new("2026-08-12").unwrap();
+    let fixture = Fixture::new().await;
+
+    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
+
+    let corrected_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 9, 9.0)])];
+    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    let build_request = || CorrectionRequest {
+        window_id: &window_id,
+        revision: WindowRevision::new(2).unwrap(),
+        run_id: "run-correction",
+        observed_current: WindowRevision::new(1).unwrap(),
+        kinds: &[AggKind::Sum],
+        states: &corrected_states,
+        registry: &corrected_registry,
+    };
+
+    let first = CorrectionCoordinator::execute(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        &fixture.publications,
+        build_request(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.revision, WindowRevision::new(2).unwrap());
+
+    // Replay with the identical request. `run-correction`'s `RunState` is
+    // already `Published`, and `current` still equals its own revision —
+    // no rollback, no later correction — so the #20 live-current guard
+    // must let this through exactly as before the fix.
+    let replay = CorrectionCoordinator::execute(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        &fixture.publications,
+        build_request(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(replay.revision, first.revision);
+    assert_eq!(
+        replay.aggregate_snapshot_id, first.aggregate_snapshot_id,
+        "an identical replay of an already-published correction must return the same publication, \
+         not perform a second append or CAS"
+    );
+}
+
+/// Reproduces issue #20's exact bug shape and proves the fix: a delayed
+/// replay of a correction request must not silently undo an intentional
+/// rollback that happened in between.
+///
+/// Sequence (matching the issue's own numbered steps): window `W` starts
+/// at revision A (`run-initial`). A correction publishes revision B
+/// (`run-correction`), moving `current` to B. An operator rolls back by
+/// republishing `run-initial` with `expected_current: Some(B)`, moving
+/// `current` back to A — `run-correction`'s own `RunState` is untouched by
+/// this, still `Published`. The *original* correction request for
+/// `run-correction` (still carrying `observed_current: A` from when it was
+/// first submitted) is then replayed through `execute` — before the #20
+/// fix, `current == A == observed_current` would pass the CAS a second
+/// time and silently republish B, reversing the rollback with no error.
+///
+/// This does **not** exercise the `AwaitingPublish` variant of the same
+/// shape (a run that crashed before its own publish) — that gap is
+/// deliberately out of scope for this fix, tracked as #21.
+#[tokio::test]
+async fn coordinator_rejects_a_replayed_correction_after_a_rollback_restored_its_observed_current() {
+    let window_id = WindowId::new("2026-08-12").unwrap();
+    let fixture = Fixture::new().await;
+
+    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
+    assert_eq!(fixture.publications.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(1).unwrap()));
+
+    // The correction: revision B, moving `current` from A (1) to B (2).
+    let corrected_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 9, 9.0)])];
+    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    let original_request = || CorrectionRequest {
+        window_id: &window_id,
+        revision: WindowRevision::new(2).unwrap(),
+        run_id: "run-correction",
+        observed_current: WindowRevision::new(1).unwrap(),
+        kinds: &[AggKind::Sum],
+        states: &corrected_states,
+        registry: &corrected_registry,
+    };
+    let published = CorrectionCoordinator::execute(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        &fixture.publications,
+        original_request(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(published.revision, WindowRevision::new(2).unwrap());
+    assert_eq!(fixture.publications.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+
+    // The rollback: republish `run-initial` (revision A) via the same CAS
+    // `publish` call, expecting the current B — the existing, already-
+    // shipped rollback mechanism (`docs/TIMESERIES_PHASE_13_HANDOFF.md`),
+    // not new code under test here.
+    fixture.publications.publish("run-initial", Some(WindowRevision::new(2).unwrap())).await.unwrap();
+    assert_eq!(
+        fixture.publications.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(1).unwrap()),
+        "rollback should have restored current to revision A"
+    );
+
+    // The delayed replay: same run_id, same revision, same
+    // `observed_current: A` as the original submission above — `current`
+    // is A again too, but only because of the rollback, not because
+    // nothing happened. Before the #20 fix this would pass the CAS check
+    // a second time and silently republish B.
+    let error = CorrectionCoordinator::execute(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        &fixture.publications,
+        original_request(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CubismIcebergError::RunNoLongerCurrent { revision: 2, current: Some(1), .. }
+    ));
+
+    assert_eq!(
+        fixture.publications.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(1).unwrap()),
+        "a rejected replay must not undo the rollback — current must stay at revision A"
+    );
+}

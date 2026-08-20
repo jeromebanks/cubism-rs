@@ -56,6 +56,18 @@ pub enum CubismIcebergError {
         "correction strategy {0:?} is not yet implemented by CorrectionCoordinator (no current AggKind selects it)"
     )]
     UnsupportedCorrectionStrategy(crate::correction::CorrectionStrategy),
+
+    #[error(
+        "run '{run_id}' (window '{window_id}', revision {revision}) already published, but is no longer window \
+         '{window_id}''s current revision (found {current:?}) — refusing to replay its correction request \
+         rather than risk resurrecting a superseded or rolled-back-past revision"
+    )]
+    RunNoLongerCurrent {
+        run_id: String,
+        window_id: String,
+        revision: u64,
+        current: Option<u64>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CubismIcebergError>;
