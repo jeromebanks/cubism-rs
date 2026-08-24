@@ -183,6 +183,13 @@ truncated tail. All four prior #20-era coordinator tests pass unchanged.
    append completes, intervening correction-plus-rollback, replay) — the
    guard covers the arm, but only the `AwaitingPublish` shape has a
    dedicated test.
+3. **Hoist the generation guard above the append branch** (advisor
+   follow-up finding, dispositioned as deferred): a replay doomed to be
+   refused currently commits its Iceberg append first — purely additive
+   and never published, so no safety hole, but an orphaned snapshot and
+   wasted writes. Hoisting is safe for fresh claims (they pass the guard)
+   but changes ordering semantics and wanted its own look, not a
+   mid-review move.
 3. **Hole 1 residuals** (see the guard's comment): pre-claim staleness
    needs a request-envelope generation (API change); the
    check-vs-publish race needs a generation-aware CAS inside `publish`.
@@ -243,10 +250,26 @@ The workspace run was captured to a file first and grepped for
 `tail`; totals were summed from those lines. `rustfmt --edition 2024
 --check` on all six touched `.rs` files reported pre-existing diffs
 consistent with [#3](https://github.com/jeromebanks/cubism-rs/issues/3)'s
-known toolchain drift — verified none of the diff's added/removed lines
-touch this session's code — so per the skill's step-2 gate, plain
-`rustfmt` was not run; new lines were hand-written to match surrounding
-wide-line style, and `cargo clippy -D warnings` passed clean everywhere.
+known toolchain drift, so per the skill's step-2 gate, plain `rustfmt`
+was not run; new lines were hand-written to match surrounding wide-line
+style. **Correction from the advisor follow-up round:** this session's
+first pass also claimed none of the session's own lines appeared in any
+fmt diff — that check (a keyword grep over the diff) missed one
+session-introduced violation, where an edit had collapsed
+`fetch_run_row`'s signature and body onto one line in
+`durable_control.rs`; found by the advisor's review, fixed in the
+follow-up commit. Lesson recorded: verify fmt diffs by reading them, not
+by grepping for expected keywords. The advisor round also corrected an
+inverted comment about concurrent-migration behavior at the ALTER site
+(sequential reopens are idempotent; two racing handles make one ALTER
+fail loudly with duplicate-column — not silently idempotent) and tightened
+the migration test's doc-comment phrasing; its remaining findings were
+dispositioned without code changes: guard-below-append placement
+(refused `AwaitingAppend` replays still commit their Iceberg append —
+additive-only, no safety hole; hoisting is deferred as a candidate next
+slice item), `format!`-built PRAGMA query (table names are call-site
+literals only; documented in place), and the handoff's "committed and
+pushed" wording (accurate as of push).
 
 ## Primary files
 

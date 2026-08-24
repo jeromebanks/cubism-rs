@@ -996,11 +996,13 @@ async fn run_inspection_distinguishes_the_rolled_back_to_run_from_the_rolled_bac
 /// queries against both new columns (the ALTER demonstrably ran on the
 /// pre-existing tables — a fresh `CREATE TABLE IF NOT EXISTS` would not
 /// have touched them, and the inserted rows predate every new column);
-/// (2) the pre-migration run's `observed_generation` reads back as `None`,
-/// so `execute`'s #21 guard falls through unprotected for legacy rows
-/// rather than refusing them; (3) its publish still completes (the crash-
-/// recovery path this store exists to serve must survive an upgrade);
-/// (4) a claim recorded after migration carries a real generation anchor.
+/// (2) the pre-migration run's `observed_generation` reads back as `None`
+/// — the store-level fact that lets `execute`'s #21 guard fall through
+/// unprotected for legacy rows rather than refusing them (this test does
+/// not call `execute`; it verifies the input the guard reads);
+/// (3) its publish still completes at the store level (the crash-recovery
+/// path this store exists to serve must survive an upgrade); (4) a claim
+/// recorded after migration carries a real generation anchor.
 ///
 /// This does **not** prove the coordinator-level *refusal* path against
 /// the SQLite backend specifically (deliberately deferred to the in-memory

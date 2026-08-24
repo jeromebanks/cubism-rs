@@ -175,9 +175,12 @@ impl SqliteStore {
         // COLUMN IF NOT EXISTS`, so check `pragma_table_info` first (an
         // unconditional ALTER would fail permanently on every subsequent
         // open) and alter only when missing. These run outside
-        // `with_immediate_tx` as single implicit transactions — idempotent
-        // under concurrent reopen because both handles see the same table
-        // info before either commits its own ALTER. A pre-migration row's
+        // `with_immediate_tx` as single implicit transactions. Sequential
+        // reopens are idempotent (the second open sees the columns the
+        // first added); two handles racing `open()` can both observe the
+        // column missing, in which case the loser's ALTER fails with a
+        // duplicate-column error and `open()` returns `Err` — loud, not
+        // silent, and the next open succeeds. A pre-migration row's
         // NULL `observed_generation` means "claimed before this anchor
         // existed": replay guards must fall through unprotected for those
         // rows rather than refuse them (see
@@ -549,7 +552,9 @@ async fn backoff(attempt: u32) {
 /// `pragma_table_info` — the deterministic existence check behind
 /// [`SqliteStore::open`]'s additive migration (SQLite has no `ADD COLUMN IF
 /// NOT EXISTS`, and matching on ALTER's duplicate-column error text is
-/// brittle across sqlx/SQLite versions).
+/// brittle across sqlx/SQLite versions). `pragma_table_info` does not take
+/// bound parameters; the interpolated table name is only ever one of the
+/// hardcoded literals at this file's two call sites, never user input.
 async fn sqlite_column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool> {
     let rows = sqlx::query(&format!("SELECT name FROM pragma_table_info('{table}')"))
         .fetch_all(pool)
@@ -557,7 +562,8 @@ async fn sqlite_column_exists(pool: &SqlitePool, table: &str, column: &str) -> R
     Ok(rows.iter().any(|row| row.try_get::<String, _>("name").map(|name| name == column).unwrap_or(false)))
 }
 
-async fn fetch_run_row(conn: &mut SqliteConnection, run_id: &str) -> Result<Option<SqliteRow>> {    Ok(sqlx::query(
+async fn fetch_run_row(conn: &mut SqliteConnection, run_id: &str) -> Result<Option<SqliteRow>> {
+    Ok(sqlx::query(
         "SELECT cube_id, window_id, revision, expected_rows, status, aggregate_snapshot_id
          FROM control_runs WHERE run_id = ?",
     )
