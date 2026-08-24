@@ -24,8 +24,9 @@ use cubism_iceberg::table::current_snapshot_id;
 use cubism_iceberg::{
     AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, CorrectionCoordinator,
     CorrectionRequest, CubismIcebergError, PublicationStore, ReconciliationRecord, RevisionStatus, RunInspection,
-    TemporalTable,
+    RunState, TemporalTable,
 };
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
 
 const CUBE_ID: &str = "web_analytics";
@@ -981,4 +982,116 @@ async fn run_inspection_distinguishes_the_rolled_back_to_run_from_the_rolled_bac
         Some(RevisionStatus::NotCurrent),
         "run-2's RunState still says Published but it was rolled back past — see #18"
     );
+}
+
+/// Proves `SqliteStore::open`'s additive migration (issue #21's claim-time
+/// generation anchor): a control database created by a pre-migration
+/// version of this crate — hand-built here with exactly the old two-table
+/// schema, including one row parked mid-recovery (`status = 'appended'`,
+/// i.e. `AwaitingPublish`) and one live publication — must reopen cleanly,
+/// keep that run recoverable across the upgrade, and start recording
+/// generation anchors for claims taken after it.
+///
+/// Asserted, in order: (1) reopen succeeds and the migrated schema answers
+/// queries against both new columns (the ALTER demonstrably ran on the
+/// pre-existing tables — a fresh `CREATE TABLE IF NOT EXISTS` would not
+/// have touched them, and the inserted rows predate every new column);
+/// (2) the pre-migration run's `observed_generation` reads back as `None`,
+/// so `execute`'s #21 guard falls through unprotected for legacy rows
+/// rather than refusing them; (3) its publish still completes (the crash-
+/// recovery path this store exists to serve must survive an upgrade);
+/// (4) a claim recorded after migration carries a real generation anchor.
+///
+/// This does **not** prove the coordinator-level *refusal* path against
+/// the SQLite backend specifically (deliberately deferred to the in-memory
+/// coverage in `tests/coordinator.rs`; the durability legs above are the
+/// regression net for the benign SQLite paths), nor concurrent migration
+/// by two handles racing `open()`.
+#[tokio::test]
+async fn sqlite_control_store_migration_adds_generation_columns_and_preserves_recovery() {
+    let control_dir = TempDir::new().unwrap();
+    let control_db = control_dir.path().join("control.sqlite");
+    let window_id = WindowId::new("2026-08-12").unwrap();
+
+    {
+        // Hand-build exactly the pre-#21 schema — no `observed_generation`
+        // on control_runs, no `generation` on control_publications — with
+        // content shaped like an upgrade-time snapshot: revision 1 live
+        // ("run-old"), and one correction parked at AwaitingPublish
+        // ("run-legacy", revision 2).
+        let options =
+            SqliteConnectOptions::new().filename(&control_db).create_if_missing(true);
+        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE control_runs (
+                run_id TEXT PRIMARY KEY,
+                cube_id TEXT NOT NULL,
+                window_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                expected_rows INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                aggregate_snapshot_id INTEGER
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE control_publications (
+                cube_id TEXT NOT NULL,
+                window_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                run_id TEXT NOT NULL,
+                aggregate_snapshot_id INTEGER NOT NULL,
+                PRIMARY KEY (cube_id, window_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO control_publications (cube_id, window_id, revision, run_id, aggregate_snapshot_id)
+             VALUES (?, ?, 1, 'run-old', 100)",
+        )
+        .bind(CUBE_ID)
+        .bind(window_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO control_runs (run_id, cube_id, window_id, revision, expected_rows, status, aggregate_snapshot_id)
+             VALUES ('run-legacy', ?, ?, 2, 1, 'appended', 101)",
+        )
+        .bind(CUBE_ID)
+        .bind(window_id.as_str())
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+    }
+
+    // Reopen through the real entry point: the migration runs here.
+    let store = PublicationStore::sqlite(&control_db).await.unwrap();
+
+    let state = store.run_state("run-legacy").await.unwrap();
+    assert!(
+        matches!(&state, Some(RunState::Appended { aggregate_snapshot_id: 101, .. })),
+        "the pre-migration mid-recovery row must read back unchanged through the migrated schema"
+    );
+    assert_eq!(
+        store.run_observed_generation("run-legacy").await.unwrap(),
+        None,
+        "a row claimed before the anchor existed must report no recorded generation — \
+         the guard's fall-through-unprotected case, not a refusal"
+    );
+
+    // The interrupted run is still recoverable across the upgrade.
+    store.publish("run-legacy", Some(WindowRevision::new(1).unwrap())).await.unwrap();
+    assert_eq!(store.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+    assert_eq!(store.publication_generation(CUBE_ID, &window_id).await.unwrap(), 1);
+
+    // Claims taken after migration record a real anchor: the generation as
+    // of this claim (1, after run-legacy's changing publish above).
+    store.claim_run(CUBE_ID, &window_id, "run-post", WindowRevision::new(3).unwrap(), 1).await.unwrap();
+    assert_eq!(store.run_observed_generation("run-post").await.unwrap(), Some(1));
 }

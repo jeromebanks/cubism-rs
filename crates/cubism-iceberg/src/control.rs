@@ -102,6 +102,20 @@ impl ClaimResult {
 struct State {
     publications: HashMap<WindowKey, Publication>,
     runs: HashMap<String, RunState>,
+    /// Per-window monotonic counter of *changing* publishes (issue #21's
+    /// claim-time anchor). Bumped only when a publish overwrites what is
+    /// stored; the idempotent same-revision early-return and rejected CAS
+    /// attempts leave it untouched, so "generation unchanged since this
+    /// run was claimed" means exactly "no observable state change happened
+    /// to this window" — which a revision-value comparison alone cannot
+    /// distinguish from an A -> C -> A cycle ending back on the same value.
+    window_generations: HashMap<WindowKey, u64>,
+    /// The window generation each run observed when its claim was first
+    /// inserted. Immutable once written; keyed by `run_id` rather than
+    /// carried inside [`RunState`] so that enum's public shape stays
+    /// frozen (every variant is constructed literally across this crate
+    /// and its tests).
+    claim_generations: HashMap<String, u64>,
 }
 
 /// In-process, `Mutex`-backed implementation of the claim/append/publish
@@ -142,11 +156,19 @@ impl InMemoryStore {
         }
 
         let claimed = RunState::Claimed {
-            window_key: (window_key.cube_id, window_key.window_id),
+            window_key: (window_key.cube_id.clone(), window_key.window_id.clone()),
             revision,
             expected_rows,
         };
         state.runs.insert(run_id.to_string(), claimed.clone());
+        // #21's anchor: record what the window looked like at claim time so
+        // a later replay of this run can tell "nothing changed" apart from
+        // "changed, then changed back to the same revision value." Written
+        // only on the fresh-insert path (an existing run keeps its original
+        // observation), inside the same mutex critical section as the
+        // insert itself.
+        let observed_generation = state.window_generations.get(&window_key).copied().unwrap_or(0);
+        state.claim_generations.insert(run_id.to_string(), observed_generation);
         Ok(ClaimResult::New(claimed))
     }
 
@@ -217,12 +239,32 @@ impl InMemoryStore {
         }
 
         let publication = Publication { revision, run_id: run_id.to_string(), aggregate_snapshot_id };
-        state.publications.insert(key, publication.clone());
+        state.publications.insert(key.clone(), publication.clone());
+        // Bump only here — a *changing* write (first publication, later
+        // correction, or rollback republish). The idempotent early-return
+        // above and rejected CAS attempts must not bump: counting them
+        // would let an unrelated no-op replay permanently poison every
+        // concurrently-recovering run's claim anchor.
+        *state.window_generations.entry(key).or_insert(0) += 1;
         state.runs.insert(
             run_id.to_string(),
             RunState::Published { window_key, revision, expected_rows, aggregate_snapshot_id },
         );
         Ok(publication)
+    }
+
+    /// The window's live publication generation: 0 while unpublished,
+    /// incremented by every changing publish (see [`State`]'s field doc).
+    fn publication_generation(&self, cube_id: &str, window_id: &WindowId) -> u64 {
+        let state = self.state.lock().expect("control store mutex poisoned");
+        state.window_generations.get(&WindowKey::new(cube_id, window_id)).copied().unwrap_or(0)
+    }
+
+    /// The window generation this run observed at its first-ever claim, or
+    /// `None` if the run is unknown to this store.
+    fn run_observed_generation(&self, run_id: &str) -> Option<u64> {
+        let state = self.state.lock().expect("control store mutex poisoned");
+        state.claim_generations.get(run_id).copied()
     }
 
     fn current(&self, cube_id: &str, window_id: &WindowId) -> Option<WindowRevision> {
@@ -326,6 +368,37 @@ impl PublicationStore {
         match self {
             Self::InMemory(store) => Ok(store.run_state(run_id)),
             Self::Sqlite(store) => store.run_state(run_id).await,
+        }
+    }
+
+    /// The window's live publication generation (issue #21's replay
+    /// anchor): 0 while the window has never been published, then
+    /// incremented by every *changing* publish — a first publication, a
+    /// later correction, or a rollback republish. The idempotent republish
+    /// of an already-current revision is deliberately not a change and does
+    /// not increment, nor does a rejected CAS attempt. Unlike
+    /// [`Self::current`]'s revision value, this counter moves even when a
+    /// cycle ends back on the same revision — which is exactly what lets a
+    /// replayed run tell "nothing happened" apart from "happened, then was
+    /// rolled back to the same value."
+    pub async fn publication_generation(&self, cube_id: &str, window_id: &WindowId) -> Result<u64> {
+        match self {
+            Self::InMemory(store) => Ok(store.publication_generation(cube_id, window_id)),
+            Self::Sqlite(store) => store.publication_generation(cube_id, window_id).await,
+        }
+    }
+
+    /// The window generation a run observed when its claim was first
+    /// inserted (its #21 claim-time anchor), or `None` when the store has
+    /// no recorded observation for this run — an unknown `run_id`, or a
+    /// SQLite row written by a pre-migration version of this crate. Callers
+    /// must treat `None` as "cannot verify; fall through unprotected"
+    /// rather than as a refusal: refusing would permanently break crash
+    /// recovery for any run claimed before an upgrade.
+    pub async fn run_observed_generation(&self, run_id: &str) -> Result<Option<u64>> {
+        match self {
+            Self::InMemory(store) => Ok(store.run_observed_generation(run_id)),
+            Self::Sqlite(store) => store.run_observed_generation(run_id).await,
         }
     }
 }

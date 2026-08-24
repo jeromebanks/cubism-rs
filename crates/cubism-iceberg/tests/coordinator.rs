@@ -543,3 +543,209 @@ async fn coordinator_rejects_a_replayed_correction_after_a_rollback_restored_its
         "a rejected replay must not undo the rollback — current must stay at revision A"
     );
 }
+
+/// Reproduces issue #21's exact bug shape and proves the fix: a delayed
+/// replay of a correction request whose run crashed *before its own
+/// publish* (`AwaitingPublish`) must not silently override an intentional
+/// rollback that happened in between.
+///
+/// Sequence (matching the issue's own numbered steps): window `W` starts at
+/// revision A (`run-initial`). Correction `run-correction` is claimed,
+/// appended, and recorded — then "crashes" before its publish (staged by
+/// direct claim/append/record calls, bypassing `execute`, exactly as
+/// `coordinator_skips_a_redundant_append_when_the_run_was_already_appended`
+/// stages this state). A second, real correction publishes revision C;
+/// an operator then rolls back to A — intentionally, choosing A over C,
+/// knowing nothing about the crashed run. Replaying `run-correction`'s
+/// original request would pass a revision-value CAS (`current == A ==
+/// observed_current`), which is precisely why no value comparison can
+/// close this hole: the guard compares publication *generations* instead —
+/// generation 1 at claim vs 3 after the correction-plus-rollback cycle —
+/// and refuses with `WindowChangedSinceClaim`.
+///
+/// This does **not** prove: anything about the SQLite backend or a restart
+/// (in-memory fixture, no reopen — the durability suite's existing legs are
+/// the regression net for the benign SQLite paths, and a dedicated SQLite
+/// refusal leg is deliberately deferred); the `AwaitingAppend` variant of
+/// the same guard (crash before the append itself, not covered by any test
+/// in this file); or the two residual gaps documented in `execute`'s
+/// implementation comment (pre-claim staleness; the concurrent
+/// check-vs-publish race).
+#[tokio::test]
+async fn coordinator_rejects_a_replayed_awaiting_publish_correction_after_a_rollback_restored_its_observed_current() {
+    let window_id = WindowId::new("2026-08-12").unwrap();
+    let fixture = Fixture::new().await;
+
+    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
+    assert_eq!(fixture.publications.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(1).unwrap()));
+
+    // The crashed correction: claimed + appended + recorded, never
+    // published. Its request still carries `observed_current: A`.
+    let corrected_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 9, 9.0)])];
+    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    let expected_rows: u64 = corrected_states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let crashed_request = || CorrectionRequest {
+        window_id: &window_id,
+        revision: WindowRevision::new(2).unwrap(),
+        run_id: "run-correction",
+        observed_current: WindowRevision::new(1).unwrap(),
+        kinds: &[AggKind::Sum],
+        states: &corrected_states,
+        registry: &corrected_registry,
+    };
+    let claim = fixture
+        .publications
+        .claim_run(CUBE_ID, &window_id, "run-correction", WindowRevision::new(2).unwrap(), expected_rows)
+        .await
+        .unwrap();
+    assert!(matches!(claim, ClaimResult::New(_)));
+    let crashed_append = AggregateWriter::append_window(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        AppendWindow {
+            window_id: &window_id,
+            revision: WindowRevision::new(2).unwrap(),
+            run_id: "run-correction",
+            states: &corrected_states,
+            registry: &corrected_registry,
+        },
+    )
+    .await
+    .unwrap();
+    fixture.publications.record_append("run-correction", crashed_append.snapshot_id).await.unwrap();
+
+    // A different, real correction completes normally: revision C (3).
+    let later_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 5, 5.0)])];
+    let later_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    let published = CorrectionCoordinator::execute(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        &fixture.publications,
+        CorrectionRequest {
+            window_id: &window_id,
+            revision: WindowRevision::new(3).unwrap(),
+            run_id: "run-second-correction",
+            observed_current: WindowRevision::new(1).unwrap(),
+            kinds: &[AggKind::Sum],
+            states: &later_states,
+            registry: &later_registry,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(published.revision, WindowRevision::new(3).unwrap());
+
+    // The operator's deliberate rollback to A — undoing run-second-
+    // correction, with no knowledge of the crashed run.
+    fixture.publications.publish("run-initial", Some(WindowRevision::new(3).unwrap())).await.unwrap();
+    assert_eq!(
+        fixture.publications.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(1).unwrap()),
+        "rollback should have restored current to revision A"
+    );
+
+    // The stale replay of the crashed run's original request. Before the
+    // #21 fix this fell through the AwaitingPublish path straight to the
+    // CAS publish, which passed (`current == observed_current == A`) and
+    // silently published revision B over the operator's choice of A.
+    let error = CorrectionCoordinator::execute(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        &fixture.publications,
+        crashed_request(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CubismIcebergError::WindowChangedSinceClaim { observed_generation: 1, current_generation: 3, current: Some(1), .. }
+        ),
+        "expected WindowChangedSinceClaim with the claim-time generation (1) vs the live one after \
+         correction-plus-rollback (3) and the rolled-back current revision"
+    );
+
+    assert_eq!(
+        fixture.publications.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(1).unwrap()),
+        "a rejected replay must not undo the rollback — current must stay at revision A"
+    );
+}
+
+/// Proves the benign side of the #21 fix: an interrupted correction
+/// (`AwaitingPublish`) replayed through `execute` while *nothing* has
+/// changed since its claim still completes its publish and returns the
+/// correct `Publication`. This is the crash-recovery contract the
+/// generation guard must preserve — refusing here would turn every crash
+/// retry into permanent stuck state. As in
+/// `coordinator_skips_a_redundant_append_when_the_run_was_already_appended`,
+/// comparing against the staged append's snapshot ID is a direct check that
+/// no second append occurred.
+///
+/// This does **not** prove recovery across a process restart (no reopen
+/// here; `tests/durability.rs` covers restart-shaped recovery for the
+/// store protocol) or the SQLite backend specifically.
+#[tokio::test]
+async fn coordinator_completes_an_interrupted_correction_when_nothing_changed_since_claim() {
+    let window_id = WindowId::new("2026-08-12").unwrap();
+    let fixture = Fixture::new().await;
+
+    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
+    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
+
+    // Stage the interrupted run: claimed + appended + recorded, never
+    // published, nothing else touching the window afterward.
+    let corrected_states = vec![states_batch(&[
+        ("2026-08-12T00:10:00Z", xunit_id(1), 9, 9.0),
+        ("2026-08-12T00:20:00Z", xunit_id(2), 2, 2.0),
+    ])];
+    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a"), (xunit_id(2), b"b")])];
+    let expected_rows: u64 = corrected_states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let claim = fixture
+        .publications
+        .claim_run(CUBE_ID, &window_id, "run-correction", WindowRevision::new(2).unwrap(), expected_rows)
+        .await
+        .unwrap();
+    assert!(matches!(claim, ClaimResult::New(_)));
+    let staged_append = AggregateWriter::append_window(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        AppendWindow {
+            window_id: &window_id,
+            revision: WindowRevision::new(2).unwrap(),
+            run_id: "run-correction",
+            states: &corrected_states,
+            registry: &corrected_registry,
+        },
+    )
+    .await
+    .unwrap();
+    fixture.publications.record_append("run-correction", staged_append.snapshot_id).await.unwrap();
+
+    let request = CorrectionRequest {
+        window_id: &window_id,
+        revision: WindowRevision::new(2).unwrap(),
+        run_id: "run-correction",
+        observed_current: WindowRevision::new(1).unwrap(),
+        kinds: &[AggKind::Sum, AggKind::Count],
+        states: &corrected_states,
+        registry: &corrected_registry,
+    };
+    let publication = CorrectionCoordinator::execute(
+        fixture.catalog.as_ref(),
+        &fixture.temporal_table,
+        &fixture.publications,
+        request,
+    )
+    .await
+    .unwrap();
+    assert_eq!(publication.revision, WindowRevision::new(2).unwrap());
+    assert_eq!(
+        publication.aggregate_snapshot_id, staged_append.snapshot_id,
+        "recovery must complete the interrupted run's own publish, not perform a second append"
+    );
+    assert_eq!(fixture.publications.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+}

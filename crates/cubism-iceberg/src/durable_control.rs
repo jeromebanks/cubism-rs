@@ -149,7 +149,8 @@ impl SqliteStore {
                 revision INTEGER NOT NULL,
                 expected_rows INTEGER NOT NULL,
                 status TEXT NOT NULL,
-                aggregate_snapshot_id INTEGER
+                aggregate_snapshot_id INTEGER,
+                observed_generation INTEGER
             )",
         )
         .execute(&pool)
@@ -162,11 +163,35 @@ impl SqliteStore {
                 revision INTEGER NOT NULL,
                 run_id TEXT NOT NULL,
                 aggregate_snapshot_id INTEGER NOT NULL,
+                generation INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (cube_id, window_id)
             )",
         )
         .execute(&pool)
         .await?;
+
+        // Issue #21's claim-time anchor needs two columns that databases
+        // created by older versions of this crate lack. SQLite has no `ADD
+        // COLUMN IF NOT EXISTS`, so check `pragma_table_info` first (an
+        // unconditional ALTER would fail permanently on every subsequent
+        // open) and alter only when missing. These run outside
+        // `with_immediate_tx` as single implicit transactions — idempotent
+        // under concurrent reopen because both handles see the same table
+        // info before either commits its own ALTER. A pre-migration row's
+        // NULL `observed_generation` means "claimed before this anchor
+        // existed": replay guards must fall through unprotected for those
+        // rows rather than refuse them (see
+        // `PublicationStore::run_observed_generation`'s doc comment).
+        if !sqlite_column_exists(&pool, "control_runs", "observed_generation").await? {
+            sqlx::query("ALTER TABLE control_runs ADD COLUMN observed_generation INTEGER")
+                .execute(&pool)
+                .await?;
+        }
+        if !sqlite_column_exists(&pool, "control_publications", "generation").await? {
+            sqlx::query("ALTER TABLE control_publications ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
+                .execute(&pool)
+                .await?;
+        }
 
         Ok(Self { pool })
     }
@@ -188,9 +213,27 @@ impl SqliteStore {
             let window_id = window_id.clone();
             let run_id = run_id.clone();
             Box::pin(async move {
+                // Issue #21's anchor: the window generation this run
+                // observes at first-claim time, recorded transactionally
+                // with the insert itself. Only the fresh-insert path uses
+                // it (`ON CONFLICT DO NOTHING` leaves an existing row's
+                // original observation untouched), and the column is never
+                // updated afterward, so a replay can trust it as "what the
+                // world looked like when this run was first claimed."
+                let observed_generation: i64 = sqlx::query(
+                    "SELECT generation FROM control_publications WHERE cube_id = ? AND window_id = ?",
+                )
+                .bind(&cube_id)
+                .bind(&window_id)
+                .fetch_optional(&mut *conn)
+                .await?
+                .map(|row| row.try_get::<i64, _>("generation"))
+                .transpose()?
+                .unwrap_or(0);
+
                 let inserted = sqlx::query(
-                    "INSERT INTO control_runs (run_id, cube_id, window_id, revision, expected_rows, status, aggregate_snapshot_id)
-                     VALUES (?, ?, ?, ?, ?, 'claimed', NULL)
+                    "INSERT INTO control_runs (run_id, cube_id, window_id, revision, expected_rows, status, aggregate_snapshot_id, observed_generation)
+                     VALUES (?, ?, ?, ?, ?, 'claimed', NULL, ?)
                      ON CONFLICT(run_id) DO NOTHING",
                 )
                 .bind(&run_id)
@@ -198,6 +241,7 @@ impl SqliteStore {
                 .bind(&window_id)
                 .bind(revision.get() as i64)
                 .bind(expected_rows as i64)
+                .bind(observed_generation)
                 .execute(&mut *conn)
                 .await?
                 .rows_affected()
@@ -298,7 +342,7 @@ impl SqliteStore {
                 };
 
                 let pub_row = sqlx::query(
-                    "SELECT revision, run_id, aggregate_snapshot_id FROM control_publications
+                    "SELECT revision, run_id, aggregate_snapshot_id, generation FROM control_publications
                      WHERE cube_id = ? AND window_id = ?",
                 )
                 .bind(&cube_id)
@@ -330,19 +374,31 @@ impl SqliteStore {
                     });
                 }
 
+                // Bump only on a *changing* write (first publication,
+                // later correction, or rollback republish), mirroring the
+                // in-memory backend. The idempotent same-revision
+                // early-return above and rejected CAS attempts must not
+                // bump: counting them would let an unrelated no-op replay
+                // permanently poison every concurrently-recovering run's
+                // claim anchor.
+                let new_generation: i64 =
+                    pub_row.as_ref().map(|row| row.try_get::<i64, _>("generation")).transpose()?.unwrap_or(0) + 1;
+
                 sqlx::query(
-                    "INSERT INTO control_publications (cube_id, window_id, revision, run_id, aggregate_snapshot_id)
-                     VALUES (?, ?, ?, ?, ?)
+                    "INSERT INTO control_publications (cube_id, window_id, revision, run_id, aggregate_snapshot_id, generation)
+                     VALUES (?, ?, ?, ?, ?, ?)
                      ON CONFLICT(cube_id, window_id) DO UPDATE SET
                          revision = excluded.revision,
                          run_id = excluded.run_id,
-                         aggregate_snapshot_id = excluded.aggregate_snapshot_id",
+                         aggregate_snapshot_id = excluded.aggregate_snapshot_id,
+                         generation = excluded.generation",
                 )
                 .bind(&cube_id)
                 .bind(&window_id)
                 .bind(revision.get() as i64)
                 .bind(&run_id)
                 .bind(aggregate_snapshot_id)
+                .bind(new_generation)
                 .execute(&mut *conn)
                 .await?;
 
@@ -375,6 +431,34 @@ impl SqliteStore {
         .fetch_optional(&self.pool)
         .await?;
         row.map(|row| row_to_run_state(&row)).transpose()
+    }
+
+    /// The window's live publication generation (0 while unpublished,
+    /// bumped by every changing publish — see
+    /// [`crate::control::PublicationStore::publication_generation`]).
+    pub async fn publication_generation(&self, cube_id: &str, window_id: &WindowId) -> Result<u64> {
+        let row = sqlx::query("SELECT generation FROM control_publications WHERE cube_id = ? AND window_id = ?")
+            .bind(cube_id)
+            .bind(window_id.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|row| row.try_get::<i64, _>("generation")).transpose()?.unwrap_or(0) as u64)
+    }
+
+    /// The window generation a run observed at its first-ever claim.
+    /// `None` for an unknown `run_id`, or for a row whose NULL
+    /// `observed_generation` marks it as claimed by a pre-migration
+    /// version of this crate — callers must treat that as "cannot verify"
+    /// and fall through unprotected, not as a refusal (refusing would
+    /// permanently break crash recovery across an upgrade).
+    pub async fn run_observed_generation(&self, run_id: &str) -> Result<Option<u64>> {
+        let row =
+            sqlx::query("SELECT observed_generation FROM control_runs WHERE run_id = ?").bind(run_id).fetch_optional(&self.pool).await?;
+        Ok(row
+            .map(|row| row.try_get::<Option<i64>, _>("observed_generation"))
+            .transpose()?
+            .flatten()
+            .map(|generation| generation as u64))
     }
 
     /// Run `op` inside a `BEGIN IMMEDIATE` transaction, committing on
@@ -461,8 +545,19 @@ async fn backoff(attempt: u32) {
     tokio::time::sleep(Duration::from_millis(millis)).await;
 }
 
-async fn fetch_run_row(conn: &mut SqliteConnection, run_id: &str) -> Result<Option<SqliteRow>> {
-    Ok(sqlx::query(
+/// Whether `table` already has a column named `column`, per
+/// `pragma_table_info` — the deterministic existence check behind
+/// [`SqliteStore::open`]'s additive migration (SQLite has no `ADD COLUMN IF
+/// NOT EXISTS`, and matching on ALTER's duplicate-column error text is
+/// brittle across sqlx/SQLite versions).
+async fn sqlite_column_exists(pool: &SqlitePool, table: &str, column: &str) -> Result<bool> {
+    let rows = sqlx::query(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.iter().any(|row| row.try_get::<String, _>("name").map(|name| name == column).unwrap_or(false)))
+}
+
+async fn fetch_run_row(conn: &mut SqliteConnection, run_id: &str) -> Result<Option<SqliteRow>> {    Ok(sqlx::query(
         "SELECT cube_id, window_id, revision, expected_rows, status, aggregate_snapshot_id
          FROM control_runs WHERE run_id = ?",
     )

@@ -95,10 +95,10 @@ use crate::writer::{AggregateWriter, AppendWindow};
 ///   admission that its `AdditiveShortcut` arm is reachable only in
 ///   principle, not by any end-to-end test today.
 /// - [`Self::AwaitingAppend`]: the run was claimed but the control store
-///   has no append recorded. Recovery: run `execute`, which appends and
-///   publishes. This state is ambiguous between "the append was never
-///   attempted" and "the Iceberg append committed, but the process crashed
-///   before `record_append` persisted that fact" — `AggregateWriter::append_window`
+///   has no append recorded. This state is ambiguous between "the append
+///   was never attempted" and "the Iceberg append committed, but the
+///   process crashed before `record_append` persisted that fact" —
+///   `AggregateWriter::append_window`
 ///   commits via `fast_append`, which is purely additive and has no
 ///   idempotency check against a prior commit for the same
 ///   window/revision/run on its own. **Resolved by
@@ -109,10 +109,17 @@ use crate::writer::{AggregateWriter, AppendWindow};
 ///   exists in the table's current snapshot before deciding whether to
 ///   append again. See that function's own doc comment for the one thing
 ///   it deliberately does not defend against (concurrent recovery of the
-///   identical run, as opposed to sequential crash-then-retry).
+///   identical run, as opposed to sequential crash-then-retry). Recovery:
+///   run `execute`, which appends (or skips, per #17) and publishes — but
+///   only if the window's publication generation still matches what this
+///   run's claim recorded (issue #21's guard; see `execute`'s doc
+///   comment), so a replay after an intervening correction-and-rollback is
+///   refused instead of completing.
 /// - [`Self::AwaitingPublish`]: the append committed and was recorded, but
 ///   no publication exists yet. Recovery: run `execute`, which skips the
-///   append (see the append-skip branch below) and publishes. Already
+///   append (see the append-skip branch below) and publishes — subject to
+///   the same generation guard as [`Self::AwaitingAppend`] (issue #21's
+///   fix; this is the stage that issue was filed against). Already
 ///   proven safe by
 ///   `tests/coordinator.rs`'s
 ///   `coordinator_skips_a_redundant_append_when_the_run_was_already_appended`
@@ -278,10 +285,20 @@ impl CorrectionCoordinator {
     /// [`CubismIcebergError::RunNoLongerCurrent`] instead of calling
     /// `publish` if something else (a later correction, or a rollback) has
     /// since moved `current` away from it — see the implementation comment
-    /// at that check for the ABA replay it closes. This does not cover the
-    /// same shape against a run still `AwaitingPublish` (crashed before its
-    /// own publish); that's a distinct, deferred gap, tracked as
-    /// [#21](https://github.com/jeromebanks/cubism-rs/issues/21).
+    /// at that check for the ABA replay it closes.
+    ///
+    /// **[Issue #21](https://github.com/jeromebanks/cubism-rs/issues/21):**
+    /// the same ABA shape against a run that never got as far as its own
+    /// publish (`AwaitingAppend`/`AwaitingPublish`) is invisible to any
+    /// revision-value comparison — after a rollback restored `current` to
+    /// exactly `observed_current`, the CAS would pass whether or not
+    /// anything had moved. `execute` therefore cross-checks each claim's
+    /// recorded publication generation against the window's live one before
+    /// the final publish, returning
+    /// [`CubismIcebergError::WindowChangedSinceClaim`] on mismatch — see
+    /// the implementation comment at that check for why generations rather
+    /// than revisions, which stages it covers, and the residual gaps it
+    /// documents rather than closes.
     pub async fn execute(
         catalog: &dyn Catalog,
         temporal_table: &TemporalTable,
@@ -364,10 +381,9 @@ impl CorrectionCoordinator {
         // this function already holds the `RunState` `claim_run` returned;
         // re-reading it through `inspect` risks observing a different one.)
         //
-        // This closes the gap only for a run already `Published`. The same
-        // A -> B -> A shape against a run still `AwaitingPublish` (crashed
-        // before its own publish) is not covered — deliberately deferred,
-        // tracked as #21, not silently out of scope.
+        // This closes the gap only for a run already `Published`; the same
+        // shape against a run that never got that far needs a different
+        // mechanism, below.
         if let ReconciliationRecord::Published { revision, .. } = record {
             let current = publications.current(&temporal_table.cube_id, request.window_id).await?;
             if current != Some(revision) {
@@ -375,6 +391,51 @@ impl CorrectionCoordinator {
                     run_id: request.run_id.to_string(),
                     window_id: request.window_id.as_str().to_string(),
                     revision: revision.get(),
+                    current: current.map(WindowRevision::get),
+                });
+            }
+        }
+
+        // #21: for a run not yet `Published`, no revision-value comparison
+        // can close the same ABA hole — after a rollback restored `current`
+        // to exactly this request's `observed_current`, the CAS publish
+        // below would pass whether nothing ever moved or the window went
+        // A -> C -> A behind this run's back (a later correction landed,
+        // then an operator rolled back past it). So compare *generations*:
+        // every claim records, at insert time, the window's publication
+        // generation (`PublicationStore::publication_generation` — a
+        // counter bumped by every changing publish, correction or rollback
+        // alike, but not by idempotent same-revision republishes), and a
+        // replay may only complete its publish while that recorded
+        // observation still matches the live counter. Covers both
+        // non-published stages: `AwaitingPublish` (crashed before its own
+        // publish) and `AwaitingAppend` (the identical hole one stage
+        // earlier). A run whose row carries no anchor (`None`: unknown run,
+        // or a SQLite row written before the column existed) falls through
+        // unprotected rather than being refused — refusing would
+        // permanently break crash recovery across an upgrade, the exact
+        // path this function exists to serve.
+        //
+        // Residual gaps, documented rather than fixed here: (1) staleness
+        // that predates the claim itself — an A -> C -> A cycle completing
+        // entirely between request planning and the first `execute` — is
+        // invisible to a claim-time anchor by construction, and byte-for-
+        // -byte today's behavior; (2) this generation read and the CAS
+        // publish are separate store calls, so a concurrent rollback-to-
+        // -same-value slipping between them reopens a narrow race — the
+        // same exposure class the plain CAS already has.
+        if !matches!(record, ReconciliationRecord::Published { .. })
+            && let Some(observed_generation) = publications.run_observed_generation(request.run_id).await?
+        {
+            let current_generation =
+                publications.publication_generation(&temporal_table.cube_id, request.window_id).await?;
+            if current_generation != observed_generation {
+                let current = publications.current(&temporal_table.cube_id, request.window_id).await?;
+                return Err(CubismIcebergError::WindowChangedSinceClaim {
+                    run_id: request.run_id.to_string(),
+                    window_id: request.window_id.as_str().to_string(),
+                    observed_generation,
+                    current_generation,
                     current: current.map(WindowRevision::get),
                 });
             }

@@ -1,6 +1,35 @@
 # Time-Series Implementation Plan
 
-Status: proposed plan, no production implementation started
+Status: **partially implemented — see "Implementation status snapshot" below**
+(added 2026-08-24 by session slice 30; the original "proposed plan, no
+production implementation started" line this replaces had gone stale as
+Phases 0A/1–4/5-functional landed without it being updated). Per-slice
+evidence lives in the `docs/TIMESERIES_PHASE_*_HANDOFF.md` series, latest via
+`docs/handoff_latest.md`; milestone-level tracking lives in
+`docs/TIMESERIES_ROADMAP.md`.
+
+## Implementation status snapshot
+
+Updated 2026-08-24 (session slice 30). This table is the reconciliation
+between this plan and what actually landed; keep it current when a phase
+moves.
+
+| Phase | Status | Evidence / remaining work |
+|---|---|---|
+| 0A — Iceberg compatibility spike | **Done** — local-filesystem gate passed | `docs/TIMESERIES_PHASE_0A_RESULTS.md`; object-store limitations deferred to #10 |
+| 0B — Rust-vs-Spark benchmark | **Partial** — harness slice 1 complete; the measured Rust/Spark decision this phase exists for is still pending | `docs/TIMESERIES_PHASE_0B_*.md`; open issues #1, #2, #4, #5, #6; the Spark adapter itself is unbuilt |
+| 1 — Temporal types & state algebra | **Done** | `docs/TIMESERIES_PHASE_1_HANDOFF.md` |
+| 2 — Sparse bucketed incremental aggregation | **Done** | `docs/TIMESERIES_PHASE_2_HANDOFF.md` |
+| 3 — Iceberg schema, reads, appends, publication | **Done** | `docs/TIMESERIES_PHASE_3_HANDOFF.md` |
+| 4 — Late data, corrections, concurrency, compaction | **Done as scoped** — compaction/retention/object-store deliberately split out to #10 (completion criteria 3–4 remain open via it); durability defects found post-landing fixed via #17/#20/#21 | Roadmap milestones 1–5b (`docs/TIMESERIES_ROADMAP.md`); `#13` |
+| 5 — Exactness-aware range queries & serving API | **Functional half done** — direct-call `SeriesResponse` + `/api/series` wiring landed. SQL/`TableProvider` half blocked on #8 (DataFusion 53/54 convergence) | Roadmap milestones 11–13; `#8` |
+| 6 — Rolling comparisons & trend inputs | **Not started** | This file's Phase 6 section |
+| 7 — Performance hardening & optional rollups | **Not started** | This file's Phase 7 section |
+| Release progression (lines below) | **At stage 2 of 7** ("experimental local tables") — every later stage not begun | Release progression section |
+
+Open issues are tracked on GitHub
+(jeromebanks/cubism-rs); they are not milestone-shaped work and are not
+folded into the roadmap's done-fraction.
 
 Depends on: [`TIMESERIES_FEASIBILITY.md`](TIMESERIES_FEASIBILITY.md)
 

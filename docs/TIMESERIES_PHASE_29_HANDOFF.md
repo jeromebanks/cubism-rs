@@ -26,7 +26,10 @@ then changed back") and the chosen fix direction — reject a `Published`
 run whose revision is no longer `current` with a distinct error, rather
 than either silently re-publishing or returning a stale `Publication`.
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`docs/TIMESERIES_PHASE_30_HANDOFF.md`](TIMESERIES_PHASE_30_HANDOFF.md)
+— which fixed this handoff's top deferred item (#21, the `AwaitingPublish`
+variant of #20's ABA gap), closed #20 itself (this fix's issue, left open
+last session), and replaced the implementation plan's stale status line.
 
 ## What this session built
 

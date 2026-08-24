@@ -68,6 +68,20 @@ pub enum CubismIcebergError {
         revision: u64,
         current: Option<u64>,
     },
+
+    #[error(
+        "run '{run_id}' (window '{window_id}') claimed while the window was at publication generation \
+         {observed_generation}, but the window has since changed (now generation {current_generation}, \
+         current revision {current:?}) — refusing to complete its publish rather than override whatever \
+         moved the window after it was claimed"
+    )]
+    WindowChangedSinceClaim {
+        run_id: String,
+        window_id: String,
+        observed_generation: u64,
+        current_generation: u64,
+        current: Option<u64>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, CubismIcebergError>;
