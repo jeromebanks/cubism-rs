@@ -34,7 +34,10 @@ the columns natively; asked for one legacy-schema reopen test in the same
 slice; and added the `current` field to the new error for parity with
 `RunNoLongerCurrent`.
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`docs/TIMESERIES_PHASE_31_HANDOFF.md`](TIMESERIES_PHASE_31_HANDOFF.md)
+— a decision session that closed Phase 0B outright (Rust selected, Spark
+path descoped per the maintainer's call), closed #5 and #6, filed the
+Phase 7 umbrella #22, and retargeted #1/#2/#4.
 
 ## What this session built
 

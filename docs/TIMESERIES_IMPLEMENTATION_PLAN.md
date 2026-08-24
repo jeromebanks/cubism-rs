@@ -17,7 +17,7 @@ moves.
 | Phase | Status | Evidence / remaining work |
 |---|---|---|
 | 0A — Iceberg compatibility spike | **Done** — local-filesystem gate passed | `docs/TIMESERIES_PHASE_0A_RESULTS.md`; object-store limitations deferred to #10 |
-| 0B — Rust-vs-Spark benchmark | **Partial** — harness slice 1 complete; the measured Rust/Spark decision this phase exists for is still pending | `docs/TIMESERIES_PHASE_0B_*.md`; open issues #1, #2, #4, #5, #6; the Spark adapter itself is unbuilt |
+| 0B — Rust-vs-Spark benchmark | **Decided** — Rust/DataFusion selected (2026-08-24); Spark comparison path closed, adapter frozen in-tree | `docs/TIMESERIES_PHASE_0B_DECISION.md`; measurements: `docs/TIMESERIES_PHASE_0B_RESULTS.md`. Carried to Phase 7: dense occupancy, compression, harness write-inclusive timing, 10–100M measurement (#1), memory bounds (#2, #4) |
 | 1 — Temporal types & state algebra | **Done** | `docs/TIMESERIES_PHASE_1_HANDOFF.md` |
 | 2 — Sparse bucketed incremental aggregation | **Done** | `docs/TIMESERIES_PHASE_2_HANDOFF.md` |
 | 3 — Iceberg schema, reads, appends, publication | **Done** | `docs/TIMESERIES_PHASE_3_HANDOFF.md` |
@@ -227,7 +227,10 @@ code and its DataFusion version are unaffected.
 
 ## Phase 0B — Representative local Rust-versus-Spark benchmark
 
-Status: harness slice 1 complete; measured Rust/Spark decision pending.
+Status: **decided 2026-08-24 — Rust/DataFusion selected; Spark comparison
+path closed** (see `docs/TIMESERIES_PHASE_0B_DECISION.md`, which also
+dispositions every item RESULTS left open). The axis-1 measurements
+themselves stand as recorded in `docs/TIMESERIES_PHASE_0B_RESULTS.md`.
 
 The initial reproducible harness lives in `crates/cubism-timeseries-bench`.
 It generates deterministic sparse/dense Parquet sources, runs bucketed
@@ -980,7 +983,10 @@ Performance:
 - fixed hierarchy versus workload-driven rollups;
 - dyadic/segment index value;
 - native distributed scheduler and shuffle layer;
-- retirement point for the Spark maintenance fallback.
+- ~~retirement point for the Spark maintenance fallback~~ **resolved
+  2026-08-24**: the Spark path is closed outright — see
+  `docs/TIMESERIES_PHASE_0B_DECISION.md` (reviving it would be a new,
+  separately documented decision).
 
 ### Rollback point
 
