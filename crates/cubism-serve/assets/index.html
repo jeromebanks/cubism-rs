@@ -279,6 +279,10 @@ async function loadTimeSeries() {
     $("tsChart").innerHTML = `<span style="color:var(--muted)">loading…</span>`;
     const days = [];
     for (let t = t0; t <= t1; t += DAY_MS) days.push(t);
+    if (days.length > 92) {
+      $("tsChart").innerHTML = `<span class="err">range too wide (${days.length} days) — one request per day; keep it under ~3 months</span>`;
+      return;
+    }
     const results = await Promise.all(days.map(t => postSeries(tsRequest(t, selector, measure))));
     if (results.every(r => r.absent)) {
       // static-cube-only serve: /api/series is not mounted — stay hidden
@@ -289,6 +293,12 @@ async function loadTimeSeries() {
     const errs = results.filter(r => r.error);
     if (errs.length === results.length) {
       $("tsChart").innerHTML = `<span class="err">${esc(errs[0].error)}</span>`;
+      return;
+    }
+    if (!results.some(r => r.point)) {
+      // some days errored, the rest absent: no successful response to
+      // chart — surface the first real error instead of an empty frame
+      $("tsChart").innerHTML = `<span class="err">${esc(errs[0] ? errs[0].error : "no /api/series responses")}</span>`;
       return;
     }
     drawSeriesChart(results, days, selector);
@@ -358,7 +368,7 @@ function drawSeriesChart(results, days, selector) {
   const revs = [...new Set(pts.filter(Boolean).flatMap(p => (p.published || []).map(q => q.revision)))].sort((a, b) => a - b);
   el.innerHTML = s
     + `<div class="legend"><span>● published exactly</span><span><b style="color:var(--accent2)">◌</b> partial coverage</span><span>✕ no data</span>`
-    + `<span style="margin-left:auto">resolution ${esc(String(srcRes))}`
+    + `<span style="margin-left:auto">resolution ${esc(srcRes == null ? "?" : String(srcRes))}`
     + (revs.length ? ` · revision${revs.length > 1 ? "s" : ""} shown: ${revs.join(", ")}` : "")
     + `</span></div>`;
 }

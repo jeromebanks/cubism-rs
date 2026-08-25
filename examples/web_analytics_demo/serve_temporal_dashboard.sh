@@ -60,15 +60,22 @@ $BIN serve "$OUT/placeholder_cube.parquet" --port "$PORT" \
   --catalog-db "$OUT/catalog.sqlite" --control-db "$OUT/control.sqlite" \
   >"$OUT/serve_dashboard.log" 2>&1 &
 SERVE_PID=$!
+ready=""
 for _ in $(seq 1 50); do
   if ! kill -0 "$SERVE_PID" 2>/dev/null; then
     echo "server exited before becoming ready -- see $OUT/serve_dashboard.log" >&2
     cat "$OUT/serve_dashboard.log" >&2
     exit 1
   fi
-  if curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then break; fi
+  if curl -s -o /dev/null "http://127.0.0.1:$PORT/"; then ready=1; break; fi
   sleep 0.2
 done
+if [ -z "$ready" ]; then
+  echo "server not ready after ~10s -- on a cold target dir the backgrounded" >&2
+  echo "cargo release build takes minutes; rerun once 'cargo build --release -p cubism-cli' has finished." >&2
+  cat "$OUT/serve_dashboard.log" >&2
+  exit 1
+fi
 
 echo
 echo "== dashboard page carries the time-series panel =="

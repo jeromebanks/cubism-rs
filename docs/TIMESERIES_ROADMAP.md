@@ -1649,8 +1649,10 @@ each of the three milestones below, same as everywhere else in this doc.
   merges each contiguous segment's windows into ONE point
   (`range_query.rs`'s "(at most one) interior segment"), so a single
   multi-day request renders one dot. The panel issues one single-day
-  request per day in parallel — the exact shape `query_temporal_demo.sh`
-  already uses — with windows per Milestone 12a's day-string convention
+  request per day in parallel — the near-same shape
+  `query_temporal_demo.sh` uses (the JS omits `resolution`, letting the
+  server auto-select; captured `source_resolution: "1d"` confirms it
+  lands the same) — with windows per Milestone 12a's day-string convention
   (`window_id` = day, `bucket_start` = midnight µs; JS ms ×1000).
 - **Honest encoding:** solid accent markers/polyline = exact points;
   dashed amber segments + hollow markers = partial coverage; an explicit

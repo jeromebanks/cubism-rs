@@ -137,9 +137,8 @@ deliberately not hardcoded here).
 Deliberately uncommitted, prior-session convention: `.serena/`,
 `examples/web_analytics_demo/events.csv`,
 `.claude/skills/timeseries-slice/SKILL.md` pre-existing edits,
-`docs/CODEX_TELEMETRY_ROADMAP.md`. Also untracked and staying so:
-`build_temporal_dashboard.log` (script artifact inside
-`examples/web_analytics_demo/`, same class as `events.csv`).
+`docs/CODEX_TELEMETRY_ROADMAP.md`. The capture script's own artifacts
+(`.temporal_build/` including its logs) are gitignored.
 
 ## Tests (40 passed + 1 ignored in cubism-iceberg; 229 passed / 2 ignored workspace)
 
