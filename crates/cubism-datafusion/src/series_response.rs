@@ -580,10 +580,7 @@ mod tests {
 
     /// Like [`scalar_batch`], but each row carries its own `xunit_id` —
     /// needed to build a batch spanning more than one lattice cell.
-    fn scalar_batch_multi<T>(
-        column: &str,
-        rows: &[([u8; 32], Option<T::Native>)],
-    ) -> RecordBatch
+    fn scalar_batch_multi<T>(column: &str, rows: &[([u8; 32], Option<T::Native>)]) -> RecordBatch
     where
         T: ArrowPrimitiveType,
     {
@@ -596,8 +593,7 @@ mod tests {
             id_builder.append_value(id).unwrap();
         }
         let array = PrimitiveArray::<T>::from_iter(rows.iter().map(|(_, v)| *v));
-        RecordBatch::try_new(schema, vec![Arc::new(id_builder.finish()), Arc::new(array)])
-            .unwrap()
+        RecordBatch::try_new(schema, vec![Arc::new(id_builder.finish()), Arc::new(array)]).unwrap()
     }
 
     #[test]

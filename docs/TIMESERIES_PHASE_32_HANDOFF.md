@@ -21,7 +21,7 @@ number.)
 ## What this session built
 
 - **`merge_scalar_column`**
-  (`crates/cubism-datafusion/src/series_merge.rs:142`) — the scalar-kind
+  (`crates/cubism-datafusion/src/series_merge.rs:152`) — the scalar-kind
   counterpart to `merge_average_column`. Count/sum/min/max states columns
   are plain `Int64`/`Float64` scalars (`temporal_state_schema`'s declared
   storage), so there is no blob to decode: the merge *is* the aggregate's
@@ -73,14 +73,37 @@ spec/data changes, README/docs edits.
   path as Count modulo the combine step, which their unit tests cover).
 - The scalar unit tests pin: cross-batch/row folding with null-skipping;
   min-of-mins / max-of-maxes; negative-sum handling; seen-flag `None`
-  vs genuine-zero `Some(0.0)`; wrong-storage-type rejection; non-scalar-
-  kind rejection; and selector filtering on the scalar path (a foreign
-  cell's 1000-row count does not leak into `/G`'s 7).
+  vs genuine-zero `Some(0.0)`; **NaN semantics pinned per kind** (sum
+  propagates — SQL SUM behavior; min/max skip per Rust `f64::min`/`max`,
+  all-NaN stays NaN); count `i64` overflow is an error, not a silent
+  wrap; wrong-storage-type rejection; non-scalar-kind rejection; and
+  selector filtering on the scalar path (a foreign cell's 1000-row count
+  does not leak into `/G`'s 7).
 - All pre-existing avg-path behavior is regression-covered unchanged
   (only mechanical call-site updates adding the `AggKind` argument).
 - Not verified: anything about real web-analytics data or a rendered
   chart (later slices); counts larger than 2^53 in wire presentation
   (documented as a doc-comment caveat, no test).
+
+## Advisor rounds
+
+Two blank-context reviews ran, per this series' workflow. The pre-code
+round picked API widening over a discovery endpoint first (no
+`PublicationStore` listing method exists on either backend — that would
+be its own cross-crate slice; Milestone 12a's day-string convention
+already satisfies the finish prompt's "(listing endpoint **or
+convention**)" branch), confirmed multi-selector stays deferred to the
+recorded unresolved roadmap decision, and confirmed no phase done-
+condition is newly satisfied (no cross-model phase review triggered).
+The post-commit diff review returned one [P1] — this doc originally
+claimed the two `cubism-datafusion` files were rustfmt-`--check`-clean
+when the landing commit's own new code wasn't — plus [P2]s on a wrong
+test-count in this doc's title and NaN semantics being inconsistent
+between Sum (propagates) and Min/Max (skip) without documentation or a
+pinning test. All fixed in one follow-up commit: the datafusion files
+formatted (only session-introduced lines moved), count overflow switched
+to `checked_add` with an error instead of silent wrap, the NaN contract
+documented and pinned by tests, and this doc's counts/claims corrected.
 
 ## GitHub issues touched
 
@@ -132,12 +155,14 @@ Deliberately uncommitted, prior-session convention: `.serena/`,
 `.claude/skills/timeseries-slice/SKILL.md` pre-existing edits,
 `docs/CODEX_TELEMETRY_ROADMAP.md`.
 
-## Tests (44 passed + 1 ignored in cubism-iceberg; 227 passed / 2 ignored workspace)
+## Tests (40 passed + 1 ignored in cubism-iceberg; 229 passed / 2 ignored workspace)
 
-cubism-iceberg total is unchanged (40 passed + 1 ignored — no iceberg
-code touched). Workspace moved 216 -> 227 (+11): seven new
-`series_merge.rs` unit tests, three new `series_response.rs` unit tests,
-one new serve integration test.
+cubism-iceberg total is unchanged (13 unit + 27 integration across five
+binaries = 40 passed + 1 ignored — no iceberg code touched). Workspace
+moved 216 -> 229 (+13): nine new `series_merge.rs` unit tests (seven in
+the landing commit, plus NaN-pinning and overflow tests from the advisor
+follow-up), three new `series_response.rs` unit tests, one new serve
+integration test.
 
 ## Verification performed
 
@@ -149,14 +174,21 @@ cargo clippy -p cubism-iceberg --all-targets --no-deps -- -D warnings  # clean
 cargo clippy -p cubism-datafusion --all-targets --no-deps -- -D warnings  # clean
 cargo clippy -p cubism-serve --all-targets --no-deps -- -D warnings  # clean
 cargo build -p cubism-cli                       # clean
-cargo test --workspace --exclude cubism-py      # 227 passed, 2 ignored
+cargo test --workspace --exclude cubism-py      # 229 passed, 2 ignored
 cargo clippy --workspace --exclude cubism-py --all-targets --no-deps -- -D warnings  # clean
 ```
 
+(The battery ran twice: once for the landing commit, once after the
+advisor follow-up — counts above are the final run's.)
+
 rustfmt note: both `crates/cubism-serve` files report pre-existing diffs
-under `rustfmt --edition 2024 --check` (issue #3), so all edits there are
-hand-written in surrounding style; both `cubism-datafusion` files were
-`--check`-clean and remain so.
+under `rustfmt --edition 2024 --check` (issue #3), so edits there are
+hand-written in surrounding style. The two `cubism-datafusion` files were
+`--check`-clean before this session, but the landing commit's own new
+code was not (the post-commit advisor review caught exactly this claim
+being written as "clean" when it wasn't); they were rustfmt'd as part of
+that follow-up — every reformatted line is code this session introduced —
+and are `--check`-clean as committed.
 
 ## Primary files
 

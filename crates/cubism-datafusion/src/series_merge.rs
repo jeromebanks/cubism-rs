@@ -26,7 +26,7 @@
 //!   alongside a value) is [`crate::series_response::SeriesResponse`]
 //!   (Milestone 10b-2) — not built in this module.
 
-use cubism_core::{AggregateState, AggKind, AverageState, CubismError};
+use cubism_core::{AggKind, AggregateState, AverageState, CubismError};
 use datafusion::arrow::array::{
     Array, BinaryArray, Float64Array, Int64Array, LargeBinaryArray, RecordBatch,
 };
@@ -130,21 +130,34 @@ pub fn merge_average_column(
 ///
 /// Count folds in `i64` and converts to `f64` once at the end, so the
 /// presented value stays exact up to 2^53 like every other `f64`
-/// presentation (and exact far beyond that internally).
+/// presentation, with the `i64` accumulator exact to `i64::MAX`; an
+/// overflowing count is an error, not a silent wrap.
+///
+/// **NaN is pinned per kind, deliberately.** Sum propagates it (`0.0 +
+/// NaN`, so one NaN poisons the segment's point forever — matching SQL
+/// SUM's behavior); Min/Max skip it (Rust's `f64::min`/`f64::max`
+/// semantics, so a NaN row vanishes unless *every* value is NaN). The two
+/// behaviors are opposite on purpose: sum has no identity to fall back
+/// on, min/max do.
 ///
 /// Fails with `CubismError::AggregateState` if `agg` is not one of the four
-/// scalar kinds (blob-backed kinds must go through their own decode path),
-/// if `column` does not exist in a batch's schema, if the column's Arrow
-/// type does not match `agg`'s declared storage (`Count` merges `Int64`;
-/// `Sum`/`Min`/`Max` merge `Float64` — a mismatch means the caller resolved
-/// the measure name to someone else's column), or if the column is neither
-/// scalar type at all.
+/// scalar kinds (blob-backed kinds must go through their own decode path —
+/// note that `SeriesResponse`'s dispatch rejects those earlier with its
+/// own `CubismError::Temporal`, so callers reaching this function directly
+/// see this crate's vocabulary), if `column` does not exist in a batch's
+/// schema, if the column's Arrow type does not match `agg`'s declared
+/// storage (`Count` merges `Int64`; `Sum`/`Min`/`Max` merge `Float64` — a
+/// mismatch means the caller resolved the measure name to someone else's
+/// column), or if the column is neither scalar type at all.
 pub fn merge_scalar_column(
     batches: &[RecordBatch],
     column: &str,
     agg: AggKind,
 ) -> Result<Option<f64>, CubismError> {
-    if !matches!(agg, AggKind::Count | AggKind::Sum | AggKind::Min | AggKind::Max) {
+    if !matches!(
+        agg,
+        AggKind::Count | AggKind::Sum | AggKind::Min | AggKind::Max
+    ) {
         return Err(CubismError::AggregateState(format!(
             "{agg:?} is not a scalar measure kind; its states are blobs with their own decode path"
         )));
@@ -165,11 +178,18 @@ pub fn merge_scalar_column(
                         continue;
                     }
                     seen = true;
-                    count_total += array.value(row);
+                    count_total = count_total.checked_add(array.value(row)).ok_or_else(|| {
+                        CubismError::AggregateState(format!(
+                            "count measure '{column}' overflows i64 while folding"
+                        ))
+                    })?;
                 }
             }
             (AggKind::Sum | AggKind::Min | AggKind::Max, DataType::Float64) => {
-                let array = column_array.as_any().downcast_ref::<Float64Array>().unwrap();
+                let array = column_array
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
                 for row in 0..array.len() {
                     if array.is_null(row) {
                         continue;
@@ -184,9 +204,7 @@ pub fn merge_scalar_column(
                         // pattern: `Count` folds `Int64` columns above, never
                         // here.
                         AggKind::Count => unreachable!("count folds Int64 columns"),
-                        _ => unreachable!(
-                            "the opening guard rejected every non-scalar kind"
-                        ),
+                        _ => unreachable!("the opening guard rejected every non-scalar kind"),
                     });
                 }
             }
@@ -210,8 +228,8 @@ pub fn merge_scalar_column(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{BinaryBuilder, ArrowPrimitiveType, PrimitiveArray};
-    use datafusion::arrow::datatypes::{DataType, Float64Type, Int64Type, Field, Schema};
+    use datafusion::arrow::array::{ArrowPrimitiveType, BinaryBuilder, PrimitiveArray};
+    use datafusion::arrow::datatypes::{DataType, Field, Float64Type, Int64Type, Schema};
     use std::sync::Arc;
 
     fn batch_with_blobs(column: &str, blobs: &[Option<Vec<u8>>]) -> RecordBatch {
@@ -327,12 +345,11 @@ mod tests {
         assert!(matches!(err, CubismError::AggregateState(_)));
     }
 
-    fn scalar_batch<T: ArrowPrimitiveType>(column: &str, values: &[Option<T::Native>]) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            column,
-            T::DATA_TYPE,
-            true,
-        )]));
+    fn scalar_batch<T: ArrowPrimitiveType>(
+        column: &str,
+        values: &[Option<T::Native>],
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(column, T::DATA_TYPE, true)]));
         let array = PrimitiveArray::<T>::from_iter(values.iter().copied());
         RecordBatch::try_new(schema, vec![Arc::new(array)]).unwrap()
     }
@@ -401,6 +418,42 @@ mod tests {
             merge_scalar_column(&[batch], "views_v1", AggKind::Count).unwrap(),
             Some(0.0)
         );
+    }
+
+    #[test]
+    fn merge_scalar_column_nan_semantics_are_pinned_per_kind() {
+        // The doc comment's contract, pinned: Sum propagates NaN (SQL SUM
+        // behavior — no identity to fall back on), Min/Max skip it (Rust
+        // f64::min/max — a NaN row vanishes unless every value is).
+        let batch = scalar_batch::<Float64Type>("revenue_v1", &[Some(1.0), Some(f64::NAN)]);
+        assert!(
+            merge_scalar_column(&[batch], "revenue_v1", AggKind::Sum)
+                .unwrap()
+                .unwrap()
+                .is_nan()
+        );
+
+        let batch = scalar_batch::<Float64Type>("latency_v1", &[Some(1.0), Some(f64::NAN)]);
+        assert_eq!(
+            merge_scalar_column(&[batch], "latency_v1", AggKind::Min).unwrap(),
+            Some(1.0)
+        );
+
+        let all_nan = scalar_batch::<Float64Type>("latency_v1", &[Some(f64::NAN)]);
+        assert!(
+            merge_scalar_column(&[all_nan], "latency_v1", AggKind::Max)
+                .unwrap()
+                .unwrap()
+                .is_nan(),
+            "every value NaN means min/max have nothing non-NaN to keep"
+        );
+    }
+
+    #[test]
+    fn merge_scalar_column_count_overflow_is_an_error_not_a_wrap() {
+        let batch = scalar_batch::<Int64Type>("views_v1", &[Some(i64::MAX), Some(1)]);
+        let err = merge_scalar_column(&[batch], "views_v1", AggKind::Count).unwrap_err();
+        assert!(matches!(err, CubismError::AggregateState(_)));
     }
 
     #[test]
