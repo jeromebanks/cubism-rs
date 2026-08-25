@@ -1,9 +1,11 @@
 //! `/api/series`: minimal time-series range-query wiring
 //! (`docs/TIMESERIES_ROADMAP.md`'s Milestone 11).
 //!
-//! Narrowed to exactly what Milestone 10b-3 answers correctly: a single
-//! `XUnit` selector, `AverageState` measures only. Not a general-purpose
-//! range-query API.
+//! Narrowed to exactly what the roadmap milestones below answer correctly:
+//! a single `XUnit` selector; measures widened by Milestone 14 from
+//! `AverageState` only to also admit the four scalar kinds (`count`,
+//! `sum`, `min`, `max`, whose states columns are plain scalars rather than
+//! blobs). Still not a general-purpose range-query API.
 //!
 //! **Windows are a request-supplied input, not something this module
 //! derives from the query's time range.** `crates/cubism-datafusion/src/range_query.rs:79-85`
@@ -134,7 +136,8 @@ struct SeriesRequest {
     /// same format `/api/cell?xunit=...` already accepts.
     selector: String,
     /// Base measure name (`CubeSpec.measures[].name`); must be an `avg`
-    /// measure (Milestone 10b-3's narrowed scope, `AggKind::Avg`).
+    /// or scalar-kind (`count`/`sum`/`min`/`max`) measure — Milestone
+    /// 10b-3's scope widened by Milestone 14.
     measure: String,
     /// Unix microseconds, half-open `[start, end)`.
     start: i64,
@@ -162,9 +165,13 @@ async fn series(
         .iter()
         .find(|m| m.name == req.measure)
         .ok_or_else(|| ApiError::bad_request(format!("unknown measure '{}'", req.measure)))?;
-    if measure.agg != AggKind::Avg {
+    if !matches!(
+        measure.agg,
+        AggKind::Avg | AggKind::Count | AggKind::Sum | AggKind::Min | AggKind::Max
+    ) {
         return Err(ApiError::bad_request(format!(
-            "measure '{}' is {:?}; /api/series only supports avg measures for now",
+            "measure '{}' is {:?}; /api/series supports avg and the scalar kinds \
+             (count/sum/min/max) for now",
             req.measure, measure.agg
         )));
     }
@@ -246,8 +253,9 @@ async fn series(
         batches.push(segment_batches);
     }
 
-    let response = SeriesResponse::new(&coverage, gap_policy, &column, &[selector], &batches)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let response =
+        SeriesResponse::new(&coverage, gap_policy, measure.agg, &column, &[selector], &batches)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     Ok(Json(json!({
         "cube": state.spec.name,

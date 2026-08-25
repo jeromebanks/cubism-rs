@@ -7,10 +7,16 @@
 //! Deliberately narrow, per the roadmap split recorded in this milestone's
 //! own entry (same precedent Milestone 10b-1 set splitting off of Milestone
 //! 10b):
-//! - **Only `AverageState`**, via `merge_average_column`. Widening to
-//!   `VarianceState`/`QuantileState`/the sketch-backed kinds is left for a
-//!   later slice, once `SeriesResponse` needs to carry more than one measure
-//!   kind.
+//! - **Average blobs plus the four scalar measure kinds.** Milestone 10b's
+//!   original scope was `AverageState` only, via
+//!   [`crate::series_merge::merge_average_column`]. Milestone 14 widened
+//!   that consciously: the scalar kinds (`AggKind::Count`/`Sum`/`Min`/
+//!   `Max`) have plain `Int64`/`Float64` states columns rather than blobs,
+//!   so [`crate::series_merge::merge_scalar_column`] folds them with no
+//!   decode step, dispatched on the caller-supplied `AggKind`. The
+//!   blob-backed kinds beyond avg (`VarianceState`/`QuantileState`/the
+//!   sketch-backed kinds) stay deferred — each needs its own
+//!   decode-and-present wiring.
 //! - **No I/O.** Same "async stays in the caller" split `CoveragePlan` and
 //!   `merge_average_column` both established: `SeriesResponse::new` takes
 //!   already-read `RecordBatch`es per segment, one list per
@@ -49,26 +55,27 @@
 //! windows-to-batches correspondence it has no way to derive; it is a
 //! contract callers must uphold.
 //!
-//! **Gap policy is consumed, not deferred.** `merge_average_column` over a
-//! segment with zero published windows (or windows whose only rows are
-//! null) returns `AverageState::new()` — a zero-count state whose
-//! `present()` is `None`, not `Some(0.0)`, so "no data" and "a real zero"
-//! are already distinguished before `gap_policy` ever applies. `gap_policy`
-//! only matters for that `None` case: [`GapPolicy::Missing`] (the default a
+//! **Gap policy is consumed, not deferred.** A segment with zero published
+//! windows (or whose batches hold no row for the resolved selector, or only
+//! null measure values) merges to "no data" — `AverageState::new()`'s
+//! `present()` is `None` for avg; the scalar fold's seen-flag yields `None`
+//! for count/sum/min/max — so "no data" and "a real zero" are already
+//! distinguished before `gap_policy` ever applies. `gap_policy` only
+//! matters for that `None` case: [`GapPolicy::Missing`] (the default a
 //! caller should pick when unsure) leaves it `None`; [`GapPolicy::Zero`]
-//! substitutes `Some(0.0)`. A segment with a genuine non-zero-count merged
-//! value is never touched by this substitution, gap policy or not.
+//! substitutes `Some(0.0)`. A segment with a genuine merged value is never
+//! touched by this substitution, gap policy or not.
 
 use cubism_core::encoding::canonical_xunit_content_id;
 use cubism_core::{
-    AggregateState, CanonicalXUnit, CubismError, EventTime, Resolution, WindowId, WindowRevision,
-    XUnit, XUnitContentId,
+    AggKind, AggregateState, CanonicalXUnit, CubismError, EventTime, Resolution, WindowId,
+    WindowRevision, XUnit, XUnitContentId,
 };
 use datafusion::arrow::array::{Array, BooleanArray, FixedSizeBinaryArray, RecordBatch};
 use datafusion::arrow::compute::filter_record_batch;
 
 use crate::range_query::{CoveragePlan, GapPolicy};
-use crate::series_merge::merge_average_column;
+use crate::series_merge::{merge_average_column, merge_scalar_column};
 
 /// One segment of a [`SeriesResponse`], carrying the same provenance a
 /// [`crate::range_query::SegmentCoverage`] does plus a materialized value.
@@ -81,10 +88,12 @@ pub struct SeriesPoint {
     /// caller's `CoveragePlan` says the segment is aligned and fully
     /// published, even if `batches` for that segment is empty or wrong.
     pub is_exact: bool,
-    /// The segment's merged `AverageState`, presented (`AggregateState::present`,
-    /// i.e. the mean). `None` means no data was folded in for this segment —
+    /// The segment's merged value, presented per measure kind: avg presents
+    /// `AggregateState::present` (the mean); count/sum/min/max present the
+    /// scalar fold. `None` means no data was folded in for this segment —
     /// either no windows were published or `gap_policy` is
-    /// [`GapPolicy::Missing`]; see the module doc comment.
+    /// [`GapPolicy::Missing`]; see the module doc comment. Counts are exact
+    /// to 2^53 in this `f64` presentation.
     pub value: Option<f64>,
     pub published: Vec<(WindowId, WindowRevision)>,
     pub missing: Vec<WindowId>,
@@ -105,6 +114,15 @@ impl SeriesResponse {
     /// returns, concatenated across every published window backing the
     /// segment). Mirrors `CoveragePlan::new`'s own `windows` parameter
     /// contract, including the length-mismatch rejection.
+    ///
+    /// `agg` selects the merge/present path: `AggKind::Avg` decodes and
+    /// merges `AverageState` blobs from `column`; the scalar kinds
+    /// (`Count`/`Sum`/`Min`/`Max`) fold the plain scalar column. Any other
+    /// kind is rejected — blob-backed decode wiring beyond avg is not
+    /// built (see the module doc comment). The caller must pass the same
+    /// kind the column was built for: a mismatch surfaces as
+    /// `CubismError::AggregateState` from the merge itself (wrong storage
+    /// type for the kind), not as a silent zero.
     ///
     /// `selectors` must contain exactly one `XUnit` — anything else is
     /// rejected with `CubismError::Temporal` (see the module doc comment's
@@ -131,6 +149,7 @@ impl SeriesResponse {
     pub fn new(
         coverage: &CoveragePlan,
         gap_policy: GapPolicy,
+        agg: AggKind,
         column: &str,
         selectors: &[XUnit],
         batches: &[Vec<RecordBatch>],
@@ -157,11 +176,7 @@ impl SeriesResponse {
             .zip(batches)
             .map(|(segment, segment_batches)| {
                 let filtered = filter_batches_by_xunit(segment_batches, &content_id)?;
-                let merged = merge_average_column(&filtered, column)?;
-                let value = match (merged.present(), gap_policy) {
-                    (None, GapPolicy::Zero) => Some(0.0),
-                    (value, _) => value,
-                };
+                let value = merged_value(&filtered, agg, column, gap_policy)?;
                 Ok(SeriesPoint {
                     bucket_start: segment.segment.range.start(),
                     bucket_end: segment.segment.range.end(),
@@ -215,6 +230,36 @@ fn filter_batches_by_xunit(
         .collect()
 }
 
+/// Merge `filtered` to one presented value per measure kind and apply
+/// `gap_policy` to the no-data case only. Avg decodes/merges
+/// `AverageState` blobs (`merge_average_column`'s zero-count state is the
+/// no-data signal); the scalar kinds fold via `merge_scalar_column`
+/// (whose seen-flag is). Blob-backed kinds beyond avg are rejected here —
+/// the same "not guessed at" boundary the module doc comment records.
+fn merged_value(
+    filtered: &[RecordBatch],
+    agg: AggKind,
+    column: &str,
+    gap_policy: GapPolicy,
+) -> Result<Option<f64>, CubismError> {
+    let merged = match agg {
+        AggKind::Avg => merge_average_column(filtered, column)?.present(),
+        AggKind::Count | AggKind::Sum | AggKind::Min | AggKind::Max => {
+            merge_scalar_column(filtered, column, agg)?
+        }
+        other => {
+            return Err(CubismError::Temporal(format!(
+                "SeriesResponse does not support {other:?} measures (blob-backed kinds beyond \
+                 avg are deferred, not yet wired)"
+            )));
+        }
+    };
+    Ok(match (merged, gap_policy) {
+        (None, GapPolicy::Zero) => Some(0.0),
+        (value, _) => value,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,8 +268,10 @@ mod tests {
         AllowedLateness, AverageState, BucketOrigin, FixedResolution, TemporalSpec, TimeRange,
         YPath,
     };
-    use datafusion::arrow::array::{BinaryBuilder, FixedSizeBinaryBuilder};
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::array::{
+        ArrowPrimitiveType, BinaryBuilder, FixedSizeBinaryBuilder, PrimitiveArray,
+    };
+    use datafusion::arrow::datatypes::{DataType, Field, Float64Type, Int64Type, Schema};
     use std::sync::Arc;
 
     fn window(id: &str) -> WindowId {
@@ -295,6 +342,24 @@ mod tests {
         Resolution::Fixed(FixedResolution::from_micros(3_600_000_000).unwrap())
     }
 
+    /// A batch whose measure column is a plain scalar (`Int64` for count
+    /// measures, `Float64` for sum/min/max), every row carrying the same
+    /// `xunit_id` — the shape `temporal_state_schema` declares for those
+    /// kinds and `AggregateReader::read_window` hands back.
+    fn scalar_batch<T>(
+        column: &str,
+        xunit_id: [u8; 32],
+        values: &[Option<T::Native>],
+    ) -> RecordBatch
+    where
+        T: ArrowPrimitiveType,
+    {
+        scalar_batch_multi::<T>(
+            column,
+            &values.iter().map(|v| (xunit_id, *v)).collect::<Vec<_>>(),
+        )
+    }
+
     /// A one-segment `CoveragePlan`, aligned and fully published against a
     /// single window `w1` — the shared precondition for the tests below,
     /// which vary only the batches/gap_policy fed into `SeriesResponse::new`.
@@ -337,6 +402,7 @@ mod tests {
         let response = SeriesResponse::new(
             &coverage,
             GapPolicy::Missing,
+            AggKind::Avg,
             "avg_v1",
             &[XUnit::global()],
             &batches,
@@ -369,6 +435,7 @@ mod tests {
         let response = SeriesResponse::new(
             &coverage,
             GapPolicy::Missing,
+            AggKind::Avg,
             "avg_v1",
             &[XUnit::global()],
             &batches,
@@ -389,6 +456,7 @@ mod tests {
         let response = SeriesResponse::new(
             &coverage,
             GapPolicy::Zero,
+            AggKind::Avg,
             "avg_v1",
             &[XUnit::global()],
             &batches,
@@ -414,6 +482,7 @@ mod tests {
         let response = SeriesResponse::new(
             &coverage,
             GapPolicy::Zero,
+            AggKind::Avg,
             "avg_v1",
             &[XUnit::global()],
             &batches,
@@ -428,6 +497,7 @@ mod tests {
         let err = SeriesResponse::new(
             &coverage,
             GapPolicy::Missing,
+            AggKind::Avg,
             "avg_v1",
             &[XUnit::global()],
             &[],
@@ -446,6 +516,7 @@ mod tests {
         let err = SeriesResponse::new(
             &coverage,
             GapPolicy::Missing,
+            AggKind::Avg,
             "avg_v1",
             &[XUnit::global(), XUnit::global()],
             &batches,
@@ -453,8 +524,15 @@ mod tests {
         .expect_err("more than one selector must be rejected, not silently merged");
         assert!(matches!(err, CubismError::Temporal(_)));
 
-        let err = SeriesResponse::new(&coverage, GapPolicy::Missing, "avg_v1", &[], &batches)
-            .expect_err("zero selectors must be rejected too, not treated as \"no filter\"");
+        let err = SeriesResponse::new(
+            &coverage,
+            GapPolicy::Missing,
+            AggKind::Avg,
+            "avg_v1",
+            &[],
+            &batches,
+        )
+        .expect_err("zero selectors must be rejected too, not treated as \"no filter\"");
         assert!(matches!(err, CubismError::Temporal(_)));
     }
 
@@ -486,6 +564,7 @@ mod tests {
         let response = SeriesResponse::new(
             &coverage,
             GapPolicy::Missing,
+            AggKind::Avg,
             "avg_v1",
             &[XUnit::global()],
             &batches,
@@ -497,6 +576,133 @@ mod tests {
             "must merge only the global cell's row (mean of 3.0/5.0), not the mobile cell's \
              1000.0 too"
         );
+    }
+
+    /// Like [`scalar_batch`], but each row carries its own `xunit_id` —
+    /// needed to build a batch spanning more than one lattice cell.
+    fn scalar_batch_multi<T>(
+        column: &str,
+        rows: &[([u8; 32], Option<T::Native>)],
+    ) -> RecordBatch
+    where
+        T: ArrowPrimitiveType,
+    {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("xunit_id", DataType::FixedSizeBinary(32), true),
+            Field::new(column, T::DATA_TYPE, true),
+        ]));
+        let mut id_builder = FixedSizeBinaryBuilder::new(32);
+        for (id, _) in rows {
+            id_builder.append_value(id).unwrap();
+        }
+        let array = PrimitiveArray::<T>::from_iter(rows.iter().map(|(_, v)| *v));
+        RecordBatch::try_new(schema, vec![Arc::new(id_builder.finish()), Arc::new(array)])
+            .unwrap()
+    }
+
+    #[test]
+    fn series_response_scalar_count_sums_only_the_resolved_selectors_rows() {
+        // Milestone 14's widening: a count measure folds the Int64 column
+        // — and the same selector filter as avg applies first, so a
+        // foreign cell's big count must not leak into the sum (the #19
+        // shape again, scalar edition).
+        let coverage = one_segment_coverage_plan();
+        let mobile = XUnit::new(vec![
+            YPath::new("device").with_attribute("device", "mobile"),
+        ]);
+        let batches = vec![vec![scalar_batch::<Int64Type>(
+            "views_v1",
+            global_id(),
+            &[Some(3), Some(4)],
+        )]];
+        let mixed = vec![vec![scalar_batch_multi::<Int64Type>(
+            "views_v1",
+            &[
+                (global_id(), Some(3)),
+                (content_id(&mobile), Some(1000)),
+                (global_id(), Some(4)),
+            ],
+        )]];
+
+        let response = SeriesResponse::new(
+            &coverage,
+            GapPolicy::Missing,
+            AggKind::Count,
+            "views_v1",
+            &[XUnit::global()],
+            &batches,
+        )
+        .unwrap();
+        assert_eq!(response.points[0].value, Some(7.0));
+
+        let response = SeriesResponse::new(
+            &coverage,
+            GapPolicy::Missing,
+            AggKind::Count,
+            "views_v1",
+            &[XUnit::global()],
+            &mixed,
+        )
+        .unwrap();
+        assert_eq!(
+            response.points[0].value,
+            Some(7.0),
+            "scalar fold must also skip the mobile cell's 1000 rows"
+        );
+    }
+
+    #[test]
+    fn series_response_scalar_no_data_is_none_under_missing_and_zero_under_zero_gap_policy() {
+        // The scalar path's no-data signal is the seen-flag, not a numeric
+        // default — an empty batch list under Missing stays None (min of
+        // nothing is not 0), and Zero substitutes exactly there.
+        let coverage = one_segment_coverage_plan();
+        let batches = vec![vec![scalar_batch::<Float64Type>(
+            "latency_v1",
+            global_id(),
+            &[],
+        )]];
+
+        let response = SeriesResponse::new(
+            &coverage,
+            GapPolicy::Missing,
+            AggKind::Min,
+            "latency_v1",
+            &[XUnit::global()],
+            &batches,
+        )
+        .unwrap();
+        assert_eq!(response.points[0].value, None);
+
+        let response = SeriesResponse::new(
+            &coverage,
+            GapPolicy::Zero,
+            AggKind::Min,
+            "latency_v1",
+            &[XUnit::global()],
+            &batches,
+        )
+        .unwrap();
+        assert_eq!(response.points[0].value, Some(0.0));
+    }
+
+    #[test]
+    fn series_response_rejects_blob_backed_kinds_beyond_avg() {
+        // The widening stops at the four scalar kinds; Variance and the
+        // other blob-backed kinds still have no decode wiring, so they
+        // must be rejected rather than silently mis-read.
+        let coverage = one_segment_coverage_plan();
+        let batches = vec![vec![avg_batch("var_v1", global_id(), &[])]];
+        let err = SeriesResponse::new(
+            &coverage,
+            GapPolicy::Missing,
+            AggKind::Variance,
+            "var_v1",
+            &[XUnit::global()],
+            &batches,
+        )
+        .expect_err("blob-backed kinds beyond avg must be rejected, not guessed at");
+        assert!(matches!(err, CubismError::Temporal(_)));
     }
 
     #[test]
@@ -528,6 +734,7 @@ mod tests {
         let response = SeriesResponse::new(
             &coverage,
             GapPolicy::Missing,
+            AggKind::Avg,
             "avg_v1",
             &[XUnit::global()],
             &batches,

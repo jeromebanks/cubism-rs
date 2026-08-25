@@ -25,7 +25,11 @@ plan's status lines still read "decision pending." The maintainer resolved
 the remainder by judgment call; the advisor round's job was making sure
 the durable record doesn't overclaim what that judgment rests on.
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_32_HANDOFF.md` — first of the
+finish prompt's three demo slices: `/api/series` widened to scalar
+measures (roadmap Milestone 14); this doc's deferred item 3 (main line
+per finish-line discussion) is what that work plan now executes, starting
+with the demo.
 
 ## What this session built
 

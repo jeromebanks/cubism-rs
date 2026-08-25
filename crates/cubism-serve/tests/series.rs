@@ -12,7 +12,9 @@
 //! request naming a `window_id` that was never appended comes back as
 //! `missing`/non-exact with a 200, not a 500 or a falsely-exact point (the
 //! untrusted-client exposure `crate::series`'s module doc comment calls
-//! out). Does not prove anything about `resolution: None` (auto-select) or
+//! out). Milestone 14 adds the scalar-measure shape of the first claim: a
+//! `count` cube answers by summing its Int64 column across both windows'
+//! rows. Does not prove anything about `resolution: None` (auto-select) or
 //! `gap_policy: "zero"` — those are `range_query.rs`/`series_response.rs`'s
 //! own unit tests' job, not this integration test's.
 
@@ -23,7 +25,7 @@ use cubism_core::{AggKind, AggregateState, AggregateStateConfig, AverageState, C
 use cubism_iceberg::config::open_catalog;
 use cubism_iceberg::{AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, PublicationStore, TemporalTable};
 use cubism_datafusion::datafusion::arrow::array::{
-    BinaryArray, FixedSizeBinaryArray, RecordBatch, TimestampMicrosecondArray,
+    BinaryArray, FixedSizeBinaryArray, Int64Array, RecordBatch, TimestampMicrosecondArray,
 };
 use cubism_datafusion::datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use serde_json::{json, Value};
@@ -110,6 +112,48 @@ fn day_spec() -> TemporalSpec {
         rollups: vec![],
         retention: None,
     }
+}
+
+/// The count-measure variant of [`spec`]: same cube shape, but the only
+/// measure is `count` — which carries no input field
+/// (`AggKind::Count::requires_input()` is false) and is stored as a plain
+/// Int64 states column (`views_v1`), not a blob.
+fn count_spec(temporal: TemporalSpec) -> CubeSpec {
+    let mut spec = spec(temporal);
+    spec.measures = vec![MeasureSpec {
+        name: "views".into(),
+        agg: AggKind::Count,
+        input: None,
+        by: None,
+        state: AggregateStateConfig::default(),
+    }];
+    spec
+}
+
+/// `temporal_state_schema`'s declared shape for a count measure:
+/// `bucket_start`, `xunit_id`, then the measure column as non-null Int64.
+fn count_states_schema() -> ArrowSchema {
+    ArrowSchema::new(vec![
+        Field::new(
+            "bucket_start",
+            DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
+            true,
+        ),
+        Field::new("xunit_id", DataType::FixedSizeBinary(32), true),
+        Field::new("views_v1", DataType::Int64, false),
+    ])
+}
+
+fn count_states_batch(rows: &[(&str, [u8; 32], i64)]) -> RecordBatch {
+    let bucket_start = TimestampMicrosecondArray::from_iter_values(rows.iter().map(|(t, _, _)| micros(t)))
+        .with_timezone("+00:00");
+    let xunit_id = FixedSizeBinaryArray::try_from_iter(rows.iter().map(|(_, x, _)| *x)).unwrap();
+    let views = Int64Array::from_iter_values(rows.iter().map(|(_, _, v)| *v));
+    RecordBatch::try_new(
+        Arc::new(count_states_schema()),
+        vec![Arc::new(bucket_start), Arc::new(xunit_id), Arc::new(views)],
+    )
+    .unwrap()
 }
 
 /// stdlib-free-of-clients raw HTTP POST, same rationale as `tests/api.rs`'s
@@ -261,4 +305,101 @@ async fn series_endpoint_answers_an_aligned_two_window_range_and_reports_an_unkn
     let (status, body) = post(&base, "/api/series", &exact_request).await;
     assert_eq!(status, 400, "body: {body}");
     assert!(body["error"].as_str().unwrap().contains("exact=true"));
+}
+
+#[tokio::test]
+async fn series_endpoint_answers_a_count_measure_by_summing_the_published_windows_rows() {
+    // Milestone 14's widening end to end: the same durable two-handle
+    // fixture shape as the avg test above, but the cube's only measure is
+    // `count` (no input field) stored as a plain Int64 states column, and
+    // the request names it. Proves: the widened gate admits a scalar-kind
+    // measure; the Int64 column round-trips Iceberg -> `read_window` ->
+    // `SeriesResponse`'s scalar fold; and two published windows' rows sum
+    // into the one point's value. Does not prove anything about gap-policy
+    // substitution or selector filtering for scalars — those are
+    // `series_response.rs`'s own unit tests' job.
+    let warehouse = TempDir::new().unwrap();
+    let catalog_dir = TempDir::new().unwrap();
+    let catalog_db = catalog_dir.path().join("catalog.sqlite");
+    let control_dir = TempDir::new().unwrap();
+    let control_db = control_dir.path().join("control.sqlite");
+    let config = CatalogConfig::Sqlite { warehouse: warehouse.path().to_path_buf(), catalog_db: catalog_db.clone() };
+
+    let w1 = WindowId::new("2026-08-13").unwrap();
+    let w2 = WindowId::new("2026-08-14").unwrap();
+    let revision = WindowRevision::new(1).unwrap();
+
+    {
+        let catalog = open_catalog(&config).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &count_states_schema()).await.unwrap();
+        let publications = PublicationStore::sqlite(&control_db).await.unwrap();
+
+        let global_id = global_content_id();
+        for (window, bucket_ts, views) in [(&w1, "2026-08-13T12:00:00Z", 3i64), (&w2, "2026-08-14T12:00:00Z", 4)]
+        {
+            let states = vec![count_states_batch(&[(bucket_ts, global_id, views)])];
+            let registry = vec![registry_batch(&[(global_id, b"/G")])];
+            let expected_rows: u64 = states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+            let claim = publications
+                .claim_run(CUBE_ID, window, &format!("run-{}", window.as_str()), revision, expected_rows)
+                .await
+                .unwrap();
+            assert!(matches!(claim, ClaimResult::New(_)));
+            let result = AggregateWriter::append_window(
+                catalog.as_ref(),
+                &table,
+                AppendWindow {
+                    window_id: window,
+                    revision,
+                    run_id: &format!("run-{}", window.as_str()),
+                    states: &states,
+                    registry: &registry,
+                },
+            )
+            .await
+            .unwrap();
+            publications.record_append(&format!("run-{}", window.as_str()), result.snapshot_id).await.unwrap();
+            publications.publish(&format!("run-{}", window.as_str()), None).await.unwrap();
+        }
+    }
+
+    let series_publications = PublicationStore::sqlite(&control_db).await.unwrap();
+    let state = cubism_serve::SeriesState::open(count_spec(day_spec()), &config, series_publications).await.unwrap();
+    let app = cubism_serve::series_router(Arc::new(state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let request = json!({
+        "selector": "/G",
+        "measure": "views",
+        "start": micros("2026-08-13T00:00:00Z"),
+        "end": micros("2026-08-15T00:00:00Z"),
+        "resolution": "1d",
+        "exact": false,
+        "gap_policy": "missing",
+        "windows": [
+            {"window_id": "2026-08-13", "bucket_start": micros("2026-08-13T00:00:00Z")},
+            {"window_id": "2026-08-14", "bucket_start": micros("2026-08-14T00:00:00Z")},
+        ],
+    });
+    let (status, body) = post(&base, "/api/series", &request).await;
+    assert_eq!(status, 200, "body: {body}");
+    let points = body["points"].as_array().unwrap();
+    assert_eq!(points.len(), 1);
+    assert_eq!(points[0]["is_exact"], true);
+    assert_eq!(points[0]["value"], json!(7.0), "3 + 4 across both windows' rows");
+    assert_eq!(points[0]["published"].as_array().unwrap().len(), 2);
+    assert_eq!(points[0]["missing"].as_array().unwrap().len(), 0);
+
+    // A count measure the spec doesn't have must still be rejected by name.
+    let unknown_measure = json!({
+        "selector": "/G",
+        "measure": "nope",
+        "start": micros("2026-08-13T00:00:00Z"),
+        "end": micros("2026-08-15T00:00:00Z"),
+        "windows": [],
+    });
+    let (status, body) = post(&base, "/api/series", &unknown_measure).await;
+    assert_eq!(status, 400, "body: {body}");
 }

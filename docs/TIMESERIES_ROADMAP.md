@@ -1580,6 +1580,53 @@ each of the three milestones below, same as everywhere else in this doc.
   handoff's own "What was actually verified" section for the two caught
   and fixed while writing).
 
+### Milestone 14 — Scalar-measure widening of `/api/series` (count/sum/min/max)
+
+- **Status:** Done — `docs/TIMESERIES_PHASE_32_HANDOFF.md`.
+- **Why this exists:** first slice of the finish-prompt demo item
+  (`TIMESERIES_FINISH_PROMPT.md`, committed `957645a`) — its sub-part (a),
+  "widening `/api/series` enough for real web metrics", chosen ahead of the
+  dashboard-chart and docs-wiring slices because everything those render
+  flows through this API's shape. The advisor round picked it over a
+  window-discovery endpoint first: `PublicationStore` has no
+  list-current-publications query at all (both backends key every read by
+  `(cube_id, window_id)` or `run_id`), so discovery is its own cross-crate
+  slice, while sub-part (b)'s "listing endpoint **or convention**" branch
+  is already satisfied for the demo by Milestone 12a's day-string
+  convention (`WindowId` = bucket start date).
+- **Target:** `crates/cubism-datafusion/src/series_merge.rs`
+  (`merge_scalar_column` beside `merge_average_column` — scalar kinds need
+  no blob decoding, just their own fold); `crates/cubism-datafusion/src/
+  series_response.rs` (`SeriesResponse::new` takes the measure's `AggKind`
+  and dispatches blob-vs-scalar via a `merged_value` helper; no-data stays
+  structural — avg's zero-count state, scalars' seen-flag — before gap
+  policy applies); `crates/cubism-serve/src/series.rs` (the handler gate
+  widened from avg-only to avg + count/sum/min/max; module doc's narrowing
+  statement extended consciously rather than silently).
+- **Scope narrowing kept:** multi-selector/multi-measure response shape
+  stays rejected at `SeriesResponse::new`'s exactly-one-selector check —
+  it is still the recorded unresolved roadmap decision ("Phase 5 done
+  condition" section), not something this slice guesses an answer for.
+  Blob-backed kinds beyond avg (variance/quantile/sketches) stay deferred,
+  now with an explicit `CubismError::Temporal` rejection instead of falling
+  into the avg path. The wire shape is unchanged (`value` stays
+  `Option<f64>`; counts are exact to 2^53 in that presentation).
+- **Test:** unit tests on both merge paths in `cubism-datafusion`
+  (count sums across rows/batches/null-skipping; min-of-mins/max-of-maxes;
+  seen-flag `None` vs genuine-zero `Some(0.0)`; wrong-storage-type and
+  non-scalar-kind rejections; selector filtering on the scalar path);
+  one integration test in `crates/cubism-serve/tests/series.rs`
+  (`series_endpoint_answers_a_count_measure_by_summing_the_published_windows_rows`)
+  proving a count-only cube end to end through real durable Iceberg tables:
+  two published windows' rows (3 + 4) sum to the served point's value with
+  both windows in `published`.
+- **Depends on:** Milestones 10b-3, 11 (both `Done`).
+- **Done when:** a POST `/api/series` naming a scalar-kind measure answers
+  the exact folded value across multiple published windows over HTTP. Met:
+  the integration test above returns `value: 7.0`, `is_exact: true`,
+  two-window `published`; the avg-path behavior is regression-covered by
+  the pre-existing tests, updated only for the added `AggKind` parameter.
+
 ## Deferred (not in scope for this roadmap doc)
 
 1. **~~Extend this roadmap to plan-Phase 5~~ Resolved** — see "Phase 5

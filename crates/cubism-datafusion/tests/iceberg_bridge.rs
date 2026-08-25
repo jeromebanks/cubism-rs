@@ -32,7 +32,7 @@ use cubism_core::temporal::{
     AllowedLateness, BucketOrigin, EventTime, FixedResolution, Resolution, TemporalSpec, WindowId,
     WindowRevision,
 };
-use cubism_core::{AggregateState, AverageState, CanonicalXUnit};
+use cubism_core::{AggKind, AggregateState, AverageState, CanonicalXUnit};
 use cubism_datafusion::{
     CoveragePlan, GapPolicy, ResolutionPlan, SeriesResponse, TemporalQuery, merge_average_column,
 };
@@ -602,6 +602,7 @@ async fn series_response_materializes_two_published_windows_through_a_real_cover
     let response = SeriesResponse::new(
         &coverage,
         GapPolicy::Missing,
+        AggKind::Avg,
         "avg_v1",
         &[XUnit::global()],
         &batches,
