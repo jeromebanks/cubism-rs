@@ -1627,6 +1627,54 @@ each of the three milestones below, same as everywhere else in this doc.
   two-window `published`; the avg-path behavior is regression-covered by
   the pre-existing tests, updated only for the added `AggKind` parameter.
 
+### Milestone 15 — Time-series line chart in the serve dashboard
+
+- **Status:** Done — `docs/TIMESERIES_PHASE_33_HANDOFF.md`.
+- **Why this exists:** second slice of the finish prompt's demo item
+  (sub-part c): "a time-series line chart in the serve dashboard fed by
+  the API". Depends on Milestone 14's widened API; deliberately does NOT
+  touch any `.rs` file — the chart is pure dashboard work.
+- **Target:** `crates/cubism-serve/assets/index.html` only (plus one test
+  bump and a capture script): a full-width "Time series" panel that stays
+  `hidden` until its first load proves `/api/series` is actually mounted
+  (a raw-fetch probe classifies axum's non-JSON 404 as "absent" and hides
+  silently — static-cube-only serves, the common case, degrade exactly as
+  before). Controls are free-text selector/measure inputs plus a date
+  range; the measure default is hardcoded (`avg_revenue`), never derived
+  from `/api/meta`, whose measures belong to the *static* placeholder cube
+  in this demo and would mislead. Rendering is hand-rolled SVG string-
+  building matching the page's existing `barChart()` style — no external
+  assets (the page is `include_str!`-embedded).
+- **One request per day, not one multi-day request:** `/api/series`
+  merges each contiguous segment's windows into ONE point
+  (`range_query.rs`'s "(at most one) interior segment"), so a single
+  multi-day request renders one dot. The panel issues one single-day
+  request per day in parallel — the exact shape `query_temporal_demo.sh`
+  already uses — with windows per Milestone 12a's day-string convention
+  (`window_id` = day, `bucket_start` = midnight µs; JS ms ×1000).
+- **Honest encoding:** solid accent markers/polyline = exact points;
+  dashed amber segments + hollow markers = partial coverage; an explicit
+  ✕ on the baseline = missing/no-data (never interpolated across); each
+  marker's native SVG `<title>` carries date · PARTIAL · revision ·
+  value; a legend line reports `source_resolution` and which revisions
+  are shown.
+- **Test:** `crates/cubism-serve/tests/api.rs` asserts the served `/`
+  page contains the panel hooks (`id="tsPanel"`, `/api/series`,
+  `bucket_start`, `is_exact`) via a new raw-text helper (the JSON-parsing
+  helper nulls out HTML). The behavioral capture is
+  `examples/web_analytics_demo/serve_temporal_dashboard.sh`: builds all
+  three demo days, serves them behind the placeholder-parquet trick,
+  greps the page for the panel tokens, then issues the exact per-day
+  JSON bodies the JS constructs — asserting three exact points whose
+  middle day carries revision 2 (the correction) at bucket_start
+  `1775520000000000`. What cargo/script verification can NOT prove:
+  browser rendering of the SVG itself — human-verified against this
+  script's captured transcript (Milestone 12a precedent).
+- **Depends on:** Milestone 14 (`Done`).
+- **Done when:** from a clean checkout, the capture script passes end to
+  end and the served page carries the panel markup. Met — verbatim
+  transcript in `docs/TIMESERIES_PHASE_33_HANDOFF.md`.
+
 ## Deferred (not in scope for this roadmap doc)
 
 1. **~~Extend this roadmap to plan-Phase 5~~ Resolved** — see "Phase 5

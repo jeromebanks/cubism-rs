@@ -16,7 +16,11 @@ two slices. (Naming note, carried forward from every prior handoff in this
 series: this file's number is a *session-slice* number, not a plan phase
 number.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** `docs/TIMESERIES_PHASE_33_HANDOFF.md` — second demo
+slice: the serve dashboard's time-series line-chart panel (roadmap
+Milestone 15), with a capture script proving the served markup and the
+per-day `/api/series` requests the panel issues; this doc's deferred
+items 1–2 (chart, then docs/wiring) are what that work continues.
 
 ## What this session built
 

@@ -137,4 +137,31 @@ async fn api_end_to_end() {
     // the dashboard ships
     let (status, _) = get(&base, "/").await;
     assert_eq!(status, 200);
+
+    // the time-series panel ships inside it: the markup the JS reveals
+    // only when /api/series is actually mounted (static-cube-only serves
+    // keep it hidden), plus the endpoint and field names its requests and
+    // rendering depend on. Content-token checks only — this proves the
+    // panel exists in the served page, not that the JS renders.
+    let (status, page) = get_text(&base, "/").await;
+    assert_eq!(status, 200);
+    for token in ["id=\"tsPanel\"", "id=\"tsChart\"", "/api/series", "bucket_start", "is_exact"] {
+        assert!(page.contains(token), "dashboard must contain {token}");
+    }
+}
+
+/// Like [`get`], but returns the body as raw text — for non-JSON routes
+/// (`/`'s HTML), which `get`'s Value parse would silently turn into Null.
+async fn get_text(base: &str, path: &str) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(base).await.unwrap();
+    stream
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: {base}\r\nConnection: close\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8(buf).unwrap();
+    let status: u16 = text.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, text.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
 }

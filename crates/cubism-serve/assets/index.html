@@ -29,11 +29,16 @@
   .stat .l { color: var(--muted); font-size: 12px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
            padding: 16px; margin-bottom: 16px; }
-  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-  select, input {
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
+              align-items: center; }
+  select, input, button {
     background: var(--bg); color: var(--text); border: 1px solid var(--line);
     border-radius: 6px; padding: 6px 8px; font: inherit; max-width: 260px;
   }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  input[type="date"] { max-width: 150px; }
+  #tsSelector, #tsMeasure { max-width: 170px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
   svg text { fill: var(--text); font-size: 12px; }
@@ -47,6 +52,8 @@
   .chip { background: var(--bg); border: 1px solid var(--line); border-radius: 99px;
           padding: 2px 10px; font-size: 12px; color: var(--muted); }
   .ops { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px;
+            color: var(--muted); font-size: 12px; }
   .err { color: #f26d6d; }
   code { color: var(--accent); font-size: 12px; }
 </style>
@@ -67,6 +74,18 @@
     <select id="sliceMeasure"></select>
   </div>
   <div id="sliceChart"></div>
+</div>
+
+<div class="panel" id="tsPanel" hidden>
+  <h2>Time series <span style="text-transform:none;letter-spacing:0">— event-time buckets from the durable Iceberg cube</span></h2>
+  <div class="controls">
+    <input id="tsSelector" value="/G" placeholder="/G" title="XUnit selector (same format as the cell inspector)">
+    <input id="tsMeasure" value="avg_revenue" placeholder="measure" title="Measure name — from the temporal spec, not the static cube">
+    <input type="date" id="tsStart" value="2026-04-06" title="First day">
+    <input type="date" id="tsEnd" value="2026-04-08" title="Last day">
+    <button id="tsLoad">load</button>
+  </div>
+  <div id="tsChart"><span style="color:var(--muted)">checking for /api/series…</span></div>
 </div>
 
 <div class="grid2">
@@ -208,6 +227,142 @@ async function inspect(xunit) {
 
 const enc = encodeURIComponent;
 
+// ---- Time series (/api/series) -------------------------------------------
+// Present only when `cubism serve` was started with --spec/--warehouse; on
+// a static-cube-only serve the route does not exist and this panel stays
+// hidden. Windows follow Milestone 12a's convention: one window per day,
+// window_id = the day string, bucket_start = that midnight in Unix
+// MICROseconds (the API speaks µs; JS Date speaks ms — hence the *1000).
+//
+// One request PER DAY, deliberately: /api/series merges each contiguous
+// segment's windows into one point (`range_query.rs`'s "at most one
+// interior segment"), so a single multi-day request would render one dot,
+// not a line. A single-day range yields exactly one aligned segment.
+const DAY_MS = 86400000;
+
+function tsRequest(dayMs, selector, measure) {
+  const start = dayMs * 1000;
+  return {
+    selector, measure,
+    start,
+    end: start + DAY_MS * 1000,
+    exact: false,
+    gap_policy: "missing",
+    windows: [{ window_id: new Date(dayMs).toISOString().slice(0, 10), bucket_start: start }],
+  };
+}
+
+async function postSeries(body) {
+  const r = await fetch("/api/series", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let j;
+  try { j = await r.json(); } catch (_) { return { absent: true }; }
+  if (!r.ok) return j && j.error ? { error: j.error } : { absent: true };
+  if (!Array.isArray(j.points)) return { absent: true };
+  return { point: j.points[0] ?? null, source_resolution: j.source_resolution };
+}
+
+async function loadTimeSeries() {
+  try {
+    const selector = $("tsSelector").value.trim() || "/G";
+    const measure = $("tsMeasure").value.trim();
+    const t0 = Date.parse($("tsStart").value + "T00:00:00Z");
+    const t1 = Date.parse($("tsEnd").value + "T00:00:00Z");
+    if (!measure || Number.isNaN(t0) || Number.isNaN(t1) || t1 < t0) {
+      $("tsPanel").hidden = false;
+      $("tsChart").innerHTML = `<span class="err">pick a measure and a valid date range</span>`;
+      return;
+    }
+    $("tsChart").innerHTML = `<span style="color:var(--muted)">loading…</span>`;
+    const days = [];
+    for (let t = t0; t <= t1; t += DAY_MS) days.push(t);
+    const results = await Promise.all(days.map(t => postSeries(tsRequest(t, selector, measure))));
+    if (results.every(r => r.absent)) {
+      // static-cube-only serve: /api/series is not mounted — stay hidden
+      $("tsPanel").hidden = true;
+      return;
+    }
+    $("tsPanel").hidden = false;
+    const errs = results.filter(r => r.error);
+    if (errs.length === results.length) {
+      $("tsChart").innerHTML = `<span class="err">${esc(errs[0].error)}</span>`;
+      return;
+    }
+    drawSeriesChart(results, days, selector);
+  } catch (e) {
+    // never let a series problem break the static panels' init path
+    $("tsPanel").hidden = false;
+    $("tsChart").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
+function drawSeriesChart(results, days, selector) {
+  const el = $("tsChart");
+  const pts = results.map(r => r.point ?? null);
+  const srcRes = (results.find(r => r.source_resolution) || {}).source_resolution;
+  const W = el.clientWidth || 1040, H = 280, L = 60, R = 20, T = 18, B = 42;
+  const plotW = W - L - R, plotH = H - T - B, yBase = T + plotH;
+  const vals = pts.filter(p => p && p.value != null).map(p => p.value);
+
+  let s = `<svg width="${W}" height="${H}" role="img">`;
+  s += `<line x1="${L}" y1="${yBase}" x2="${W - R}" y2="${yBase}" stroke="var(--line)"></line>`;
+  s += `<line x1="${L}" y1="${T}" x2="${L}" y2="${yBase}" stroke="var(--line)"></line>`;
+
+  if (!vals.length) {
+    s += `<text class="muted" x="${L + plotW / 2}" y="${T + plotH / 2}" text-anchor="middle">no data in this range for ${esc(selector)}</text>`;
+  } else {
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    if (lo === hi) { lo -= 1; hi += 1; }
+    const pad = (hi - lo) * 0.1; lo -= pad; hi += pad;
+    const X = i => pts.length === 1 ? L + plotW / 2 : L + plotW * i / (pts.length - 1);
+    const Y = v => T + plotH * (hi - v) / (hi - lo);
+    for (let k = 0; k <= 2; k++) {
+      const tv = lo + (hi - lo) * k / 2, ty = Y(tv);
+      s += `<text class="muted" x="${L - 8}" y="${ty + 4}" text-anchor="end">${fmt(tv)}</text>`
+        + `<line x1="${L}" y1="${ty}" x2="${W - R}" y2="${ty}" stroke="var(--line)" stroke-dasharray="2 4" opacity="0.5"></line>`;
+    }
+    // segments between consecutive data-bearing points: solid accent when
+    // BOTH endpoints are exact, dashed amber otherwise — partial coverage
+    // must not read as committed-to
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      if (!a || !b || a.value == null || b.value == null) continue;
+      const exact = a.is_exact && b.is_exact;
+      s += `<line x1="${X(i - 1)}" y1="${Y(a.value)}" x2="${X(i)}" y2="${Y(b.value)}"`
+        + ` stroke="${exact ? "var(--accent)" : "var(--accent2)"}" stroke-width="2"`
+        + `${exact ? "" : ` stroke-dasharray="5 4"`}></line>`;
+    }
+    pts.forEach((p, i) => {
+      const day = new Date(days[i]).toISOString().slice(0, 10);
+      if (!p || p.value == null) {
+        // missing/no-data bucket: an explicit gap mark on the baseline —
+        // never interpolated across
+        s += `<text class="muted" x="${X(i)}" y="${yBase - 8}" text-anchor="middle" font-weight="bold">✕<title>${day} · no data</title></text>`;
+        return;
+      }
+      const revs = (p.published || []).map(q => q.revision).join("/") || "?";
+      const title = `${day}${p.is_exact ? "" : " · PARTIAL"} · rev ${revs} · ${fmt(p.value)}${p.missing?.length ? ` · missing: ${p.missing.join(", ")}` : ""}`;
+      if (p.is_exact) {
+        s += `<circle cx="${X(i)}" cy="${Y(p.value)}" r="4.5" fill="var(--accent)"><title>${esc(title)}</title></circle>`;
+      } else {
+        s += `<circle cx="${X(i)}" cy="${Y(p.value)}" r="4.5" fill="none" stroke="var(--accent2)" stroke-width="2"><title>${esc(title)}</title></circle>`;
+      }
+      s += `<text class="muted" x="${X(i)}" y="${H - B + 18}" text-anchor="middle">${day.slice(5)}</text>`;
+    });
+  }
+  s += "</svg>";
+
+  const revs = [...new Set(pts.filter(Boolean).flatMap(p => (p.published || []).map(q => q.revision)))].sort((a, b) => a - b);
+  el.innerHTML = s
+    + `<div class="legend"><span>● published exactly</span><span><b style="color:var(--accent2)">◌</b> partial coverage</span><span>✕ no data</span>`
+    + `<span style="margin-left:auto">resolution ${esc(String(srcRes))}`
+    + (revs.length ? ` · revision${revs.length > 1 ? "s" : ""} shown: ${revs.join(", ")}` : "")
+    + `</span></div>`;
+}
+
 async function init() {
   META = await api("/api/meta");
   $("source").textContent = META.source.split("/").pop();
@@ -227,6 +382,11 @@ async function init() {
   for (const id of ["sliceDim", "sliceDepth", "sliceMeasure"]) $(id).addEventListener("change", drawSlice);
   for (const id of ["opsA", "opsB", "opsMeasure"]) $(id).addEventListener("change", drawOps);
   $("inspectX").addEventListener("change", () => inspect($("inspectX").value));
+  // the first load doubles as the /api/series capability probe; it never
+  // throws, so a series problem can't reach init()'s global catch
+  loadTimeSeries();
+  for (const id of ["tsSelector", "tsMeasure", "tsStart", "tsEnd"]) $(id).addEventListener("change", loadTimeSeries);
+  $("tsLoad").addEventListener("click", loadTimeSeries);
 }
 init().catch(e => document.body.insertAdjacentHTML("beforeend", `<p class="err">${esc(e.message)}</p>`));
 </script>
