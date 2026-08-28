@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Queries the time-series web-analytics demo over real HTTP
 # (`docs/TIMESERIES_ROADMAP.md` Milestone 12b): captures a `/api/series`
-# request/response pair against window 2026-04-07 before and after its
+# request/response pair against the corrected window before and after its
 # revision-2 correction is published, proving Milestone 12a's revision
 # bump (visible so far only as `control_runs`/`control_publications`
 # rows) is also visible through the query path a real client would use.
 #
-# Builds only what this query needs: window 2026-04-07, both revisions --
+# Builds only what this query needs: the corrected window, both revisions --
 # unlike `build_temporal_demo.sh` (Milestone 12a), which also builds the
 # two ordinary days for its own demonstration. This script does not
 # require that one to have run first. Both scripts share the same
@@ -37,8 +37,16 @@ OUT=.temporal_build
 BIN="cargo run --release -q -p cubism-cli --"
 SPEC=web_analytics_temporal.yaml
 PORT=8095
-WINDOW=2026-04-07
-NEXT_DAY=2026-04-08
+
+# START_DATE / DAYS / USERS / LATE_OFFSET / day_at() / LATE_DAY
+. ./demo_env.sh
+# The window this script queries IS the corrected one, derived from the
+# same shared numbers the generator is given below. Hardcoding a date here
+# is how this script silently stops proving anything: if the generator
+# holds its late events back from a different day, the "before" and
+# "after" responses below are identical.
+WINDOW=$LATE_DAY
+NEXT_DAY=$LATE_NEXT_DAY
 
 rm -rf "$OUT"
 mkdir -p "$OUT/warehouse"
@@ -46,7 +54,8 @@ mkdir -p "$OUT/warehouse"
 echo "== generating temporal event stream =="
 python3 generate_temporal_events.py \
   --output "$OUT/events_temporal.csv" \
-  --initial-output "$OUT/events_temporal_initial.csv"
+  --initial-output "$OUT/events_temporal_initial.csv" \
+  --days "$DAYS" --users "$USERS" --late-day-offset "$LATE_OFFSET"
 
 echo "== writing placeholder cube_path parquet (required by \`serve\`'s CLI, unused by /api/series) =="
 python3 - "$OUT/placeholder_cube.parquet" <<'PY'

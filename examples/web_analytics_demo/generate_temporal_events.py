@@ -9,9 +9,11 @@ generator, which stays untouched — its `events.csv` output and the
 `temporal-build` / `iceberg-build` CLI path against a new `cubism/v2alpha1`
 spec (`web_analytics_temporal.yaml`), which `apiVersion: v1` cannot parse.
 
-Deliberately small (a handful of users, a few days) so the demo's
-`temporal-build` + `iceberg-build` pair, run once per day, stays a
-readable, seconds-long transcript rather than dozens of invocations.
+Sized so the dashboard has an actual *series* to draw: two weeks of days
+at ~300 users/day, which keeps the per-day `temporal-build` +
+`iceberg-build` pair a seconds-long transcript while giving every charted
+XUnit enough daily volume to move. Each user is assigned to exactly one
+day, so `--users` divided by `--days` is the daily cohort size.
 
 Writes two CSVs from the same generated event set:
   - `--output`: the full stream, including the late-arriving events.
@@ -40,10 +42,10 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--initial-output", required=True)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--users", type=int, default=220)
-    parser.add_argument("--days", type=int, default=3)
+    parser.add_argument("--users", type=int, default=4200)
+    parser.add_argument("--days", type=int, default=14)
     parser.add_argument(
-        "--late-day-offset", type=int, default=1,
+        "--late-day-offset", type=int, default=7,
         help="0-indexed day (within --days) that receives a late correction",
     )
     parser.add_argument("--late-count", type=int, default=6)

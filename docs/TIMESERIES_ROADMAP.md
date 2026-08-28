@@ -1491,6 +1491,13 @@ each of the three milestones below, same as everywhere else in this doc.
   not invent** (same note as original Milestone 12's text): one window
   per day, `WindowId` = the bucket's start date (`2026-04-06`,
   `2026-04-07`, `2026-04-08`).
+- **Amended by Milestone 16.** The `WindowId`-per-day convention above is
+  unchanged and still owned here. The *dataset* it describes is not: the
+  spec gained two dimensions and two measures, the stream went to 14
+  days, and the corrected window moved from `2026-04-07` to whatever
+  `demo_env.sh`'s `LATE_OFFSET` selects (`2026-04-13` by default). Read
+  this entry as the record of what 12a landed, not as a description of
+  the demo as it now stands.
 - **Test:** none in the workspace `cargo test` sense — a demo asset, not
   library code, same as Milestone 12's own "Test" bullet already noted.
   "Done" is a captured, reproducible command transcript instead (see
@@ -1531,6 +1538,12 @@ each of the three milestones below, same as everywhere else in this doc.
   resolution collapses to one merged point, which would blur the before/
   after delta this milestone exists to show).
 - **Test:** none — demo/documentation, same as 12a.
+- **Amended by Milestone 16.** The before/after-a-correction shape this
+  milestone established is unchanged; the window it runs against is no
+  longer the hardcoded `2026-04-07` but `demo_env.sh`'s corrected day, and
+  the captured values moved with the widened dataset (`0.0` ->
+  `1.6638655462184875` became `0.39083750894774516` -> `0.9194583036350678`).
+  See Milestone 16 for why hardcoding it was a live trap.
 - **Depends on:** Milestone 12a (`Done`).
 - **Done when:** a captured request/response pair (curl or equivalent)
   against a `cubism serve --spec .. --warehouse ..` process shows
@@ -1676,6 +1689,77 @@ each of the three milestones below, same as everywhere else in this doc.
 - **Done when:** from a clean checkout, the capture script passes end to
   end and the served page carries the panel markup. Met — verbatim
   transcript in `docs/TIMESERIES_PHASE_33_HANDOFF.md`.
+- **Amended by Milestone 16 below**, which widens the demo dataset and
+  the chart. The per-day request shape, honest encoding and window
+  convention described above all still hold; the "three demo days",
+  "middle day", "solid accent = exact" and single-selector details do
+  not — see Milestone 16 for what replaced them.
+
+### Milestone 16 — Multi-XUnit chart and a demo dataset worth charting
+
+- **Status:** Done.
+- **Why:** Milestones 14/15 made the demo chartable, but only ever as
+  *one* line: a single XUnit (`/G`) over three days of a one-dimension,
+  one-measure cube. That is enough to prove the path works and not enough
+  to show what a cube is for — the whole point of an XUnit lattice is
+  comparing cells to each other over time.
+- **Target — the chart** (`crates/cubism-serve/assets/index.html`, no
+  `.rs` changes): the selector input takes a **`;`-separated** list, one
+  line per XUnit. `;` and not `,` because a comma already joins the
+  YPaths *inside* one XUnit (`/geo/country=US,/device/type=mobile` is one
+  two-dimension cell) — splitting on it would silently shred
+  multi-dimension selectors. Fan-out is client-side, one request per
+  (selector, day) in a single `Promise.all` (98 requests ≈ 210 ms
+  locally); the request cap moved from days to selectors × days.
+- **Colour re-encoding, deliberate:** with several series drawn together
+  colour must mean "which XUnit", so exactness moved entirely to line
+  style (dashed) + marker fill (hollow). Milestone 15's accent/amber
+  exact-vs-partial colour pair would otherwise read as series identity.
+  The y-domain folds over every series so the lines stay comparable.
+- **`log y` toggle:** a global rollup and a single-country cell differ by
+  an order of magnitude, flattening the small series onto the axis. Opt-in
+  rather than automatic — it changes what the slope means (equal ratios,
+  not equal differences). Values ≤ 0 have no log: they become gaps, and
+  the legend counts them rather than letting them vanish. The linear path
+  additionally clamps its lower bound at 0 for all-non-negative data (a
+  `-0.28` gridline under a count is not a value the measure can take).
+- **URL prefill** (`applySeriesParams`):
+  `?selectors=…&measure=…&start=…&end=…&log=1`. This is what keeps the
+  shipped dashboard generic — it knows nothing about countries or plans;
+  the demo's selector list lives in the demo's own launch script.
+- **Target — the dataset** (`web_analytics_temporal.yaml`,
+  `generate_temporal_events.py`, `build_temporal_demo.sh`): three
+  dimensions (`geo`/`device`/`plan`) under `max_dimensions: 2`, three
+  measures (`avg_revenue` `Avg`, `revenue` `Sum`, `page_views` `Count` —
+  all kinds `/api/series` actually answers; no sketch-backed measure,
+  which it rejects), and 14 days × ~4,200 users ≈ 20,000 events, 51
+  XUnits per day. The build script's hardcoded three dates became a loop
+  over a day range.
+- **`demo_env.sh` — the trap this closed:** `query_temporal_demo.sh`
+  hardcoded window `2026-04-07` while inheriting the generator's
+  `--late-day-offset` default. Moving the corrected day to offset 7 would
+  have left that script querying an *uncorrected* window, making its
+  before/after pair two identical responses — a script that silently
+  proves nothing. `START_DATE`/`DAYS`/`USERS`/`LATE_OFFSET`/`day_at()`
+  now live in one sourced file that all three scripts share.
+- **Note on sparsity:** the full lattice under `max_dimensions: 2` is 51
+  cells and the build materializes 49-51 per day (12 of 15 windows hit
+  all 51), so this dataset is nearly dense — the demo does not exhibit
+  the sparse path. What it exhibits is *rule-constrained materialization*
+  (`max_dimensions: 2` keeps the 45 three-dimension cells from existing
+  at all). Recorded so the demo is not cited as sparsity evidence it does
+  not provide.
+- **Test:** unchanged workspace battery (229 passed, clippy clean);
+  Milestone 15's `api.rs` markup-token assertions still hold (the panel
+  hooks it greps for are untouched). Browser-side verification is
+  Playwright-driven this time rather than human-only: rendered SVG with
+  seven series over 14 days, 98 `<title>` tooltips, the corrected day
+  reading `rev 2` across every series while its neighbours read `rev 1`,
+  and zero console errors — a step up from Milestone 15's explicitly
+  unverified "a browser executes the JS" gap.
+- **Depends on:** Milestone 15 (`Done`).
+- **Done when:** `./run_temporal_demo.sh --open` renders a multi-XUnit,
+  multi-day chart with the corrected day visible at revision 2. Met.
 
 ## Deferred (not in scope for this roadmap doc)
 
