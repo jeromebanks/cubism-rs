@@ -993,6 +993,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "chrono",
+ "crc32fast",
  "proptest",
  "serde",
  "serde_json",

@@ -176,7 +176,79 @@ pub trait AggregateState: Sized {
 const AVG_MAGIC: &[u8; 3] = b"AVG";
 const VAR_MAGIC: &[u8; 3] = b"VAR";
 const QNT_MAGIC: &[u8; 3] = b"QNT";
+
+/// Original framing: `magic(3) | version(1) | payload`. Still *readable* —
+/// warehouses written before [issue #9](https://github.com/jeromebanks/cubism-rs/issues/9)
+/// hold V1 blobs and must keep decoding — but never written any more.
+/// A V1 blob carries no integrity check; that is what V1 *is*, and
+/// [`decode`](AggregateState::decode) cannot invent one retroactively.
 const FORMAT_V1: u8 = 1;
+
+/// Current framing: `magic(3) | version(1) | payload | crc32(4, LE)`.
+///
+/// The checksum covers **every preceding byte, magic and version
+/// included**, not just the payload — corruption of the version byte would
+/// otherwise be indistinguishable from a legitimate version bump, which is
+/// exactly the confusion this framing exists to prevent.
+///
+/// Why a blob-level checksum at all, given Parquet already checksums pages
+/// and Iceberg checksums files: those protect data *at rest, once written*.
+/// A state blob is built in memory, merged with other blobs across windows
+/// and revisions, and re-encoded on every correction — an in-memory bit
+/// flip or a buggy intermediate transform lands in Parquet as a
+/// well-formed page containing a wrong `f64`, and the magic+version check
+/// cannot see it. Aggregates are merged, so one bad blob silently poisons
+/// every rollup that reads it, and a correction republishes the poison as
+/// a new authoritative revision.
+const FORMAT_V2: u8 = 2;
+
+/// Bytes appended by V2 framing.
+const CRC_LEN: usize = 4;
+
+/// Appends the CRC32 of everything already in `out`. Call last.
+fn finish_v2(mut out: Vec<u8>) -> Vec<u8> {
+    let checksum = crc32fast::hash(&out);
+    out.extend_from_slice(&checksum.to_le_bytes());
+    out
+}
+
+/// Splits a decoded blob into `(body, declared_version)`, verifying the
+/// checksum when the framing carries one.
+///
+/// Returns the bytes *without* any trailing checksum, so each `decode`
+/// below indexes the same payload offsets for V1 and V2 alike.
+fn verify_framing<'a>(bytes: &'a [u8], kind: &str) -> Result<&'a [u8], CubismError> {
+    if bytes.len() < 4 {
+        return Err(CubismError::AggregateState(format!(
+            "{kind} blob is truncated: {} byte(s), need at least 4 for the header",
+            bytes.len()
+        )));
+    }
+    match bytes[3] {
+        FORMAT_V1 => Ok(bytes),
+        FORMAT_V2 => {
+            if bytes.len() < 4 + CRC_LEN {
+                return Err(CubismError::AggregateState(format!(
+                    "{kind} v2 blob is truncated: {} byte(s), too short to hold a checksum",
+                    bytes.len()
+                )));
+            }
+            let split = bytes.len() - CRC_LEN;
+            let (body, tail) = bytes.split_at(split);
+            let stored = u32::from_le_bytes(tail.try_into().expect("CRC_LEN bytes"));
+            let actual = crc32fast::hash(body);
+            if stored != actual {
+                return Err(CubismError::AggregateState(format!(
+                    "{kind} state blob failed its checksum: stored {stored:#010x},                      computed {actual:#010x} — the blob is corrupt, not merely                      an unknown version"
+                )));
+            }
+            Ok(body)
+        }
+        other => Err(CubismError::AggregateState(format!(
+            "{kind} uses unsupported state version {other}"
+        ))),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AverageState {
@@ -253,15 +325,16 @@ impl AggregateState for AverageState {
     }
 
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(20);
+        let mut out = Vec::with_capacity(20 + CRC_LEN);
         out.extend_from_slice(AVG_MAGIC);
-        out.push(FORMAT_V1);
+        out.push(FORMAT_V2);
         out.extend_from_slice(&self.sum.to_le_bytes());
         out.extend_from_slice(&self.count.to_le_bytes());
-        out
+        finish_v2(out)
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, CubismError> {
+        let bytes = verify_framing(bytes, "average")?;
         check_header(bytes, AVG_MAGIC, 20, "average")?;
         let sum = f64::from_le_bytes(bytes[4..12].try_into().unwrap());
         let count = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
@@ -389,16 +462,17 @@ impl AggregateState for VarianceState {
     }
 
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(28);
+        let mut out = Vec::with_capacity(28 + CRC_LEN);
         out.extend_from_slice(VAR_MAGIC);
-        out.push(FORMAT_V1);
+        out.push(FORMAT_V2);
         out.extend_from_slice(&self.count.to_le_bytes());
         out.extend_from_slice(&self.mean.to_le_bytes());
         out.extend_from_slice(&self.m2.to_le_bytes());
-        out
+        finish_v2(out)
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, CubismError> {
+        let bytes = verify_framing(bytes, "variance")?;
         check_header(bytes, VAR_MAGIC, 28, "variance")?;
         let state = Self {
             count: u64::from_le_bytes(bytes[4..12].try_into().unwrap()),
@@ -539,9 +613,9 @@ impl AggregateState for QuantileState {
     }
 
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(24 + self.bins.len() * 16);
+        let mut out = Vec::with_capacity(24 + self.bins.len() * 16 + CRC_LEN);
         out.extend_from_slice(QNT_MAGIC);
-        out.push(FORMAT_V1);
+        out.push(FORMAT_V2);
         out.extend_from_slice(&self.bin_width.to_le_bytes());
         out.extend_from_slice(&self.count.to_le_bytes());
         out.extend_from_slice(&(self.bins.len() as u32).to_le_bytes());
@@ -549,13 +623,17 @@ impl AggregateState for QuantileState {
             out.extend_from_slice(&index.to_le_bytes());
             out.extend_from_slice(&count.to_le_bytes());
         }
-        out
+        finish_v2(out)
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, CubismError> {
-        if bytes.len() < 24 || &bytes[..3] != QNT_MAGIC || bytes[3] != FORMAT_V1 {
+        // Variable-length payload: `verify_framing` strips any trailing
+        // checksum first, so every offset below is measured against the
+        // body alone and reads identically for V1 and V2.
+        let bytes = verify_framing(bytes, "quantile")?;
+        if bytes.len() < 24 || &bytes[..3] != QNT_MAGIC {
             return Err(CubismError::AggregateState(
-                "quantile has bad magic, version, or a truncated header".into(),
+                "quantile has bad magic or a truncated header".into(),
             ));
         }
         let bin_width = f64::from_le_bytes(bytes[4..12].try_into().unwrap());
@@ -605,6 +683,11 @@ impl AggregateState for QuantileState {
     }
 }
 
+/// Validates magic and body length for a fixed-size state.
+///
+/// `length` is the length of the *body* (`magic | version | payload`),
+/// which is identical across V1 and V2 — [`verify_framing`] has already
+/// stripped any checksum and rejected unknown versions by this point.
 fn check_header(
     bytes: &[u8],
     magic: &[u8; 3],
@@ -614,12 +697,6 @@ fn check_header(
     if bytes.len() != length || &bytes[..bytes.len().min(3)] != magic {
         return Err(CubismError::AggregateState(format!(
             "{kind} has bad magic or length"
-        )));
-    }
-    if bytes[3] != FORMAT_V1 {
-        return Err(CubismError::AggregateState(format!(
-            "{kind} uses unsupported state version {}",
-            bytes[3]
         )));
     }
     Ok(())
@@ -694,27 +771,145 @@ mod tests {
         assert!(capabilities_for(AggKind::CountDistinct).idempotent);
     }
 
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// The V1 vectors this test pinned before [issue #9] added a checksum.
+    /// They are no longer what `encode` emits — they are kept verbatim as
+    /// the fixtures `decodes_v1_blobs_written_before_the_checksum` reads,
+    /// so the compatibility path is proven against the bytes a real
+    /// pre-#9 warehouse actually holds rather than against a
+    /// re-derivation of them.
+    ///
+    /// [issue #9]: https://github.com/jeromebanks/cubism-rs/issues/9
+    const GOLDEN_AVERAGE_V1: &str = "41564701000000000000f83f0100000000000000";
+    const GOLDEN_VARIANCE_V1: &str =
+        "56415201010000000000000000000000000000400000000000000000";
+
+    /// Both vectors below were cross-checked against Python's
+    /// `zlib.crc32` over the same body bytes, so they are pinned by an
+    /// independent CRC implementation rather than by whatever this crate
+    /// happened to emit.
     #[test]
-    fn golden_state_bytes_v1() {
+    fn golden_state_bytes_v2() {
         let mut average = AverageState::new();
         average.accumulate(1.5).unwrap();
-        let average_hex: String = average
-            .encode()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        assert_eq!(average_hex, "41564701000000000000f83f0100000000000000");
+        // V1 body, version byte bumped to 02, plus the trailing CRC32.
+        assert_eq!(hex(&average.encode()), "41564702000000000000f83f0100000000000000dff5fa2d");
 
         let mut variance = VarianceState::new();
         variance.accumulate(2.0).unwrap();
-        let variance_hex: String = variance
-            .encode()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
         assert_eq!(
-            variance_hex,
-            "56415201010000000000000000000000000000400000000000000000"
+            hex(&variance.encode()),
+            "564152020100000000000000000000000000004000000000000000002a68d08b"
         );
+    }
+
+    #[test]
+    fn decodes_v1_blobs_written_before_the_checksum() {
+        // A warehouse built before #9 holds these bytes; they must keep
+        // decoding to exactly the values they encoded.
+        let v1: Vec<u8> = (0..GOLDEN_AVERAGE_V1.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&GOLDEN_AVERAGE_V1[i..i + 2], 16).unwrap())
+            .collect();
+        let decoded = AverageState::decode(&v1).expect("v1 average must still decode");
+        assert_eq!(decoded.sum(), 1.5);
+        assert_eq!(decoded.count(), 1);
+
+        let v1: Vec<u8> = (0..GOLDEN_VARIANCE_V1.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&GOLDEN_VARIANCE_V1[i..i + 2], 16).unwrap())
+            .collect();
+        let decoded = VarianceState::decode(&v1).expect("v1 variance must still decode");
+        assert_eq!(decoded.count(), 1);
+        assert_eq!(decoded.mean(), Some(2.0));
+    }
+
+    #[test]
+    fn v2_round_trips_every_kind() {
+        let mut average = AverageState::new();
+        average.accumulate(3.5).unwrap();
+        assert_eq!(AverageState::decode(&average.encode()).unwrap(), average);
+
+        let mut variance = VarianceState::new();
+        for value in [1.0, 4.0, 9.0] {
+            variance.accumulate(value).unwrap();
+        }
+        assert_eq!(VarianceState::decode(&variance.encode()).unwrap(), variance);
+
+        // Variable-length payload: the checksum must trail the bins, and
+        // the bin-count length check must be measured against the body.
+        let mut quantile = QuantileState::new(0.5).unwrap();
+        for value in [0.25, 1.75, 1.8, 9.5] {
+            quantile.accumulate(value).unwrap();
+        }
+        assert_eq!(QuantileState::decode(&quantile.encode()).unwrap(), quantile);
+    }
+
+    #[test]
+    fn corrupted_payload_is_rejected_rather_than_silently_decoded() {
+        // This is the whole point of #9: a flipped bit inside an f64 leaves
+        // magic and version intact, so pre-checksum framing would decode it
+        // as a real — wrong — value and merge it into every rollup above.
+        let mut average = AverageState::new();
+        average.accumulate(1.5).unwrap();
+        let mut blob = average.encode();
+        blob[6] ^= 0x01;
+        let err = AverageState::decode(&blob).expect_err("a flipped payload bit must be caught");
+        assert!(
+            err.to_string().contains("failed its checksum"),
+            "expected a checksum failure, got: {err}"
+        );
+
+        // Corruption of the version byte must read as corruption, not as a
+        // future format version — that is why the CRC covers the header.
+        let mut blob = average.encode();
+        blob[3] = 3;
+        let err = AverageState::decode(&blob).expect_err("a bad version must be caught");
+        assert!(
+            err.to_string().contains("unsupported state version 3"),
+            "expected an unsupported-version error, got: {err}"
+        );
+
+        // A corrupted checksum over an intact payload is still a failure.
+        let mut blob = average.encode();
+        let last = blob.len() - 1;
+        blob[last] ^= 0xff;
+        assert!(AverageState::decode(&blob).is_err());
+    }
+
+    #[test]
+    fn quantile_corruption_is_caught_across_the_variable_length_payload() {
+        let mut quantile = QuantileState::new(0.5).unwrap();
+        for value in [0.25, 1.75, 9.5] {
+            quantile.accumulate(value).unwrap();
+        }
+        let encoded = quantile.encode();
+        // Flip a bit in the final bin, the region a length check alone
+        // cannot police.
+        let mut blob = encoded.clone();
+        let target = blob.len() - CRC_LEN - 1;
+        blob[target] ^= 0x01;
+        assert!(QuantileState::decode(&blob).is_err());
+
+        // Truncation shorter than the checksum must not panic.
+        for keep in 0..encoded.len().min(10) {
+            assert!(QuantileState::decode(&encoded[..keep]).is_err());
+        }
+    }
+
+    #[test]
+    fn truncated_blobs_error_rather_than_panic() {
+        let mut average = AverageState::new();
+        average.accumulate(1.5).unwrap();
+        let encoded = average.encode();
+        for keep in 0..encoded.len() {
+            assert!(
+                AverageState::decode(&encoded[..keep]).is_err(),
+                "a {keep}-byte prefix must not decode"
+            );
+        }
     }
 }

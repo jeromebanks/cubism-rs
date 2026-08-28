@@ -545,6 +545,15 @@ Aggregate table starts with hidden `days(bucket_start)` partitioning and the
 Phase 0B-selected sort order. Store field IDs and canonical schema fixtures.
 State blobs carry their own magic/version/checksum.
 
+As of [#9](https://github.com/jeromebanks/cubism-rs/issues/9) this is
+implemented rather than aspirational: `cubism_core::aggregate_state`'s
+`FORMAT_V2` framing is `magic(3) | version(1) | payload | crc32(4, LE)`,
+with the checksum covering the header as well as the payload (so a
+corrupted version byte reads as corruption, not as a future format).
+`FORMAT_V1` blobs — anything written before #9 — stay readable and
+decode unchecksummed; nothing writes V1 any more. Sketch blobs
+(`docs/sketches.md`) keep their own separate framing and are unchanged.
+
 Writer protocol:
 
 - produce deterministic file inventory;
