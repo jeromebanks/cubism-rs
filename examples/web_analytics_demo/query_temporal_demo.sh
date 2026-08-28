@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Queries the time-series web-analytics demo over real HTTP
 # (`docs/TIMESERIES_ROADMAP.md` Milestone 12b): captures a `/api/series`
-# request/response pair against window 2026-04-07 before and after its
+# request/response pair against the corrected window before and after its
 # revision-2 correction is published, proving Milestone 12a's revision
 # bump (visible so far only as `control_runs`/`control_publications`
 # rows) is also visible through the query path a real client would use.
 #
-# Builds only what this query needs: window 2026-04-07, both revisions --
+# Builds only what this query needs: the corrected window, both revisions --
 # unlike `build_temporal_demo.sh` (Milestone 12a), which also builds the
 # two ordinary days for its own demonstration. This script does not
 # require that one to have run first. Both scripts share the same
@@ -37,8 +37,16 @@ OUT=.temporal_build
 BIN="cargo run --release -q -p cubism-cli --"
 SPEC=web_analytics_temporal.yaml
 PORT=8095
-WINDOW=2026-04-07
-NEXT_DAY=2026-04-08
+
+# START_DATE / DAYS / USERS / LATE_OFFSET / day_at() / LATE_DAY
+. ./demo_env.sh
+# The window this script queries IS the corrected one, derived from the
+# same shared numbers the generator is given below. Hardcoding a date here
+# is how this script silently stops proving anything: if the generator
+# holds its late events back from a different day, the "before" and
+# "after" responses below are identical.
+WINDOW=$LATE_DAY
+NEXT_DAY=$LATE_NEXT_DAY
 
 rm -rf "$OUT"
 mkdir -p "$OUT/warehouse"
@@ -46,7 +54,9 @@ mkdir -p "$OUT/warehouse"
 echo "== generating temporal event stream =="
 python3 generate_temporal_events.py \
   --output "$OUT/events_temporal.csv" \
-  --initial-output "$OUT/events_temporal_initial.csv"
+  --initial-output "$OUT/events_temporal_initial.csv" \
+  --days "$DAYS" --users "$USERS" --late-day-offset "$LATE_OFFSET" \
+  --start-date "$START_DATE"
 
 echo "== writing placeholder cube_path parquet (required by \`serve\`'s CLI, unused by /api/series) =="
 python3 - "$OUT/placeholder_cube.parquet" <<'PY'
@@ -98,8 +108,20 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 
+# Derived from $WINDOW, never hardcoded: the literals that used to sit here
+# described 2026-04-07 while $WINDOW moved to demo_env.sh's corrected day,
+# so the response carried the right revision and value under the wrong
+# bucket boundaries (/api/series reads states by window_id and uses
+# bucket_start only to assign the window to a resolution segment, so
+# nothing errored — it just answered a mislabeled question).
+micros() {
+  python3 -c "import sys; from datetime import datetime, timezone; print(int(datetime.strptime(sys.argv[1], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp() * 1_000_000))" "$1"
+}
+WINDOW_START_US=$(micros "$WINDOW")
+WINDOW_END_US=$(micros "$NEXT_DAY")
+
 REQUEST=$(cat <<JSON
-{"selector":"/G","measure":"avg_revenue","start":1775520000000000,"end":1775606400000000,"resolution":"1d","exact":false,"gap_policy":"missing","windows":[{"window_id":"$WINDOW","bucket_start":1775520000000000}]}
+{"selector":"/G","measure":"avg_revenue","start":$WINDOW_START_US,"end":$WINDOW_END_US,"resolution":"1d","exact":false,"gap_policy":"missing","windows":[{"window_id":"$WINDOW","bucket_start":$WINDOW_START_US}]}
 JSON
 )
 

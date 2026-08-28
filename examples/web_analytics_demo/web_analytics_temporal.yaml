@@ -4,19 +4,38 @@
 # web_analytics.yaml — the static demo keeps working unchanged against its
 # own spec and events.csv.
 #
-# Narrowed on purpose to match what `crates/cubism-serve`'s /api/series
-# (Milestone 11) actually answers: one XUnit dimension (`geo`), one
-# AverageState measure (`avg_revenue`). Not a general-purpose replacement
-# for web_analytics.yaml's richer dimension/measure set.
+# Scoped to what `crates/cubism-serve`'s /api/series actually answers:
+# `avg` and the scalar kinds (`count`/`sum`/`min`/`max`). Deliberately no
+# `count_distinct`/`top_k`/`quantile` measure here even though the engine
+# supports them — /api/series rejects those kinds, so charting one would
+# only ever produce an error in the dashboard.
+#
+# Three dimensions with `max_dimensions: 2` keeps the lattice small and
+# legible (1 global + 11 single-dimension + 39 pair XUnits = 51 per day)
+# while still giving the dashboard genuinely *different* XUnits to chart
+# side by side: rollups, single-dimension cells, and two-dimension cells.
 apiVersion: cubism/v2alpha1
 name: northstar_web_analytics_temporal
 dimensions:
   - name: geo
     levels: [country]
+  - name: device
+    levels:
+      - name: type
+        expr: device_type
+  - name: plan
+filterRules:
+  - type: max_dimensions
+    n: 2
 measures:
   - name: avg_revenue
     agg: avg
     input: revenue
+  - name: revenue
+    agg: sum
+    input: revenue
+  - name: page_views
+    agg: count
 includeGlobal: true
 temporal:
   eventTime: timestamp

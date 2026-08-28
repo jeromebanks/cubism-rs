@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # One-command run of the time-series web-analytics demo: makes sure the
-# three published days exist (building them via `build_temporal_demo.sh`
-# on first use), writes `cubism serve`'s required placeholder cube-path
-# parquet, starts the server, and prints (or opens) the dashboard URL --
-# the "Time series" panel charts avg_revenue across 2026-04-06..08, with
-# window 2026-04-07 at its corrected revision 2.
+# published days exist (building them via `build_temporal_demo.sh` on
+# first use), writes `cubism serve`'s required placeholder cube-path
+# parquet, starts the server, and prints (or opens) a dashboard URL that
+# already carries the demo's XUnit list, measure and date range as query
+# parameters -- so the "Time series" panel opens on several XUnits charted
+# across the full day range, with the corrected day at its revision 2.
+#
+# The dashboard itself ships generic (it has no idea what a "country" is);
+# the demo-specific selector list lives here, in the demo, and reaches the
+# page through `?selectors=...` (see `applySeriesParams` in
+# `crates/cubism-serve/assets/index.html`).
 #
 # Usage: ./run_temporal_demo.sh [--port N] [--rebuild] [--open]
 #   --port N   server port (default 8080)
@@ -21,6 +27,12 @@ OUT=.temporal_build
 BIN="cargo run --release -q -p cubism-cli --"
 SPEC=web_analytics_temporal.yaml
 PORT=8080
+
+# START_DATE / DAYS / USERS / LATE_OFFSET / day_at() / LATE_DAY — shared
+# with build_temporal_demo.sh and query_temporal_demo.sh. Only used here
+# as a fallback: the printed URL's day range comes from the control store
+# (what was actually published), not from these.
+. ./demo_env.sh
 REBUILD=0
 OPEN_BROWSER=0
 
@@ -84,12 +96,31 @@ if [ -z "$ready" ]; then
   exit 1
 fi
 
-URL="http://127.0.0.1:$PORT/"
+# The dashboard's own markup defaults are generic; these are the demo's.
+# Derived from the control store rather than hardcoded, so they stay
+# correct whatever DAYS/START_DATE `build_temporal_demo.sh` was run with.
+FIRST_DAY=$(sqlite3 "$OUT/control.sqlite" \
+  "SELECT MIN(window_id) FROM control_publications;")
+LAST_DAY=$(sqlite3 "$OUT/control.sqlite" \
+  "SELECT MAX(window_id) FROM control_publications;")
+CORRECTED=$(sqlite3 "$OUT/control.sqlite" \
+  "SELECT group_concat(window_id, ',') FROM control_publications WHERE revision > 1;")
+
+# ';' separates XUnits -- ',' cannot, it already joins the YPaths *inside*
+# one XUnit. `urlencode` keeps '/' and '=' readable in the printed URL and
+# escapes the rest.
+SELECTORS='/G;/geo/country=US;/geo/country=GB;/geo/country=DE;/device/type=mobile;/device/type=desktop;/plan/plan=pro'
+MEASURE=${MEASURE:-avg_revenue}
+QUERY="selectors=$(printf %s "$SELECTORS" | sed 's/;/%3B/g')&measure=$MEASURE&start=$FIRST_DAY&end=$LAST_DAY"
+URL="http://127.0.0.1:$PORT/?$QUERY"
+
 echo
 echo "============================================================"
 echo "  dashboard: $URL"
-echo "  time-series defaults: /G · avg_revenue · 2026-04-06..08"
-echo "  (day 2026-04-07 serves its corrected revision 2)"
+echo "  days:      $FIRST_DAY .. $LAST_DAY"
+echo "  measure:   $MEASURE   (also try: revenue, page_views)"
+echo "  xunits:    $SELECTORS"
+echo "  corrected: ${CORRECTED:-none} (serving revision 2)"
 echo "  Ctrl-C to stop"
 echo "============================================================"
 echo

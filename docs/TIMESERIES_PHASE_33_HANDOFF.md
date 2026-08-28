@@ -15,7 +15,7 @@ slice. (Naming note, carried forward from every prior handoff in this
 series: this file's number is a *session-slice* number, not a plan phase
 number.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`TIMESERIES_PHASE_34_HANDOFF.md`](TIMESERIES_PHASE_34_HANDOFF.md)
 
 ## What this session built
 

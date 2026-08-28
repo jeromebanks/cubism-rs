@@ -8,14 +8,19 @@
 #
 # What this mechanically proves vs what it cannot: the served HTML contains
 # the panel hooks (`id="tsPanel"`, `/api/series`) and the API answers the
-# exact JSON bodies the page constructs — including window 2026-04-07 at
-# its corrected revision 2 — so the chart has real data waiting. It can NOT
-# prove the browser actually renders the SVG line chart; that part is
-# human-verified (Milestone 12a precedent: demo/UI slices are verified by
-# captured transcripts, not cargo tests).
+# exact JSON bodies the page constructs — including the corrected window at
+# its revision 2 — so the chart has real data waiting. It can NOT prove the
+# browser actually renders the SVG line chart; that part is verified
+# separately (Milestone 16 drove a real browser at it; Milestone 12a's
+# precedent for demo/UI slices is a captured transcript, not a cargo test).
 #
-# Reuses `build_temporal_demo.sh` (Milestone 12a) for all three published
-# days — this script does not require anything to have run first, but it
+# The three days sampled are the corrected day and its two neighbours,
+# derived from `demo_env.sh` rather than hardcoded — the whole point of the
+# capture is the revision-1/2/1 pattern across that boundary, which a fixed
+# date silently loses the moment the dataset's shape changes.
+#
+# Reuses `build_temporal_demo.sh` (Milestone 12a) for the published days —
+# this script does not require anything to have run first, but it
 # DOES clobber the shared `.temporal_build/` directory (`rm -rf` inside),
 # same "last one run wins" convention as that script and
 # `query_temporal_demo.sh`. The placeholder cube-path parquet is the same
@@ -29,7 +34,13 @@ BIN="cargo run --release -q -p cubism-cli --"
 SPEC=web_analytics_temporal.yaml
 PORT=8096
 
-echo "== building all three demo days (build_temporal_demo.sh) =="
+# START_DATE / DAYS / USERS / LATE_OFFSET / day_at() / LATE_DAY
+. ./demo_env.sh
+# Sample the corrected day and its neighbours, so the captured revisions
+# are 1 / 2 / 1 whatever the range is.
+SAMPLE_DAYS="$(day_at "$((LATE_OFFSET - 1))") $LATE_DAY $(day_at "$((LATE_OFFSET + 1))")"
+
+echo "== building the demo days (build_temporal_demo.sh) =="
 SERVE_PID=""
 BUILD_LOG=$(mktemp)
 trap 'rm -f "$BUILD_LOG"; if [ -n "$SERVE_PID" ]; then kill "$SERVE_PID" 2>/dev/null; wait "$SERVE_PID" 2>/dev/null || true; fi' EXIT
@@ -102,7 +113,7 @@ date_micros() {
 }
 
 i=0
-for day in 2026-04-06 2026-04-07 2026-04-08; do
+for day in $SAMPLE_DAYS; do
   next=$(python3 -c "import sys; from datetime import datetime, date, timedelta; d=datetime.strptime(sys.argv[1], '%Y-%m-%d').date(); print(d + timedelta(days=1))" "$day")
   REQ=$(day_request "$day" "$next")
   i=$((i + 1))
@@ -116,13 +127,20 @@ kill "$SERVE_PID" 2>/dev/null; wait "$SERVE_PID" 2>/dev/null || true
 trap - EXIT
 
 echo
-python3 - "$OUT"/dashboard_day*.json <<'PY'
+python3 - "$SAMPLE_DAYS" "$OUT"/dashboard_day*.json <<'PY'
 import json
 import sys
+from datetime import datetime, timezone
 
-expected_buckets = [1775433600000000, 1775520000000000, 1775606400000000]
+# The corrected day and its two neighbours, passed in from the shell so
+# this stays correct whatever `demo_env.sh` selects.
+sample_days = sys.argv[1].split()
+expected_buckets = [
+    int(datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp() * 1_000_000)
+    for d in sample_days
+]
 expected_revisions = [1, 2, 1]
-files = sys.argv[1:]
+files = sys.argv[2:]
 assert len(files) == 3, f"expected 3 captured responses, got {len(files)}"
 print("== summary ==")
 ok = True
@@ -138,5 +156,5 @@ for i, path in enumerate(files):
     print(f"day {i + 1}: value={p['value']!r} is_exact={p['is_exact']} "
           f"bucket_ok={bucket_ok} revision={rev} (expect {expected_revisions[i]})")
 assert ok, "dashboard capture failed its assertions"
-print("all three days answer exactly, with 2026-04-07 at its corrected revision 2")
+print(f"all three days answer exactly, with {sample_days[1]} at its corrected revision 2")
 PY
