@@ -5,3 +5,4 @@ proptest-regressions/
 *.swp
 __pycache__/
 examples/web_analytics_demo/.temporal_build/
+.serena/

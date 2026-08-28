@@ -8,13 +8,26 @@ description: Run one bounded "session slice" of work on cubism's time-series/Ice
 Encodes the exact workflow used for every `TIMESERIES_PHASE_N_HANDOFF.md`
 session on `feature/timeseries-phase-0a` so it doesn't need to be
 re-specified by hand each time. Read this whole file before starting — the
-ordering matters (advisor-before-code, check-before-format,
-verify-before-cite, re-verify-before-final-advisor-call,
+ordering matters (advisor-before-code, announce-before-implementing,
+check-before-format, verify-before-cite, re-verify-before-final-advisor-call,
 commit-before-final-advisor-call). One occasional step is
 condition-triggered rather than every-slice: step 8a's cross-model phase
 review, which only runs when this slice closes out a roadmap `## Phase N
 "done" condition` section — see step 1 for how that gets flagged and step
 8a for the mechanics.
+
+**Visibility across repeated runs.** This skill gets invoked over and over
+across many separate sessions, and a user running it that way has no
+continuity between them beyond the handoff docs and the roadmap — so each
+run needs to make its own progress legible on its own, in chat, not just
+in files on disk. Three points in the workflow exist specifically for
+this: step 0 takes a mechanical roadmap-progress snapshot before anything
+else happens; step 1 ends by posting that snapshot plus the chosen slice
+and its scope to the user *before* any code is written; step 9 closes by
+posting the updated snapshot as a delta against step 0's baseline, plus
+the specific next thing this skill would pick up if run again. None of
+this is a checkpoint requiring approval — it's status, not a question;
+keep moving through the steps right after posting it.
 
 ## 0. Orient
 
@@ -40,6 +53,44 @@ handoff in this series opens with a parenthetical disclaiming this; carry
 it forward in the one you write (copy the wording from
 `docs/handoff_latest.md`'s own opening section and adjust the doc names it
 points to).
+
+**Take a roadmap progress snapshot, if `docs/TIMESERIES_ROADMAP.md`
+exists.** Cheap and mechanical — every milestone entry in that doc carries
+a `- **Status:**` line starting with `Done`, `Not started`, or (rarely)
+`Superseded` (a milestone split into successors before it was ever
+implemented, e.g. Milestone 12 -> 12a/12b — exclude these from the
+denominator, they're not remaining work, they're a renumbering):
+
+```bash
+rtk proxy grep -c "^### Milestone" docs/TIMESERIES_ROADMAP.md
+rtk proxy grep -c "^\- \*\*Status:\*\* Done" docs/TIMESERIES_ROADMAP.md
+rtk proxy grep -c "^\- \*\*Status:\*\* Not started" docs/TIMESERIES_ROADMAP.md
+rtk proxy grep -c "^\- \*\*Status:\*\* Superseded" docs/TIMESERIES_ROADMAP.md
+```
+
+The four counts should sum to zero slack (`Total - Superseded = Done + Not
+started`); if they don't, some milestone's status line doesn't match the
+expected format — read the doc directly rather than trusting the count.
+Report progress as `<Done> / <Total - Superseded>` milestones landed in
+the roadmap's *tracked* scope, and keep the open-issue count from this
+step's `gh issue list` as a separate figure — issues aren't milestone-
+shaped work (design decisions like `#20`, infra like `#10`), don't fold
+them into the milestone fraction.
+
+**This fraction is a lower bound on remaining work, not "how much of the
+project is left" — say so every time it's reported, not just here.**
+`docs/TIMESERIES_ROADMAP.md`'s own preamble says it doesn't cover the full
+`docs/TIMESERIES_IMPLEMENTATION_PLAN.md` (as of this writing it stops
+short of some Phase 5 completion criteria, and Phase 6+ isn't in it at
+all), so the denominator can grow when a session adds new milestones
+(exactly what the Milestone 12 -> 12a/12b split did) — that's not
+regression, it's the roadmap catching up to the plan. If the denominator
+changed since the last handoff, say so explicitly (`16/18 -> 17/20 —
+roadmap grew by 2 (12a/12b added), landed 1`) rather than letting a
+smaller-looking fraction read as slower progress than it is.
+
+Hold onto this snapshot's numbers — step 1 posts them before implementing,
+step 9 re-runs the same four commands and reports the delta.
 
 ## 1. Call advisor before picking the slice
 
@@ -88,6 +139,23 @@ and ask it to:
   git-archaeology later. (Phase 5's own start is already backfilled:
   `f0599b2`, the commit immediately before `4299d60` added the "Phase 5
   Milestones" section.)
+
+**Announce the plan before writing any code.** Once advisor has confirmed
+the slice, post a short chat message — a handful of sentences, not a
+restatement of the advisor's reasoning — covering:
+
+- which slice was picked (the roadmap milestone or deferred item) and, in
+  one line, why it over the other candidate(s) advisor considered;
+- its bounded scope: what's in, and what's explicitly deferred rather than
+  folded in (e.g. "12a only, not 12b's query-view wiring");
+- step 0's roadmap progress snapshot (`<Done>/<Total>` milestones, `N`
+  open issues), with the "lower bound, not the whole project" caveat.
+
+This is not a checkpoint — don't wait for a reply, go straight into step 2
+after posting it. Its only purpose is so a user running this skill
+repeatedly, across separate sessions with no continuity between them,
+knows what's about to happen without waiting for the whole slice to land
+first.
 
 ## 2. Implement the slice
 
@@ -360,3 +428,19 @@ link to the new handoff doc. If step 8a ran, also link the new
 whether it came back clean or needed a fix. Don't restate the whole
 handoff doc (or the whole phase review) in chat — both are already
 durable on disk and pushed.
+
+**Also report, every time — this is what makes progress visible across
+separate runs of this skill, which is the whole point of this step:**
+
+- **What's next.** Name the specific top item from the new handoff's own
+  "Deferred / not done this session" list — whichever one step 1 would
+  actually pick up if this skill were run again right now (check its
+  dependency, same as step 1 does, rather than just copying list item 1
+  blind). One line.
+- **Updated progress snapshot, as a delta.** Re-run step 0's four `grep -c`
+  commands against the roadmap doc as committed this session and report
+  the change against the snapshot posted in step 1 — e.g. `16/18 -> 17/18
+  roadmap milestones done`, or if the denominator moved, `16/18 -> 17/20
+  (roadmap grew by 2, landed 1)`. Repeat the "lower bound, not the whole
+  project" caveat — don't let this number stand alone, it's the one most
+  likely to get quoted back out of context in a later session.
