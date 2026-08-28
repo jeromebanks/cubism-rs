@@ -21,7 +21,7 @@ moves.
 | 1 — Temporal types & state algebra | **Done** | `docs/TIMESERIES_PHASE_1_HANDOFF.md` |
 | 2 — Sparse bucketed incremental aggregation | **Done** | `docs/TIMESERIES_PHASE_2_HANDOFF.md` |
 | 3 — Iceberg schema, reads, appends, publication | **Done** | `docs/TIMESERIES_PHASE_3_HANDOFF.md` |
-| 4 — Late data, corrections, concurrency, compaction | **Done as scoped** — compaction/retention/object-store deliberately split out to #10 (completion criteria 3–4 remain open via it); durability defects found post-landing fixed via #17/#20/#21 | Roadmap milestones 1–5b (`docs/TIMESERIES_ROADMAP.md`); `#13` |
+| 4 — Late data, corrections, concurrency, compaction | **Done as scoped** — compaction/retention/object-store deliberately split out to #10 (completion criteria 3–4 remain open via it); durability defects found post-landing fixed via #17/#20/#21. Event-time window identification (line 599) and the recompute-equality proof (line 634) closed by `cubism-correct` (#16) | Roadmap milestones 1–5b (`docs/TIMESERIES_ROADMAP.md`); `#13`; `crates/cubism-correct` |
 | 5 — Exactness-aware range queries & serving API | **Functional half done** — direct-call `SeriesResponse` + `/api/series` wiring landed. SQL/`TableProvider` half blocked on #8 (DataFusion 53/54 convergence) | Roadmap milestones 11–13; `#8` |
 | 6 — Rolling comparisons & trend inputs | **Not started** | This file's Phase 6 section |
 | 7 — Performance hardening & optional rollups | **Not started** | This file's Phase 7 section |

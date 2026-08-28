@@ -1003,6 +1003,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cubism-correct"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-cast",
+ "chrono",
+ "cubism-core",
+ "cubism-datafusion",
+ "cubism-iceberg",
+ "iceberg",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "cubism-datafusion"
 version = "0.1.0"
 dependencies = [
