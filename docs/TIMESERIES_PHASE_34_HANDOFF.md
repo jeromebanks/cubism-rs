@@ -14,7 +14,7 @@ multiple XUnits across 14 days with the corrected day visible at revision
 2. (Naming note, carried forward: this file's number is a *session-slice*
 number, not a plan phase number.)
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`TIMESERIES_PHASE_35_HANDOFF.md`](TIMESERIES_PHASE_35_HANDOFF.md)
 
 ## What this session found
 
