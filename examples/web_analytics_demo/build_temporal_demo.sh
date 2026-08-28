@@ -39,7 +39,8 @@ echo "== generating temporal event stream ($DAYS days from $START_DATE, $USERS u
 python3 generate_temporal_events.py \
   --output "$OUT/events_temporal.csv" \
   --initial-output "$OUT/events_temporal_initial.csv" \
-  --days "$DAYS" --users "$USERS" --late-day-offset "$LATE_OFFSET"
+  --days "$DAYS" --users "$USERS" --late-day-offset "$LATE_OFFSET" \
+  --start-date "$START_DATE"
 
 build_window() {
   local day="$1" next_day="$2" input="$3" revision="$4" run_id="$5"

@@ -251,6 +251,11 @@ const DAY_MS = 86400000;
 // color means "which XUnit" and exactness moves entirely to line style
 // (dashed) plus marker fill (hollow), so the two encodings never collide.
 const SERIES_COLORS = ["#5ec8f2", "#a6e22e", "#f2a65e", "#c792ea", "#f26d9d", "#4dd0b1", "#e8d44d"];
+// Every load takes a ticket; only the newest one is allowed to render.
+// Without this, typing in the selector box fires overlapping fan-outs and
+// whichever finishes LAST wins — which is not necessarily the newest, so
+// the chart can settle on a stale query's data.
+let TS_LOAD_ID = 0;
 
 // Selectors are separated by ';', never ','  — a comma already joins the
 // YPaths *inside* one XUnit (`/geo/country=US,/plan/plan=pro` is a single
@@ -287,6 +292,8 @@ async function postSeries(body) {
 }
 
 async function loadTimeSeries() {
+  const loadId = ++TS_LOAD_ID;
+  const stale = () => loadId !== TS_LOAD_ID;
   try {
     const selectors = parseSelectors($("tsSelector").value);
     const measure = $("tsMeasure").value.trim();
@@ -303,6 +310,13 @@ async function loadTimeSeries() {
     // The cap is on total requests (selectors × days), not days alone —
     // the fan-out below issues one per pair, so six selectors over three
     // months is 550 requests, not 92.
+    if (selectors.length > SERIES_COLORS.length) {
+      // Beyond the palette two series would share a colour, and colour is
+      // the only thing identifying a series on this chart.
+      $("tsPanel").hidden = false;
+      $("tsChart").innerHTML = `<span class="err">${selectors.length} selectors — the palette holds ${SERIES_COLORS.length}, past which two series share a colour and become indistinguishable. Chart fewer at a time.</span>`;
+      return;
+    }
     const calls = days.length * selectors.length;
     if (calls > 200) {
       $("tsChart").innerHTML = `<span class="err">too many requests (${selectors.length} selector(s) × ${days.length} day(s) = ${calls}) — /api/series answers one XUnit-day per call; narrow the range or the selector list</span>`;
@@ -312,6 +326,7 @@ async function loadTimeSeries() {
     // flight at once rather than serializing per series.
     const flat = await Promise.all(
       selectors.flatMap(sel => days.map(t => postSeries(tsRequest(t, sel, measure)))));
+    if (stale()) return;
     const series = selectors.map((selector, si) => ({
       selector,
       results: flat.slice(si * days.length, (si + 1) * days.length),
@@ -354,6 +369,10 @@ function drawSeriesChart(series, days) {
     // the same as one that legitimately has no rows — keep them apart so
     // the legend can say which
     reached: entry.results.some(r => !r.absent && !r.error),
+    // First real API error for this selector, if any. A selector can fail
+    // (bad syntax, unknown measure) while others succeed; without this the
+    // whole series silently reads as "no data".
+    error: (entry.results.find(r => r.error) || {}).error,
   }));
   const srcRes = (series.flatMap(e => e.results).find(r => r.source_resolution) || {}).source_resolution;
   const W = el.clientWidth || 1040, H = 300, L = 60, R = 20, T = 18, B = 42;
@@ -383,10 +402,12 @@ function drawSeriesChart(series, days) {
     const domainVals = logY ? vals.filter(v => v > 0) : vals;
     dropped = vals.length - domainVals.length;
     if (!domainVals.length) {
+      // Fall through to the legend rather than returning: the reader still
+      // needs the series list and the "log₁₀ y" note to understand why the
+      // plot is empty.
       s += `<text class="muted" x="${L + plotW / 2}" y="${T + plotH / 2}" text-anchor="middle">every value is ≤ 0 — log y cannot plot this range</text>`;
-      el.innerHTML = s + "</svg>";
-      return;
-    }
+      dropped = vals.length;
+    } else {
     const tx = v => logY ? Math.log10(v) : v;
     let lo = Math.min(...domainVals), hi = Math.max(...domainVals);
     if (lo === hi) { lo = logY ? lo / 2 : lo - 1; hi = logY ? hi * 2 : hi + 1; }
@@ -455,6 +476,7 @@ function drawSeriesChart(series, days) {
         }
       });
     });
+    }
   }
   s += "</svg>";
 
@@ -465,8 +487,9 @@ function drawSeriesChart(series, days) {
   const revs = [...new Set(allPts.flatMap(p => (p.published || []).map(q => q.revision)))].sort((a, b) => a - b);
   const swatches = lines.map(l => {
     const n = l.pts.filter(p => p && p.value != null).length;
-    const note = n ? "" : (l.reached ? " (no data)" : " (unavailable)");
-    return `<span class="series"><span class="sw" style="background:${l.color}"></span>${esc(l.selector)}${note}</span>`;
+    const note = l.error ? ` — ${l.error}` : (n ? "" : (l.reached ? " (no data)" : " (unavailable)"));
+    const cls = l.error ? "series err" : "series";
+    return `<span class="${cls}"><span class="sw" style="background:${l.color}"></span>${esc(l.selector)}${esc(note)}</span>`;
   }).join("");
   el.innerHTML = s
     + `<div class="legend">${swatches}</div>`

@@ -49,6 +49,13 @@ def main():
         help="0-indexed day (within --days) that receives a late correction",
     )
     parser.add_argument("--late-count", type=int, default=6)
+    parser.add_argument(
+        "--start-date", default="2026-04-06",
+        help="UTC date of day 0 (YYYY-MM-DD). Must match the build scripts' "
+             "START_DATE: they derive window boundaries from it, and a "
+             "mismatch builds windows over a range this stream has no "
+             "events in — empty aggregates, no error.",
+    )
     args = parser.parse_args()
 
     import random
@@ -66,7 +73,7 @@ def main():
         ("learn", "/docs/getting-started", 0.18), ("learn", "/blog/warehouse", 0.12),
     ]
 
-    start = datetime(2026, 4, 6, tzinfo=timezone.utc)
+    start = datetime.strptime(args.start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     late_day_start = start + timedelta(days=args.late_day_offset)
     events = []
     late_candidates = []

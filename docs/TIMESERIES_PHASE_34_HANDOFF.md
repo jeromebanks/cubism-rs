@@ -127,6 +127,37 @@ sparse path needs a thinner stream or higher-cardinality dimensions to
 show. Recorded here so the demo is not cited as sparsity evidence it does
 not provide.
 
+## Codex review round (PR #23)
+
+A Codex review of the PR found four real defects, fixed in a follow-up
+commit. Two were majors I had missed despite running the scripts:
+
+1. **`query_temporal_demo.sh` answered a mislabeled question.** The JSON
+   request body still carried hardcoded `2026-04-07` timestamps
+   (`start`/`end`/`bucket_start`) while `window_id` had moved to
+   `demo_env.sh`'s corrected day. Nothing errored and the values were
+   real, because `/api/series` reads states by `window_id` and uses
+   `bucket_start` only to assign the window to a resolution segment — so
+   the response reported 2026-04-13's data under 2026-04-07's bucket
+   boundaries. My own verification had checked `window_id` and the values
+   and never compared the timestamps to them. Now derived from `$WINDOW`.
+2. **`START_DATE` was documented as overridable but never reached the
+   generator**, which hardcoded `datetime(2026, 4, 6)`. Overriding it
+   would have shifted the build's window boundaries away from the events
+   — empty aggregates, no error. The generator gained `--start-date` and
+   all scripts pass it.
+3. **Stale-response race** in the chart: overlapping fan-outs settled on
+   whichever finished last, not the newest. Fixed with a monotonic
+   `TS_LOAD_ID` guard.
+4. **Per-selector API errors were swallowed** unless every request failed;
+   a failing selector read as "no data". The legend now names the error.
+
+Plus two minors: series colours repeated past 7 selectors (colour is the
+*only* thing identifying a series here, so the input is now capped at the
+palette size with an explanatory message rather than silently colliding),
+and the log-mode all-non-positive path returned before rendering the
+legend.
+
 ## GitHub issues touched
 
 None filed, none closed. The deferred discovery endpoint (a temporal

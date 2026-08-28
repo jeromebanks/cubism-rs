@@ -55,7 +55,8 @@ echo "== generating temporal event stream =="
 python3 generate_temporal_events.py \
   --output "$OUT/events_temporal.csv" \
   --initial-output "$OUT/events_temporal_initial.csv" \
-  --days "$DAYS" --users "$USERS" --late-day-offset "$LATE_OFFSET"
+  --days "$DAYS" --users "$USERS" --late-day-offset "$LATE_OFFSET" \
+  --start-date "$START_DATE"
 
 echo "== writing placeholder cube_path parquet (required by \`serve\`'s CLI, unused by /api/series) =="
 python3 - "$OUT/placeholder_cube.parquet" <<'PY'
@@ -107,8 +108,20 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 
+# Derived from $WINDOW, never hardcoded: the literals that used to sit here
+# described 2026-04-07 while $WINDOW moved to demo_env.sh's corrected day,
+# so the response carried the right revision and value under the wrong
+# bucket boundaries (/api/series reads states by window_id and uses
+# bucket_start only to assign the window to a resolution segment, so
+# nothing errored — it just answered a mislabeled question).
+micros() {
+  python3 -c "import sys; from datetime import datetime, timezone; print(int(datetime.strptime(sys.argv[1], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp() * 1_000_000))" "$1"
+}
+WINDOW_START_US=$(micros "$WINDOW")
+WINDOW_END_US=$(micros "$NEXT_DAY")
+
 REQUEST=$(cat <<JSON
-{"selector":"/G","measure":"avg_revenue","start":1775520000000000,"end":1775606400000000,"resolution":"1d","exact":false,"gap_policy":"missing","windows":[{"window_id":"$WINDOW","bucket_start":1775520000000000}]}
+{"selector":"/G","measure":"avg_revenue","start":$WINDOW_START_US,"end":$WINDOW_END_US,"resolution":"1d","exact":false,"gap_policy":"missing","windows":[{"window_id":"$WINDOW","bucket_start":$WINDOW_START_US}]}
 JSON
 )
 
