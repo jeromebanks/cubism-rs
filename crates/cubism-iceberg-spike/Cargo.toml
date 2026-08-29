@@ -1,0 +1,20 @@
+[package]
+name = "cubism-iceberg-spike"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+datafusion = "=53.1.0"
+futures = "0.3"
+iceberg = "=0.10.0"
+iceberg-datafusion = "=0.10.0"
+tempfile = "3"
+thiserror.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints.rust]
+unsafe_code = "forbid"

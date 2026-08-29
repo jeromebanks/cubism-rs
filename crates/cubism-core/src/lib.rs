@@ -17,17 +17,28 @@
 //! Each input row explodes into every lattice cell it belongs to, pruned by
 //! [`FilterRule`]s; aggregation then groups by the XUnit cell key.
 
+pub mod aggregate_state;
 pub mod encoding;
 pub mod error;
 pub mod lattice;
 pub mod rules;
 pub mod sketch;
 pub mod spec;
+pub mod temporal;
 pub mod ypath;
 
-pub use encoding::XUnitDictionary;
+pub use aggregate_state::{
+    AggregateCapabilities, AggregateExactness, AggregateState, AverageState, QuantileState,
+    StateVersion, VarianceState, capabilities_for,
+};
+pub use encoding::{CanonicalXUnit, XUnitContentId, XUnitDictionary};
 pub use error::CubismError;
 pub use rules::FilterRule;
 pub use sketch::KmvSketch;
-pub use spec::{AggKind, CubeSpec, DimensionSpec, LevelSpec, MeasureSpec};
+pub use spec::{AggKind, AggregateStateConfig, CubeSpec, DimensionSpec, LevelSpec, MeasureSpec};
+pub use temporal::{
+    AllowedLateness, BucketEnd, BucketOrigin, BucketStart, BucketValue, CalendarResolution,
+    Coverage, EventTime, Exactness, FixedResolution, IngestionTime, Lateness, LatenessPolicy,
+    Resolution, TemporalSpec, TimeBucket, TimeRange, WindowId, WindowRevision,
+};
 pub use ypath::{XUnit, YPath};

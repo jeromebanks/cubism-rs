@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+blake3 = "1"
+# Payload checksum for aggregate-state blob framing (issue #9). Already in
+# the dependency graph transitively (via the Parquet/Arrow stack); named
+# here because cubism-core uses it directly.
+crc32fast = "1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = "0.9"

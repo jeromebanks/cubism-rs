@@ -8,7 +8,14 @@ repository.workspace = true
 
 [dependencies]
 cubism-core = { path = "../cubism-core" }
-# must track the arrow version DataFusion 54 ships (58.3)
+# store.rs/api.rs decode cube parquet files directly via these, independent
+# of cubism-datafusion below — still a real, non-redundant dependency, not
+# vestigial now that cubism-datafusion is pulled in too. Still must track
+# the arrow version DataFusion 54 ships (58.3): cubism-datafusion's own
+# RecordBatch/Schema types cross into series.rs's Iceberg calls with no
+# conversion step (see its own module doc comment), which only holds while
+# both resolve to one unified arrow version — this pin is what keeps that
+# true rather than accidental.
 arrow = "58.3"
 parquet = { version = "58.3", features = ["arrow"] }
 axum = "0.8"
@@ -16,7 +23,13 @@ tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Milestone 11 (docs/TIMESERIES_ROADMAP.md): /api/series wiring. cubism-datafusion
+# promoted from a dev-dependency (used only by tests/api.rs's static-cube
+# fixture) to a real one now that src/series.rs calls into both at runtime.
+cubism-datafusion = { path = "../cubism-datafusion" }
+cubism-iceberg = { path = "../cubism-iceberg" }
+iceberg = "=0.10.0"
 
 [dev-dependencies]
-cubism-datafusion = { path = "../cubism-datafusion" }
 tempfile = "3"
+chrono = { version = "0.4", default-features = false, features = ["std"] }

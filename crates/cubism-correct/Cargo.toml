@@ -1,0 +1,32 @@
+[package]
+name = "cubism-correct"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The orchestration crate [#16](https://github.com/jeromebanks/cubism-rs/issues/16)
+# asked for: the one place that depends on BOTH the aggregation engine and
+# the Iceberg persistence layer.
+#
+# Why a new crate rather than a module in either of them: `cubism-iceberg`
+# deliberately links no aggregation engine (see its lib.rs) to stay clear of
+# the DataFusion version seam #8 tracks, and `cubism-datafusion` equally
+# carries no Iceberg dependency. Putting the link in either would erase the
+# property both crates were built to have. `cubism-serve` and `cubism-cli`
+# already depend on both and resolve to the same arrow 58.3, so a crate
+# above the pair is a proven shape, not a new risk.
+[dependencies]
+cubism-core = { path = "../cubism-core" }
+cubism-datafusion = { path = "../cubism-datafusion" }
+cubism-iceberg = { path = "../cubism-iceberg" }
+arrow-array = "58"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+iceberg = "=0.10.0"
+thiserror.workspace = true
+
+[dev-dependencies]
+arrow-cast = "58"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

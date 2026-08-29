@@ -16,4 +16,13 @@ pub enum CubismError {
 
     #[error("cannot parse cube spec: {0}")]
     SpecParse(String),
+
+    #[error("invalid temporal value: {0}")]
+    Temporal(String),
+
+    #[error("invalid aggregate state: {0}")]
+    AggregateState(String),
+
+    #[error("cannot encode canonical XUnit: {0}")]
+    CanonicalEncoding(String),
 }

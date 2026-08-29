@@ -24,7 +24,10 @@ impl ApiError {
     fn not_found(message: impl Into<String>) -> Self {
         ApiError { status: StatusCode::NOT_FOUND, message: message.into() }
     }
-    fn bad_request(message: impl Into<String>) -> Self {
+    // `pub(crate)`: reused by `crate::series`'s handler so `/api/series`
+    // reports errors in the same `{"error": "..."}` envelope as the
+    // static-cube endpoints above, rather than inventing a second shape.
+    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         ApiError { status: StatusCode::BAD_REQUEST, message: message.into() }
     }
 }

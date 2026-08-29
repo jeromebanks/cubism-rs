@@ -64,8 +64,8 @@ impl ExplodeShape {
 /// Memo from a row's level-value tuple to its encoded lattice keys. BI data
 /// has few distinct dimension combinations relative to row count, so after
 /// warmup the per-row cost is one hash lookup instead of lattice generation
-/// + key encoding. Buckets store the full tuple and are verified on hit, so
-/// hash collisions cannot produce wrong keys.
+/// and key encoding. Buckets store the full tuple and are verified on hit,
+/// so hash collisions cannot produce wrong keys.
 ///
 /// Concurrency: per-row locking measurably serialized the whole pipeline
 /// (sys-time thrash across partitions), so each `invoke` takes an `Arc`

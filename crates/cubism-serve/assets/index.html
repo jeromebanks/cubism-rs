@@ -29,11 +29,20 @@
   .stat .l { color: var(--muted); font-size: 12px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
            padding: 16px; margin-bottom: 16px; }
-  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-  select, input {
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
+              align-items: center; }
+  select, input, button {
     background: var(--bg); color: var(--text); border: 1px solid var(--line);
     border-radius: 6px; padding: 6px 8px; font: inherit; max-width: 260px;
   }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  input[type="date"] { max-width: 150px; }
+  #tsSelector { max-width: 420px; flex: 1 1 260px; }
+  #tsMeasure { max-width: 170px; }
+  .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+                margin-right: 5px; vertical-align: -1px; }
+  .legend .series { color: var(--text); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
   svg text { fill: var(--text); font-size: 12px; }
@@ -47,6 +56,8 @@
   .chip { background: var(--bg); border: 1px solid var(--line); border-radius: 99px;
           padding: 2px 10px; font-size: 12px; color: var(--muted); }
   .ops { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px;
+            color: var(--muted); font-size: 12px; }
   .err { color: #f26d6d; }
   code { color: var(--accent); font-size: 12px; }
 </style>
@@ -67,6 +78,20 @@
     <select id="sliceMeasure"></select>
   </div>
   <div id="sliceChart"></div>
+</div>
+
+<div class="panel" id="tsPanel" hidden>
+  <h2>Time series <span style="text-transform:none;letter-spacing:0">— event-time buckets from the durable Iceberg cube</span></h2>
+  <div class="controls">
+    <input id="tsSelector" value="/G" placeholder="/G ; /geo/country=US" title="One or more XUnit selectors separated by ';' — each one charts as its own line. Comma is NOT a separator here: it already joins YPaths inside a single XUnit (/geo/country=US,/plan/plan=pro).">
+    <button id="tsClear" title="Chart the global rollup only">reset</button>
+    <input id="tsMeasure" value="avg_revenue" placeholder="measure" title="Measure name — from the temporal spec, not the static cube">
+    <input type="date" id="tsStart" value="2026-04-06" title="First day">
+    <input type="date" id="tsEnd" value="2026-04-08" title="Last day">
+    <label style="color:var(--muted);font-size:12px"><input type="checkbox" id="tsLog" style="width:auto;margin-right:4px;vertical-align:-2px">log y</label>
+    <button id="tsLoad">load</button>
+  </div>
+  <div id="tsChart"><span style="color:var(--muted)">checking for /api/series…</span></div>
 </div>
 
 <div class="grid2">
@@ -208,25 +233,330 @@ async function inspect(xunit) {
 
 const enc = encodeURIComponent;
 
+// ---- Time series (/api/series) -------------------------------------------
+// Present only when `cubism serve` was started with --spec/--warehouse; on
+// a static-cube-only serve the route does not exist and this panel stays
+// hidden. Windows follow Milestone 12a's convention: one window per day,
+// window_id = the day string, bucket_start = that midnight in Unix
+// MICROseconds (the API speaks µs; JS Date speaks ms — hence the *1000).
+//
+// One request PER DAY, deliberately: /api/series merges each contiguous
+// segment's windows into one point (`range_query.rs`'s "at most one
+// interior segment"), so a single multi-day request would render one dot,
+// not a line. A single-day range yields exactly one aligned segment.
+const DAY_MS = 86400000;
+
+// Per-series colors. --accent/--accent2 stay reserved for the exact/partial
+// distinction in the SINGLE-series case; with several series drawn together
+// color means "which XUnit" and exactness moves entirely to line style
+// (dashed) plus marker fill (hollow), so the two encodings never collide.
+const SERIES_COLORS = ["#5ec8f2", "#a6e22e", "#f2a65e", "#c792ea", "#f26d9d", "#4dd0b1", "#e8d44d"];
+// Every load takes a ticket; only the newest one is allowed to render.
+// Without this, typing in the selector box fires overlapping fan-outs and
+// whichever finishes LAST wins — which is not necessarily the newest, so
+// the chart can settle on a stale query's data.
+let TS_LOAD_ID = 0;
+
+// Selectors are separated by ';', never ','  — a comma already joins the
+// YPaths *inside* one XUnit (`/geo/country=US,/plan/plan=pro` is a single
+// two-dimension cell), so splitting on it would silently shred multi-
+// dimension selectors into nonsense. Newlines work too, for pasted lists.
+function parseSelectors(raw) {
+  const list = raw.split(/[;\n]/).map(s => s.trim()).filter(Boolean);
+  return list.length ? [...new Set(list)] : ["/G"];
+}
+
+function tsRequest(dayMs, selector, measure) {
+  const start = dayMs * 1000;
+  return {
+    selector, measure,
+    start,
+    end: start + DAY_MS * 1000,
+    exact: false,
+    gap_policy: "missing",
+    windows: [{ window_id: new Date(dayMs).toISOString().slice(0, 10), bucket_start: start }],
+  };
+}
+
+async function postSeries(body) {
+  const r = await fetch("/api/series", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let j;
+  try { j = await r.json(); } catch (_) { return { absent: true }; }
+  if (!r.ok) return j && j.error ? { error: j.error } : { absent: true };
+  if (!Array.isArray(j.points)) return { absent: true };
+  return { point: j.points[0] ?? null, source_resolution: j.source_resolution };
+}
+
+async function loadTimeSeries() {
+  const loadId = ++TS_LOAD_ID;
+  const stale = () => loadId !== TS_LOAD_ID;
+  try {
+    const selectors = parseSelectors($("tsSelector").value);
+    const measure = $("tsMeasure").value.trim();
+    const t0 = Date.parse($("tsStart").value + "T00:00:00Z");
+    const t1 = Date.parse($("tsEnd").value + "T00:00:00Z");
+    if (!measure || Number.isNaN(t0) || Number.isNaN(t1) || t1 < t0) {
+      $("tsPanel").hidden = false;
+      $("tsChart").innerHTML = `<span class="err">pick a measure and a valid date range</span>`;
+      return;
+    }
+    $("tsChart").innerHTML = `<span style="color:var(--muted)">loading…</span>`;
+    const days = [];
+    for (let t = t0; t <= t1; t += DAY_MS) days.push(t);
+    // The cap is on total requests (selectors × days), not days alone —
+    // the fan-out below issues one per pair, so six selectors over three
+    // months is 550 requests, not 92.
+    if (selectors.length > SERIES_COLORS.length) {
+      // Beyond the palette two series would share a colour, and colour is
+      // the only thing identifying a series on this chart.
+      $("tsPanel").hidden = false;
+      $("tsChart").innerHTML = `<span class="err">${selectors.length} selectors — the palette holds ${SERIES_COLORS.length}, past which two series share a colour and become indistinguishable. Chart fewer at a time.</span>`;
+      return;
+    }
+    const calls = days.length * selectors.length;
+    if (calls > 200) {
+      $("tsChart").innerHTML = `<span class="err">too many requests (${selectors.length} selector(s) × ${days.length} day(s) = ${calls}) — /api/series answers one XUnit-day per call; narrow the range or the selector list</span>`;
+      return;
+    }
+    // Flat fan-out, then regroup: one Promise.all keeps the whole grid in
+    // flight at once rather than serializing per series.
+    const flat = await Promise.all(
+      selectors.flatMap(sel => days.map(t => postSeries(tsRequest(t, sel, measure)))));
+    if (stale()) return;
+    const series = selectors.map((selector, si) => ({
+      selector,
+      results: flat.slice(si * days.length, (si + 1) * days.length),
+    }));
+    const all = flat;
+    if (all.every(r => r.absent)) {
+      // static-cube-only serve: /api/series is not mounted — stay hidden
+      $("tsPanel").hidden = true;
+      return;
+    }
+    $("tsPanel").hidden = false;
+    const errs = all.filter(r => r.error);
+    if (errs.length === all.length) {
+      $("tsChart").innerHTML = `<span class="err">${esc(errs[0].error)}</span>`;
+      return;
+    }
+    if (!all.some(r => r.point)) {
+      // some days errored, the rest absent: no successful response to
+      // chart — surface the first real error instead of an empty frame
+      $("tsChart").innerHTML = `<span class="err">${esc(errs[0] ? errs[0].error : "no /api/series responses")}</span>`;
+      return;
+    }
+    drawSeriesChart(series, days);
+  } catch (e) {
+    // never let a series problem break the static panels' init path
+    $("tsPanel").hidden = false;
+    $("tsChart").innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
+// `series` is [{selector, results}], one entry per XUnit, each `results`
+// aligned index-for-index with `days`.
+function drawSeriesChart(series, days) {
+  const el = $("tsChart");
+  const lines = series.map((entry, si) => ({
+    selector: entry.selector,
+    color: SERIES_COLORS[si % SERIES_COLORS.length],
+    pts: entry.results.map(r => r.point ?? null),
+    // a selector every one of whose days came back absent/errored is not
+    // the same as one that legitimately has no rows — keep them apart so
+    // the legend can say which
+    reached: entry.results.some(r => !r.absent && !r.error),
+    // First real API error for this selector, if any. A selector can fail
+    // (bad syntax, unknown measure) while others succeed; without this the
+    // whole series silently reads as "no data".
+    error: (entry.results.find(r => r.error) || {}).error,
+  }));
+  const srcRes = (series.flatMap(e => e.results).find(r => r.source_resolution) || {}).source_resolution;
+  const W = el.clientWidth || 1040, H = 300, L = 60, R = 20, T = 18, B = 42;
+  const plotW = W - L - R, plotH = H - T - B, yBase = T + plotH;
+  // One y-domain over EVERY series, so the lines are mutually comparable.
+  const vals = lines.flatMap(l => l.pts.filter(p => p && p.value != null).map(p => p.value));
+  const logY = $("tsLog").checked;
+  // Values a log axis cannot place (≤ 0). Counted here so the legend can
+  // admit to them rather than letting them vanish silently.
+  let dropped = 0;
+
+  let s = `<svg width="${W}" height="${H}" role="img">`;
+  s += `<line x1="${L}" y1="${yBase}" x2="${W - R}" y2="${yBase}" stroke="var(--line)"></line>`;
+  s += `<line x1="${L}" y1="${T}" x2="${L}" y2="${yBase}" stroke="var(--line)"></line>`;
+
+  if (!vals.length) {
+    const names = lines.map(l => l.selector).join(", ");
+    s += `<text class="muted" x="${L + plotW / 2}" y="${T + plotH / 2}" text-anchor="middle">no data in this range for ${esc(names)}</text>`;
+  } else {
+    // A global rollup and a single-country cell differ by an order of
+    // magnitude or more, which flattens every small series onto the axis
+    // under a shared linear scale. Log y is opt-in rather than automatic:
+    // it changes what the eye reads off the slope (equal *ratios*, not
+    // equal differences), so it must be a visible, deliberate choice.
+    // Non-positive values have no log — they're dropped from the domain
+    // and drawn as gaps, and the legend says how many.
+    const domainVals = logY ? vals.filter(v => v > 0) : vals;
+    dropped = vals.length - domainVals.length;
+    if (!domainVals.length) {
+      // Fall through to the legend rather than returning: the reader still
+      // needs the series list and the "log₁₀ y" note to understand why the
+      // plot is empty.
+      s += `<text class="muted" x="${L + plotW / 2}" y="${T + plotH / 2}" text-anchor="middle">every value is ≤ 0 — log y cannot plot this range</text>`;
+      dropped = vals.length;
+    } else {
+    const tx = v => logY ? Math.log10(v) : v;
+    let lo = Math.min(...domainVals), hi = Math.max(...domainVals);
+    if (lo === hi) { lo = logY ? lo / 2 : lo - 1; hi = logY ? hi * 2 : hi + 1; }
+    let tlo = tx(lo), thi = tx(hi);
+    const pad = (thi - tlo) * 0.1;
+    // Pad the top freely, but never pad an all-non-negative LINEAR series
+    // below zero — a "-0.28" gridline under a count or a revenue average
+    // reads as a real value the measure cannot take. (Under log there is
+    // no zero to cross, so the clamp doesn't apply.)
+    tlo = (!logY && Math.min(...domainVals) >= 0) ? Math.max(0, tlo - pad) : tlo - pad;
+    thi += pad;
+    const X = i => days.length === 1 ? L + plotW / 2 : L + plotW * i / (days.length - 1);
+    // Y works in TRANSFORMED space; `plottable` is the single gate on
+    // whether a point has a y position at all (under log, a 0 or negative
+    // value has none and must become a gap, not a clamped-to-floor dot
+    // that would read as real).
+    const Y = v => T + plotH * (thi - tx(v)) / (thi - tlo);
+    const plottable = p => p && p.value != null && (!logY || p.value > 0);
+    // Gridlines are evenly spaced in transformed space; their LABELS are
+    // the untransformed values, so a log axis reads 10 / 100 / 1,000.
+    const inv = t => logY ? Math.pow(10, t) : t;
+    for (let k = 0; k <= 3; k++) {
+      const tv = tlo + (thi - tlo) * k / 3;
+      const ty = T + plotH * (thi - tv) / (thi - tlo);
+      s += `<text class="muted" x="${L - 8}" y="${ty + 4}" text-anchor="end">${fmt(inv(tv))}</text>`
+        + `<line x1="${L}" y1="${ty}" x2="${W - R}" y2="${ty}" stroke="var(--line)" stroke-dasharray="2 4" opacity="0.5"></line>`;
+    }
+    // x labels once, from the shared day axis — not per series
+    days.forEach((d, i) => {
+      const day = new Date(d).toISOString().slice(0, 10);
+      s += `<text class="muted" x="${X(i)}" y="${H - B + 18}" text-anchor="middle">${day.slice(5)}</text>`;
+    });
+
+    lines.forEach((line, li) => {
+      const { pts, color, selector } = line;
+      // Segments between consecutive data-bearing points. Color is the
+      // series' identity; exactness is carried by the dash pattern alone
+      // (see SERIES_COLORS) so a partial point in series 3 can't be
+      // misread as series 2.
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], b = pts[i];
+        if (!plottable(a) || !plottable(b)) continue;
+        const exact = a.is_exact && b.is_exact;
+        s += `<line x1="${X(i - 1)}" y1="${Y(a.value)}" x2="${X(i)}" y2="${Y(b.value)}"`
+          + ` stroke="${color}" stroke-width="2"`
+          + `${exact ? "" : ` stroke-dasharray="5 4" opacity="0.85"`}></line>`;
+      }
+      pts.forEach((p, i) => {
+        const day = new Date(days[i]).toISOString().slice(0, 10);
+        if (!plottable(p)) {
+          // missing/no-data bucket, or (under log y) a non-positive value
+          // that has no place on the axis: an explicit gap mark, never
+          // interpolated across. Drawn in the series' own color at its own
+          // baseline offset, so several series' gaps stay distinguishable.
+          const why = (p && p.value != null) ? `${fmt(p.value)} — not plottable on a log axis` : "no data";
+          const dy = yBase - 8 - (li % 3) * 11;
+          s += `<text x="${X(i)}" y="${dy}" fill="${color}" opacity="0.8" text-anchor="middle" font-weight="bold">✕<title>${esc(`${selector} · ${day} · ${why}`)}</title></text>`;
+          return;
+        }
+        const revs = (p.published || []).map(q => q.revision).join("/") || "?";
+        const title = `${selector} · ${day}${p.is_exact ? "" : " · PARTIAL"} · rev ${revs} · ${fmt(p.value)}${p.missing?.length ? ` · missing: ${p.missing.join(", ")}` : ""}`;
+        if (p.is_exact) {
+          s += `<circle cx="${X(i)}" cy="${Y(p.value)}" r="4.5" fill="${color}"><title>${esc(title)}</title></circle>`;
+        } else {
+          s += `<circle cx="${X(i)}" cy="${Y(p.value)}" r="4.5" fill="var(--panel)" stroke="${color}" stroke-width="2"><title>${esc(title)}</title></circle>`;
+        }
+      });
+    });
+    }
+  }
+  s += "</svg>";
+
+  const scaleNote = logY
+    ? `log₁₀ y${dropped ? ` · ${dropped} non-positive value(s) not plottable` : ""}`
+    : "";
+  const allPts = lines.flatMap(l => l.pts).filter(Boolean);
+  const revs = [...new Set(allPts.flatMap(p => (p.published || []).map(q => q.revision)))].sort((a, b) => a - b);
+  const swatches = lines.map(l => {
+    const n = l.pts.filter(p => p && p.value != null).length;
+    const note = l.error ? ` — ${l.error}` : (n ? "" : (l.reached ? " (no data)" : " (unavailable)"));
+    const cls = l.error ? "series err" : "series";
+    return `<span class="${cls}"><span class="sw" style="background:${l.color}"></span>${esc(l.selector)}${esc(note)}</span>`;
+  }).join("");
+  el.innerHTML = s
+    + `<div class="legend">${swatches}</div>`
+    + `<div class="legend"><span>● published exactly</span><span>◌ dashed = partial coverage</span><span>✕ no data</span>`
+    + (scaleNote ? `<span>${esc(scaleNote)}</span>` : "")
+    + `<span style="margin-left:auto">resolution ${esc(srcRes == null ? "?" : String(srcRes))}`
+    + (revs.length ? ` · revision${revs.length > 1 ? "s" : ""} shown: ${revs.join(", ")}` : "")
+    + `</span></div>`;
+}
+
 async function init() {
   META = await api("/api/meta");
   $("source").textContent = META.source.split("/").pop();
   $("cellcount").textContent = `${META.cells.toLocaleString()} cells`;
-  await drawOverview();
-  if (!NUMERIC.length) NUMERIC = META.measures;
-  const byDim = {};
-  for (const dim of META.dimensions)
-    byDim[dim] = (await api(`/api/cells?dim=${enc(dim)}&depth=1&limit=100`)).cells;
-  // default the slice to the dimension with the most to show
-  const best = META.dimensions.reduce((a, b) => byDim[b].length > byDim[a].length ? b : a);
-  options($("sliceDim"), META.dimensions, best);
-  options($("sliceMeasure"), NUMERIC);
-  await drawSlice();
-  await populateOps(byDim);
-  if (META.has_global) inspect("/G");
-  for (const id of ["sliceDim", "sliceDepth", "sliceMeasure"]) $(id).addEventListener("change", drawSlice);
-  for (const id of ["opsA", "opsB", "opsMeasure"]) $(id).addEventListener("change", drawOps);
-  $("inspectX").addEventListener("change", () => inspect($("inspectX").value));
+  // The static panels are optional: a temporal-demo serve runs against a
+  // one-row placeholder cube with no dimensions/measures, where the old
+  // init() died mid-way (`reduce` on an empty dimensions array) and the
+  // time-series panel below never activated. Any static-panel failure is
+  // noted in its own panel, never fatal to the rest of the page.
+  try {
+    await drawOverview();
+    if (!NUMERIC.length) NUMERIC = META.measures;
+    const byDim = {};
+    for (const dim of META.dimensions)
+      byDim[dim] = (await api(`/api/cells?dim=${enc(dim)}&depth=1&limit=100`)).cells;
+    if (META.dimensions.length) {
+      // default the slice to the dimension with the most to show
+      const best = META.dimensions.reduce((a, b) => byDim[b].length > byDim[a].length ? b : a);
+      options($("sliceDim"), META.dimensions, best);
+      options($("sliceMeasure"), NUMERIC);
+      await drawSlice();
+      await populateOps(byDim);
+    } else {
+      $("sliceChart").innerHTML = `<span style="color:var(--muted)">this cube has no dimensions to slice — temporal-demo mode? see the Time series panel below.</span>`;
+      $("opsOut").innerHTML = `<span style="color:var(--muted)">set operations need sketch-backed cells; this cube has none.</span>`;
+    }
+    if (META.has_global) inspect("/G");
+    for (const id of ["sliceDim", "sliceDepth", "sliceMeasure"]) $(id).addEventListener("change", drawSlice);
+    for (const id of ["opsA", "opsB", "opsMeasure"]) $(id).addEventListener("change", drawOps);
+    $("inspectX").addEventListener("change", () => inspect($("inspectX").value));
+  } catch (e) {
+    $("sliceChart").innerHTML = `<span class="err">static panels failed: ${esc(e.message)}</span>`;
+  }
+  // Query-string prefill, so a deployment can hand out a link that opens
+  // on the chart it means to show. The dashboard ships generic — the
+  // demo-specific selector list lives in the demo's own launch script,
+  // not hardcoded here. Unknown/absent params leave the markup defaults.
+  applySeriesParams(new URLSearchParams(location.search));
+  // the first load doubles as the /api/series capability probe; it never
+  // throws, so a series problem can't reach init()'s global catch
+  loadTimeSeries();
+  for (const id of ["tsSelector", "tsMeasure", "tsStart", "tsEnd", "tsLog"]) $(id).addEventListener("change", loadTimeSeries);
+  $("tsLoad").addEventListener("click", loadTimeSeries);
+  $("tsClear").addEventListener("click", () => { $("tsSelector").value = "/G"; loadTimeSeries(); });
+}
+
+// `?selectors=/G;/geo/country=US&measure=avg_revenue&start=2026-04-06&end=2026-04-08`
+function applySeriesParams(params) {
+  const set = (param, id) => {
+    const v = params.get(param);
+    if (v != null && v !== "") $(id).value = v;
+  };
+  set("selectors", "tsSelector");
+  set("measure", "tsMeasure");
+  set("start", "tsStart");
+  set("end", "tsEnd");
+  if (params.get("log") === "1") $("tsLog").checked = true;
 }
 init().catch(e => document.body.insertAdjacentHTML("beforeend", `<p class="err">${esc(e.message)}</p>`));
 </script>

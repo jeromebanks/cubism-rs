@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Northstar — Product analytics for teams</title>
+  <style>
+    :root { --ink:#14251e; --muted:#6d7d75; --cream:#f4f3ed; --paper:#fffefa; --green:#185c45; --lime:#d7f36b; --line:#dce1d6; }
+    * { box-sizing:border-box; } body { margin:0; color:var(--ink); background:var(--cream); font:15px/1.5 Inter,ui-sans-serif,system-ui,sans-serif; }
+    nav { display:flex; justify-content:space-between; align-items:center; padding:25px 6vw; max-width:1400px; margin:auto; }
+    .logo { font-weight:800; letter-spacing:-.05em; font-size:22px; } .logo span { color:var(--green); }
+    nav a { color:var(--ink); text-decoration:none; margin-left:28px; font-size:14px; }
+    .hero { max-width:1400px; margin:auto; padding:70px 6vw 95px; display:grid; grid-template-columns:1.15fr .85fr; gap:8vw; align-items:center; }
+    h1 { font-size:clamp(48px,7vw,94px); line-height:.94; letter-spacing:-.075em; margin:0 0 28px; max-width:760px; }
+    .lead { color:var(--muted); font-size:19px; max-width:520px; margin-bottom:34px; }
+    .button { display:inline-block; background:var(--green); color:white; padding:13px 18px; border-radius:4px; text-decoration:none; font-weight:700; margin-right:8px; }
+    .button.alt { background:transparent; color:var(--green); border:1px solid var(--green); }
+    .card { background:var(--paper); border:1px solid var(--line); padding:24px; box-shadow:18px 18px 0 var(--lime); }
+    .card h2 { margin:0 0 20px; font-size:15px; } .metric { display:flex; justify-content:space-between; padding:15px 0; border-top:1px solid var(--line); }
+    .metric strong { font-size:26px; letter-spacing:-.05em; } .metric small { color:var(--muted); display:block; }
+    .bar { height:8px; background:var(--lime); margin-top:8px; } .bar i { display:block; background:var(--green); height:100%; }
+    .strip { background:var(--green); color:white; padding:24px 6vw; text-align:center; font-weight:700; }
+    .features { max-width:1400px; margin:auto; padding:70px 6vw; display:grid; grid-template-columns:repeat(3,1fr); gap:24px; }
+    .feature { border-top:2px solid var(--green); padding-top:18px; } .feature h3 { margin:0 0 8px; } .feature p { color:var(--muted); }
+    footer { padding:30px 6vw 50px; color:var(--muted); font-size:13px; }
+    @media(max-width:800px){ .hero{grid-template-columns:1fr;padding-top:35px}.features{grid-template-columns:1fr}nav a{margin-left:10px}.hero{padding-bottom:65px} }
+  </style>
+</head>
+<body>
+  <nav><div class="logo">north<span>star</span></div><div><a href="#product">Product</a><a href="#insights">Insights</a><a class="button" href="#signup" data-event="demo_cta">Try the demo</a></div></nav>
+  <main>
+    <section class="hero" id="product">
+      <div><p style="color:var(--green);font-weight:800;letter-spacing:.12em;text-transform:uppercase">Product intelligence, without the fog</p><h1>Know what moves your product.</h1><p class="lead">Northstar connects the moments that matter—from first visit to first value—so teams can build with signal instead of guesswork.</p><a class="button" href="#signup" data-event="hero_signup">Start building</a><a class="button alt" href="#insights" data-event="hero_insights">See the signal</a></div>
+      <div class="card" id="insights"><h2>Live product signal <span style="float:right;color:var(--green)">●</span></h2><div class="metric"><div><small>Activation rate</small><strong>42.8%</strong></div><span style="color:var(--green)">↑ 8.4%</span></div><div class="metric"><div><small>Teams reached</small><strong>12,480</strong></div><span style="color:var(--green)">↑ 21%</span></div><div class="metric"><div style="width:100%"><small>Journey health</small><div class="bar"><i style="width:76%"></i></div></div></div></div>
+    </section>
+    <div class="strip">The best product teams don’t need more dashboards. They need the right question answered.</div>
+    <section class="features"><article class="feature"><h3>See the whole journey</h3><p>Understand how acquisition, product behavior, and conversion connect across every segment.</p></article><article class="feature"><h3>Find the meaningful overlap</h3><p>Discover which audiences use a feature, hit a friction point, and convert—together.</p></article><article class="feature"><h3>Move with confidence</h3><p>Turn behavioral signal into a clear next action for product, growth, and customer teams.</p></article></section>
+  </main>
+  <footer id="signup">Northstar demo site · Events are captured locally for this Cubism example.</footer>
+  <script>
+    const key = "northstar_demo_events";
+    document.querySelectorAll("[data-event]").forEach((el) => el.addEventListener("click", () => {
+      const events = JSON.parse(localStorage.getItem(key) || "[]");
+      events.push({ event_name: el.dataset.event, timestamp: new Date().toISOString(), page_path: location.hash || "/", user_id: "demo_user", session_id: "demo_session" });
+      localStorage.setItem(key, JSON.stringify(events));
+    }));
+  </script>
+</body>
+</html>

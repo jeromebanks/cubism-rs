@@ -31,13 +31,16 @@
 //! includeGlobal: true
 //! ```
 
+use crate::aggregate_state::StateVersion;
 use crate::error::CubismError;
 use crate::rules::FilterRule;
+use crate::temporal::TemporalSpec;
 use crate::ypath::YPath;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 pub const API_VERSION_V1: &str = "v1";
+pub const API_VERSION_V2_ALPHA1: &str = "cubism/v2alpha1";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -51,6 +54,10 @@ pub struct CubeSpec {
     pub measures: Vec<MeasureSpec>,
     #[serde(default)]
     pub include_global: bool,
+    /// Present only for explicitly temporal `cubism/v2alpha1` specs. A
+    /// dimension named `time` is never inferred or reinterpreted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal: Option<TemporalSpec>,
     /// Guardrail against high-cardinality dimensions (UUIDs, raw
     /// timestamps): the build fails fast once its string dictionary holds
     /// more than this many distinct interned strings, instead of letting
@@ -124,6 +131,47 @@ pub struct MeasureSpec {
     /// `by` is what it's ranked by), invalid elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub by: Option<String>,
+    /// Versioned authoritative state parameters. Defaults are pinned by the
+    /// API version and included in the spec hash through this structure.
+    #[serde(default, skip_serializing_if = "AggregateStateConfig::is_default")]
+    pub state: AggregateStateConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AggregateStateConfig {
+    #[serde(default = "default_state_version")]
+    pub version: StateVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kmv_size: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantile_bin_width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_capacity: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub centroid_tolerance: Option<f64>,
+}
+
+const fn default_state_version() -> StateVersion {
+    StateVersion::V1
+}
+
+impl Default for AggregateStateConfig {
+    fn default() -> Self {
+        Self {
+            version: default_state_version(),
+            kmv_size: None,
+            quantile_bin_width: None,
+            sample_capacity: None,
+            centroid_tolerance: None,
+        }
+    }
+}
+
+impl AggregateStateConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// The v0.1 aggregator set. Sketch-backed kinds carry mergeable buffers
@@ -136,6 +184,8 @@ pub enum AggKind {
     Min,
     Max,
     Avg,
+    /// Mergeable Welford/Chan `(count, mean, m2)` state.
+    Variance,
     /// KMV sketch: cardinality + set ops (union/intersection/Jaccard).
     CountDistinct,
     /// Bounded top-N by score (ArgMaxMap).
@@ -159,7 +209,10 @@ impl DimensionSpec {
     /// after the dimension.
     pub fn effective_levels(&self) -> Vec<LevelSpec> {
         if self.levels.is_empty() {
-            vec![LevelSpec { name: self.name.clone(), expr: None }]
+            vec![LevelSpec {
+                name: self.name.clone(),
+                expr: None,
+            }]
         } else {
             self.levels.clone()
         }
@@ -207,6 +260,14 @@ impl CubeSpec {
         serde_norway::to_string(self).expect("spec serialization is infallible")
     }
 
+    /// Stable 256-bit hash of the validated semantic spec.
+    pub fn spec_hash(&self) -> Result<[u8; 32], CubismError> {
+        self.validate()?;
+        let canonical =
+            serde_json::to_vec(self).map_err(|error| CubismError::SpecParse(error.to_string()))?;
+        Ok(*blake3::hash(&canonical).as_bytes())
+    }
+
     /// Dimensions in canonical (name-sorted) order — the order lattice
     /// generation folds over, matching legacy `XUnitDefinition`.
     pub fn sorted_dimensions(&self) -> Vec<&DimensionSpec> {
@@ -219,11 +280,25 @@ impl CubeSpec {
     pub fn validate(&self) -> Result<(), CubismError> {
         let mut errors: Vec<String> = Vec::new();
 
-        if self.api_version != API_VERSION_V1 {
+        if self.api_version != API_VERSION_V1 && self.api_version != API_VERSION_V2_ALPHA1 {
             errors.push(format!(
-                "apiVersion '{}' is not supported (expected '{API_VERSION_V1}')",
+                "apiVersion '{}' is not supported (expected '{API_VERSION_V1}' or \
+                 '{API_VERSION_V2_ALPHA1}')",
                 self.api_version
             ));
+        }
+
+        match (self.api_version.as_str(), &self.temporal) {
+            (API_VERSION_V1, Some(_)) => {
+                errors.push("apiVersion 'v1' does not support a temporal section".into());
+            }
+            (API_VERSION_V2_ALPHA1, None) => errors.push(format!(
+                "apiVersion '{API_VERSION_V2_ALPHA1}' requires a temporal section"
+            )),
+            (API_VERSION_V2_ALPHA1, Some(temporal)) => {
+                errors.extend(temporal.validate());
+            }
+            _ => {}
         }
 
         if self.max_dictionary_entries == 0 {
@@ -299,9 +374,103 @@ impl CubeSpec {
                 )),
                 _ => {}
             }
+            validate_state_config(
+                measure,
+                self.api_version == API_VERSION_V2_ALPHA1,
+                &mut errors,
+            );
         }
 
-        if errors.is_empty() { Ok(()) } else { Err(CubismError::Validation(errors)) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(CubismError::Validation(errors))
+        }
+    }
+}
+
+fn validate_state_config(measure: &MeasureSpec, temporal: bool, errors: &mut Vec<String>) {
+    let state = &measure.state;
+    if !temporal && !state.is_default() {
+        errors.push(format!(
+            "measure '{}': explicit state parameters require apiVersion '{}'",
+            measure.name, API_VERSION_V2_ALPHA1
+        ));
+        return;
+    }
+    if state.version != StateVersion::V1 {
+        errors.push(format!(
+            "measure '{}': unsupported aggregate state version {} (expected 1)",
+            measure.name,
+            state.version.get()
+        ));
+    }
+    if state.kmv_size.is_some() && measure.agg != AggKind::CountDistinct {
+        errors.push(format!(
+            "measure '{}': state.kmvSize is only valid for count_distinct",
+            measure.name
+        ));
+    }
+    if state.quantile_bin_width.is_some() && measure.agg != AggKind::Quantile {
+        errors.push(format!(
+            "measure '{}': state.quantileBinWidth is only valid for quantile",
+            measure.name
+        ));
+    }
+    if state.sample_capacity.is_some() && measure.agg != AggKind::ReservoirSample {
+        errors.push(format!(
+            "measure '{}': state.sampleCapacity is only valid for reservoir_sample",
+            measure.name
+        ));
+    }
+    if state.centroid_tolerance.is_some() && measure.agg != AggKind::Centroid {
+        errors.push(format!(
+            "measure '{}': state.centroidTolerance is only valid for centroid",
+            measure.name
+        ));
+    }
+    if state.kmv_size.is_some_and(|value| value < 2) {
+        errors.push(format!(
+            "measure '{}': state.kmvSize must be at least 2",
+            measure.name
+        ));
+    }
+    if state.sample_capacity == Some(0) {
+        errors.push(format!(
+            "measure '{}': state.sampleCapacity must be at least 1",
+            measure.name
+        ));
+    }
+    if state
+        .quantile_bin_width
+        .is_some_and(|value| !value.is_finite() || value <= 0.0)
+    {
+        errors.push(format!(
+            "measure '{}': state.quantileBinWidth must be finite and greater than zero",
+            measure.name
+        ));
+    }
+    if state
+        .centroid_tolerance
+        .is_some_and(|value| !value.is_finite() || value <= 0.0)
+    {
+        errors.push(format!(
+            "measure '{}': state.centroidTolerance must be finite and greater than zero",
+            measure.name
+        ));
+    }
+    if temporal && measure.agg == AggKind::Quantile && state.quantile_bin_width.is_none() {
+        errors.push(format!(
+            "measure '{}': temporal quantile requires state.quantileBinWidth",
+            measure.name
+        ));
+    }
+    if temporal && measure.agg == AggKind::TopK {
+        errors.push(format!(
+            "measure '{}': top_k is not supported for temporal aggregation because its \
+             current pruned merge is not associative",
+            measure.name
+        ));
     }
 }
 
@@ -382,8 +551,11 @@ includeGlobal: true
     #[test]
     fn sorted_dimensions_are_name_ordered() {
         let spec = CubeSpec::from_yaml(SPEC).unwrap();
-        let names: Vec<&str> =
-            spec.sorted_dimensions().iter().map(|d| d.name.as_str()).collect();
+        let names: Vec<&str> = spec
+            .sorted_dimensions()
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
         assert_eq!(names, vec!["gender", "geo", "platform"]);
     }
 
@@ -391,8 +563,7 @@ includeGlobal: true
     fn ypaths_for_values_builds_prefix_hierarchy() {
         let spec = CubeSpec::from_yaml(SPEC).unwrap();
         let geo = &spec.dimensions[0];
-        let yps =
-            geo.ypaths_for_values(&[Some("CZ".into()), Some("Prague".into())]);
+        let yps = geo.ypaths_for_values(&[Some("CZ".into()), Some("Prague".into())]);
         assert_eq!(yps.len(), 2);
         assert_eq!(yps[0].to_string(), "/geo/country=CZ");
         assert_eq!(yps[1].to_string(), "/geo/country=CZ/city=Prague");
@@ -432,7 +603,9 @@ measures:
     agg: count
 "#;
         let err = CubeSpec::from_yaml(bad).unwrap_err();
-        let CubismError::Validation(errors) = err else { panic!("expected validation error") };
+        let CubismError::Validation(errors) = err else {
+            panic!("expected validation error")
+        };
         let text = errors.join("\n");
         assert!(text.contains("apiVersion 'v2'"));
         assert!(text.contains("'name' must not be empty"));
@@ -456,5 +629,90 @@ dimenssions:
         let err = CubeSpec::from_yaml(typo).unwrap_err();
         assert!(matches!(err, CubismError::SpecParse(_)));
         assert!(err.to_string().contains("dimenssions"));
+    }
+
+    #[test]
+    fn parses_v2alpha1_temporal_spec_and_hashes_semantics() {
+        let yaml = r#"
+apiVersion: cubism/v2alpha1
+name: temporal_events
+dimensions:
+  - name: geo
+measures:
+  - name: latency_p50
+    agg: quantile
+    input: latency_ms
+    state:
+      quantileBinWidth: 0.5
+  - name: latency_variance
+    agg: variance
+    input: latency_ms
+temporal:
+  eventTime: occurred_at
+  ingestionTime: ingested_at
+  baseResolution: 5m
+  origin: unix
+  timezone: UTC
+  allowedLateness: 2h
+  rollups: [1h, 1d]
+  retention: 90d
+"#;
+        let spec = CubeSpec::from_yaml(yaml).unwrap();
+        assert_eq!(spec.api_version, API_VERSION_V2_ALPHA1);
+        assert_eq!(spec.temporal.as_ref().unwrap().event_time, "occurred_at");
+        assert_eq!(
+            spec.spec_hash().unwrap(),
+            CubeSpec::from_yaml(&spec.to_yaml())
+                .unwrap()
+                .spec_hash()
+                .unwrap()
+        );
+
+        let changed = yaml.replace("allowedLateness: 2h", "allowedLateness: 3h");
+        assert_ne!(
+            spec.spec_hash().unwrap(),
+            CubeSpec::from_yaml(&changed).unwrap().spec_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn temporal_spec_rejects_calendar_and_current_topk_semantics() {
+        let yaml = r#"
+apiVersion: cubism/v2alpha1
+name: temporal_events
+dimensions:
+  - name: geo
+measures:
+  - name: top
+    agg: top_k
+    input: page
+    by: score
+temporal:
+  eventTime: occurred_at
+  baseResolution: calendar_month
+  allowedLateness: 1h
+"#;
+        let error = CubeSpec::from_yaml(yaml).unwrap_err().to_string();
+        assert!(error.contains("calendar resolution"));
+        assert!(error.contains("top_k is not supported"));
+    }
+
+    #[test]
+    fn v1_does_not_infer_or_accept_temporal_configuration() {
+        let yaml = r#"
+apiVersion: v1
+name: static
+dimensions:
+  - name: time
+measures:
+  - name: events
+    agg: count
+temporal:
+  eventTime: occurred_at
+  baseResolution: 1h
+  allowedLateness: 1h
+"#;
+        let error = CubeSpec::from_yaml(yaml).unwrap_err().to_string();
+        assert!(error.contains("does not support a temporal section"));
     }
 }
