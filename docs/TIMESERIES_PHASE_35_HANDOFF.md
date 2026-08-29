@@ -10,7 +10,10 @@ a source-event change now flows end to end to a corrected, published,
 queryable window without a human computing the rebuild. Two commits,
 pushed, no PR opened yet (deliberately — see "First decision" below).
 
-**Superseded by:** (none yet — this is the latest handoff)
+**Superseded by:** [`TIMESERIES_PHASE_36_HANDOFF.md`](TIMESERIES_PHASE_36_HANDOFF.md)
+— which supersedes this file's "First decision" (there is now one branch, so
+the base question is moot) and its "Blocks the merge" list (re-tracked by the
+owner into #38/#43).
 
 ## Read first
 
