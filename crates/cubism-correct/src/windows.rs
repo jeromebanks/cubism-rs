@@ -23,15 +23,48 @@
 //!
 //! A window is named by the UTC instant its bucket starts:
 //!
-//! - resolutions that divide a day evenly and are a whole number of days —
-//!   `YYYY-MM-DD`
-//! - everything else — `YYYY-MM-DDTHH:MM:SSZ`
+//! - resolutions that divide a day evenly and are a whole number of days,
+//!   landing on a midnight — `YYYY-MM-DD`
+//! - bucket starts on a whole second — `YYYY-MM-DDTHH:MM:SSZ`
+//! - bucket starts with a sub-second remainder —
+//!   `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 //!
 //! The day form is not a new invention: it is exactly what Milestone 12a's
 //! `build_temporal_demo.sh` already passes to `--window-id`, so warehouses
 //! built before this module resolve through it unchanged. That
 //! compatibility is asserted in this module's tests, not assumed —
 //! [`day_form_matches_the_existing_demo_convention`].
+//!
+//! # Why the encoding must be injective, and how the third form arose
+//!
+//! [`WindowId`] is the *publication key*. Two bucket starts sharing one id
+//! is not a cosmetic clash: `CorrectionCoordinator` compare-and-swaps
+//! per-`WindowId`, so a collision silently removes the CAS's window
+//! scoping, and a correction can revise one window repeatedly while
+//! another is never corrected at all.
+//!
+//! The original encoding had only the first two forms, and was **not**
+//! injective. `cubism_core` accepts `us`/`µs`/`ms` resolution units, so on
+//! a `500ms` cube the buckets at `0µs` and `500_000µs` both rendered as
+//! `1970-01-01T00:00:00Z` — the second-precision format dropped exactly
+//! the digits that distinguished them
+//! ([#50](https://github.com/jeromebanks/cubism-rs/issues/50)).
+//!
+//! The sub-second form is emitted **only when the bucket start actually
+//! has a sub-second remainder**, which is what makes this a fix rather
+//! than a migration: every id existing warehouses hold is day-form or
+//! whole-second-form, and both are byte-for-byte unchanged. Widening all
+//! instant-form ids to microsecond precision would have been simpler to
+//! state and would have rewritten every id in the field.
+//!
+//! Injectivity holds because each form is lossless over the values it
+//! claims: a whole-second bucket start has nothing below the second to
+//! lose, and anything that does gets the six digits. The day and instant
+//! forms cannot collide — only the instant forms contain a `T`.
+//!
+//! [`WindowId`]s are opaque keys and are never parsed back into a time
+//! anywhere in this workspace (checked), so the added form needs no
+//! reader-side support.
 //!
 //! # What this module does NOT do
 //!
@@ -48,6 +81,7 @@ use cubism_core::temporal::{
 use crate::CorrectError;
 
 const MICROS_PER_DAY: i64 = 86_400_000_000;
+const MICROS_PER_SECOND: i64 = 1_000_000;
 
 /// One window a correction's time range lands in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,8 +109,14 @@ pub fn window_id_for(
     // onto one id.
     let whole_days = resolution.micros() % MICROS_PER_DAY == 0;
     let on_midnight = micros.rem_euclid(MICROS_PER_DAY) == 0;
+    // `rem_euclid`, not `%`, so a pre-epoch bucket start is classified by
+    // where it sits inside its second rather than by the sign of the
+    // remainder.
+    let sub_second = micros.rem_euclid(MICROS_PER_SECOND) != 0;
     let formatted = if whole_days && on_midnight {
         timestamp.format("%Y-%m-%d").to_string()
+    } else if sub_second {
+        timestamp.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()
     } else {
         timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string()
     };
@@ -259,6 +299,108 @@ mod tests {
         for pair in windows.windows(2) {
             assert_eq!(pair[0].range.end(), pair[1].range.start());
         }
+    }
+
+    /// #50's regression: `WindowId` is the publication key, so two bucket
+    /// starts must never share one. Before the sub-second form existed,
+    /// both of these rendered as `1970-01-01T00:00:00Z`.
+    #[test]
+    fn adjacent_sub_second_buckets_do_not_collide() {
+        let half_sec = FixedResolution::from_micros(500_000).unwrap();
+        let first = window_id_for(BucketStart::from_unix_micros(0), half_sec).unwrap();
+        let second = window_id_for(BucketStart::from_unix_micros(500_000), half_sec).unwrap();
+        assert_eq!(first.as_str(), "1970-01-01T00:00:00Z");
+        assert_eq!(second.as_str(), "1970-01-01T00:00:00.500000Z");
+        assert_ne!(first.as_str(), second.as_str());
+    }
+
+    /// The tightest resolution `cubism-core` accepts. One microsecond apart
+    /// is the smallest gap the encoding has to keep distinct.
+    #[test]
+    fn adjacent_microsecond_buckets_do_not_collide() {
+        let one_us = FixedResolution::from_micros(1).unwrap();
+        let ids: Vec<String> = (0..4)
+            .map(|n| window_id_for(BucketStart::from_unix_micros(n), one_us).unwrap().as_str().to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "1970-01-01T00:00:00Z",
+                "1970-01-01T00:00:00.000001Z",
+                "1970-01-01T00:00:00.000002Z",
+                "1970-01-01T00:00:00.000003Z",
+            ]
+        );
+    }
+
+    /// Injectivity is the property that actually matters, so assert it
+    /// directly over a dense run of buckets rather than inferring it from
+    /// a couple of spot checks.
+    #[test]
+    fn the_encoding_is_injective_across_a_dense_run_of_buckets() {
+        use std::collections::HashSet;
+        let one_us = FixedResolution::from_micros(1).unwrap();
+        // Straddles a second boundary and the epoch, so both the
+        // whole-second/sub-second split and the negative path are covered.
+        let ids: HashSet<String> = (-2_000..2_000)
+            .map(|n| window_id_for(BucketStart::from_unix_micros(n), one_us).unwrap().as_str().to_string())
+            .collect();
+        assert_eq!(ids.len(), 4_000, "every distinct bucket start needs a distinct id");
+    }
+
+    /// Pre-epoch bucket starts are classified by where they sit inside
+    /// their second (`rem_euclid`), not by the sign of a remainder.
+    #[test]
+    fn pre_epoch_sub_second_buckets_render_correctly() {
+        let half_sec = FixedResolution::from_micros(500_000).unwrap();
+        assert_eq!(
+            window_id_for(BucketStart::from_unix_micros(-500_000), half_sec).unwrap().as_str(),
+            "1969-12-31T23:59:59.500000Z"
+        );
+        assert_eq!(
+            window_id_for(BucketStart::from_unix_micros(-1_000_000), half_sec).unwrap().as_str(),
+            "1969-12-31T23:59:59Z"
+        );
+    }
+
+    /// A daily resolution whose origin is not midnight is still sub-day
+    /// aligned, so it must NOT take the day form — that was already true
+    /// before #50 and must survive the third form's introduction.
+    #[test]
+    fn a_non_midnight_daily_bucket_keeps_an_instant_form() {
+        let daily = FixedResolution::from_micros(MICROS_PER_DAY).unwrap();
+        let start = BucketStart::from_unix_micros(at("2026-04-06T06:30:00Z").unix_micros());
+        assert_eq!(
+            window_id_for(start, daily).unwrap().as_str(),
+            "2026-04-06T06:30:00Z"
+        );
+    }
+
+    /// The whole point of emitting the sub-second form *conditionally*:
+    /// ids already sitting in warehouses must not change. Both
+    /// pre-existing forms are pinned here alongside #50's new one.
+    #[test]
+    fn existing_id_forms_are_byte_identical_after_the_sub_second_fix() {
+        let daily = FixedResolution::from_micros(MICROS_PER_DAY).unwrap();
+        let hourly = FixedResolution::from_micros(3_600_000_000).unwrap();
+        assert_eq!(
+            window_id_for(
+                BucketStart::from_unix_micros(at("2026-04-06T00:00:00Z").unix_micros()),
+                daily
+            )
+            .unwrap()
+            .as_str(),
+            "2026-04-06"
+        );
+        assert_eq!(
+            window_id_for(
+                BucketStart::from_unix_micros(at("2026-04-06T13:00:00Z").unix_micros()),
+                hourly
+            )
+            .unwrap()
+            .as_str(),
+            "2026-04-06T13:00:00Z"
+        );
     }
 
     #[test]
