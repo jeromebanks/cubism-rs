@@ -36,6 +36,29 @@ pub use windows::{affected_windows, window_id_for, AffectedWindow};
 pub enum CorrectError {
     #[error("cannot name a window: {0}")]
     WindowNaming(String),
+    #[error(
+        "window '{window_id}' is at revision {previous}; the next revision is not representable"
+    )]
+    RevisionOverflow { window_id: String, previous: u64 },
+    /// A multi-window correction that stopped part-way, carrying the
+    /// progress made before it stopped.
+    ///
+    /// Windows are corrected one at a time, each with its own Iceberg
+    /// commit, and this stack has no cross-commit transaction — so a
+    /// mid-run failure genuinely leaves earlier windows corrected. This
+    /// variant is how that partial progress reaches the caller: without
+    /// it, `?` would discard the record of what already landed and a
+    /// retry would have to restart rather than resume.
+    ///
+    /// `corrected` may be empty (the first window failed). The underlying
+    /// failure is the [`source`](std::error::Error::source).
+    #[error("correction stopped after {} window(s): {source}", .corrected.len())]
+    Partial {
+        corrected: Vec<engine::WindowCorrection>,
+        skipped_unpublished: Vec<cubism_core::temporal::WindowId>,
+        #[source]
+        source: Box<CorrectError>,
+    },
     #[error("cube '{0}' has no temporal spec; corrections are a temporal-only operation")]
     NotTemporal(String),
     #[error("rebuilding corrected states failed: {0}")]

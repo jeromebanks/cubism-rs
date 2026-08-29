@@ -32,7 +32,7 @@ use std::sync::Arc;
 use arrow_array::{Array, FixedSizeBinaryArray, RecordBatch, TimestampMicrosecondArray};
 use cubism_core::temporal::{EventTime, TimeRange, WindowId, WindowRevision};
 use cubism_core::CubeSpec;
-use cubism_correct::{CorrectionEngine, CorrectionOutcome};
+use cubism_correct::{CorrectError, CorrectionEngine, CorrectionOutcome};
 use cubism_datafusion::datafusion::prelude::{CsvReadOptions, SessionContext};
 use cubism_datafusion::temporal_build::{
     build_temporal, temporal_state_schema, NullEventTimePolicy,
@@ -398,5 +398,116 @@ async fn a_change_spanning_days_corrects_each_published_window_and_reports_unpub
             .unwrap()
             .is_none(),
         "the unpublished window stayed unpublished"
+    );
+}
+
+/// The partial-progress guarantee `engine.rs`'s module doc rests on: when a
+/// multi-window correction fails part-way, the windows that already landed
+/// must reach the caller instead of being dropped by `?`.
+///
+/// Before `CorrectError::Partial` existed, `correct` accumulated its
+/// outcome in a local and propagated failures with `?` — so this scenario
+/// returned the bare underlying error and the caller had no way to know
+/// 2026-04-06 had already been republished at revision 2. A retry would
+/// have restarted rather than resumed, re-correcting a corrected window
+/// and burning a revision on it.
+///
+/// The mid-run failure is induced honestly rather than by mocking: the
+/// engine's run IDs are deterministic (`{prefix}-{window}-r{revision}`), so
+/// pre-claiming the *second* window's run ID with a mismatched
+/// `expected_rows` makes its `claim_run` fail with `RunConflict` while the
+/// first window is untouched.
+#[tokio::test]
+async fn a_failure_part_way_through_reports_the_windows_that_already_landed() {
+    let spec = spec();
+    let dir = TempDir::new().unwrap();
+    let corrected_csv = write_csv(&dir, "corrected.csv", &format!("{BASE_ROWS}{LATE_ROWS}"));
+
+    let ctx = SessionContext::new();
+    ctx.register_csv("corrected", &corrected_csv, CsvReadOptions::new())
+        .await
+        .unwrap();
+    let w = Warehouse::new(&spec).await;
+
+    // 2026-04-06 and 2026-04-08 published; 2026-04-07 deliberately not.
+    for (day, start, end) in [
+        ("2026-04-06", "2026-04-06T00:00:00+00:00", "2026-04-07T00:00:00+00:00"),
+        ("2026-04-08", "2026-04-08T00:00:00+00:00", "2026-04-09T00:00:00+00:00"),
+    ] {
+        let window = WindowId::new(day).unwrap();
+        w.build_and_publish_initial(
+            &ctx,
+            &spec,
+            "corrected",
+            &window,
+            TimeRange::new(at(start), at(end)).unwrap(),
+            &format!("run-init-{day}"),
+        )
+        .await;
+    }
+
+    // Poison the LAST window's claim, leaving the first correctable.
+    let poisoned = WindowId::new("2026-04-08").unwrap();
+    w.publications
+        .claim_run(
+            &w.table.cube_id,
+            &poisoned,
+            "run-partial-2026-04-08-r2",
+            WindowRevision::new(2).unwrap(),
+            999_999, // deliberately not the row count the engine will compute
+        )
+        .await
+        .unwrap();
+
+    let err = CorrectionEngine::correct(
+        &ctx,
+        &spec,
+        "corrected",
+        TimeRange::new(at("2026-04-06T12:00:00+00:00"), at("2026-04-08T12:00:00+00:00")).unwrap(),
+        w.catalog.as_ref(),
+        &w.table,
+        &w.publications,
+        "run-partial",
+    )
+    .await
+    .expect_err("the poisoned second window must fail the run");
+
+    let CorrectError::Partial { corrected, skipped_unpublished, source } = err else {
+        panic!("a mid-run failure must surface as CorrectError::Partial, got: {err:?}");
+    };
+
+    // The prefix is REPORTED...
+    assert_eq!(
+        corrected.iter().map(|c| c.window_id.as_str()).collect::<Vec<_>>(),
+        ["2026-04-06"],
+        "the window corrected before the failure must travel out with the error"
+    );
+    assert_eq!(corrected[0].revision.get(), 2);
+    assert_eq!(
+        skipped_unpublished.iter().map(WindowId::as_str).collect::<Vec<_>>(),
+        ["2026-04-07"],
+        "never-published windows are still reported on the failure path"
+    );
+    assert!(
+        matches!(*source, CorrectError::Persist(_)),
+        "the underlying failure stays typed and reachable, got: {source:?}"
+    );
+
+    // ...and the prefix is REAL: 2026-04-06 genuinely advanced, 2026-04-08
+    // did not. This is what makes resuming (rather than restarting) correct.
+    assert_eq!(
+        w.publications
+            .current(&w.table.cube_id, &WindowId::new("2026-04-06").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .get(),
+        2,
+        "the corrected prefix really was published"
+    );
+    assert_eq!(
+        w.publications.current(&w.table.cube_id, &poisoned).await.unwrap().unwrap().get(),
+        1,
+        "the failed window was left at its original revision"
     );
 }

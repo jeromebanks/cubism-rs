@@ -18,11 +18,20 @@
 //! its own claim/append/publish cycle. A failure part-way through leaves
 //! earlier windows corrected and later ones untouched — deliberately: the
 //! alternative is an all-or-nothing protocol spanning several Iceberg
-//! commits, which this stack has no transaction for. [`CorrectionOutcome`]
-//! reports exactly which windows landed, so a retry can resume rather than
-//! restart. Windows are independent by construction (each is a disjoint
-//! bucket of event time), so a partial correction is a correct correction
-//! of a prefix, never a torn one.
+//! commits, which this stack has no transaction for. Windows are
+//! independent by construction (each is a disjoint bucket of event time),
+//! so a partial correction is a correct correction of a prefix, never a
+//! torn one.
+//!
+//! That semantic is only defensible if the caller can *see* the prefix, so
+//! a mid-run failure returns [`CorrectError::Partial`], which carries the
+//! windows that already landed alongside the underlying error. A retry
+//! resumes from the first window not in that list rather than restarting —
+//! restarting would re-correct already-corrected windows and burn a
+//! revision on each. Note the progress is reported on the **error** path:
+//! [`CorrectionOutcome`] is returned only when every window succeeded, so
+//! `?` still forces a caller to confront a partial run instead of reading
+//! a success value that quietly under-reports.
 //!
 //! # The CAS anchor
 //!
@@ -105,57 +114,112 @@ impl CorrectionEngine {
 
         let mut outcome = CorrectionOutcome::default();
         for AffectedWindow { window_id, range } in windows {
-            // Read the CAS anchor BEFORE rebuilding: the coordinator
-            // compares against what we observed at planning time, so
-            // reading it after the (slow) rebuild would narrow the race
-            // window in appearance while leaving it exactly as wide.
-            let Some(observed_current) = publications.current(&table.cube_id, &window_id).await?
-            else {
-                outcome.skipped_unpublished.push(window_id);
-                continue;
-            };
-
-            let rebuilt = build_temporal(
+            // Every failure below is caught rather than propagated with
+            // `?`, so the windows already corrected in earlier iterations
+            // travel out with the error instead of being dropped on the
+            // floor. See this module's doc: the per-window-commit design
+            // is only defensible because the prefix is reportable.
+            match correct_one_window(
                 ctx,
                 spec,
                 corrected_source,
-                Some(range),
-                Some(window_id.clone()),
-                NullEventTimePolicy::Quarantine,
-            )
-            .await?;
-            let states = collect(rebuilt.states).await?;
-            let registry = collect(rebuilt.registry).await?;
-
-            let revision = WindowRevision::new(observed_current.get() + 1)
-                .map_err(|e| CorrectError::WindowNaming(e.to_string()))?;
-            let run_id = format!("{run_id_prefix}-{}-r{}", window_id.as_str(), revision.get());
-
-            CorrectionCoordinator::execute(
+                &window_id,
+                range,
+                &kinds,
                 catalog,
                 table,
                 publications,
-                CorrectionRequest {
-                    window_id: &window_id,
-                    revision,
-                    run_id: &run_id,
-                    observed_current,
-                    kinds: &kinds,
-                    states: &states,
-                    registry: &registry,
-                },
+                run_id_prefix,
             )
-            .await?;
-
-            outcome.corrected.push(WindowCorrection {
-                window_id,
-                previous_revision: observed_current,
-                revision,
-                run_id,
-            });
+            .await
+            {
+                Ok(Some(correction)) => outcome.corrected.push(correction),
+                Ok(None) => outcome.skipped_unpublished.push(window_id),
+                Err(source) => {
+                    return Err(CorrectError::Partial {
+                        corrected: outcome.corrected,
+                        skipped_unpublished: outcome.skipped_unpublished,
+                        source: Box::new(source),
+                    });
+                }
+            }
         }
         Ok(outcome)
     }
+}
+
+/// Correct one window, or report it as never-published (`Ok(None)`).
+///
+/// Split out of the loop so a failure can be caught and paired with the
+/// progress made so far; inlined with `?` it would discard that progress.
+#[allow(clippy::too_many_arguments)]
+async fn correct_one_window(
+    ctx: &SessionContext,
+    spec: &CubeSpec,
+    corrected_source: &str,
+    window_id: &WindowId,
+    range: TimeRange,
+    kinds: &[AggKind],
+    catalog: &dyn iceberg::Catalog,
+    table: &TemporalTable,
+    publications: &PublicationStore,
+    run_id_prefix: &str,
+) -> Result<Option<WindowCorrection>, CorrectError> {
+    // Read the CAS anchor BEFORE rebuilding: the coordinator compares
+    // against what we observed at planning time, so reading it after the
+    // (slow) rebuild would narrow the race window in appearance while
+    // leaving it exactly as wide.
+    let Some(observed_current) = publications.current(&table.cube_id, window_id).await? else {
+        return Ok(None);
+    };
+
+    let rebuilt = build_temporal(
+        ctx,
+        spec,
+        corrected_source,
+        Some(range),
+        Some(window_id.clone()),
+        NullEventTimePolicy::Quarantine,
+    )
+    .await?;
+    let states = collect(rebuilt.states).await?;
+    let registry = collect(rebuilt.registry).await?;
+
+    // `WindowRevision::new` rejects only zero, so the sole way this fails
+    // is a u64 wrap — hence `checked_add` and an overflow-named error
+    // rather than the window-naming variant this once borrowed.
+    let revision = observed_current
+        .get()
+        .checked_add(1)
+        .and_then(|next| WindowRevision::new(next).ok())
+        .ok_or_else(|| CorrectError::RevisionOverflow {
+            window_id: window_id.as_str().to_string(),
+            previous: observed_current.get(),
+        })?;
+    let run_id = format!("{run_id_prefix}-{}-r{}", window_id.as_str(), revision.get());
+
+    CorrectionCoordinator::execute(
+        catalog,
+        table,
+        publications,
+        CorrectionRequest {
+            window_id,
+            revision,
+            run_id: &run_id,
+            observed_current,
+            kinds,
+            states: &states,
+            registry: &registry,
+        },
+    )
+    .await?;
+
+    Ok(Some(WindowCorrection {
+        window_id: window_id.clone(),
+        previous_revision: observed_current,
+        revision,
+        run_id,
+    }))
 }
 
 async fn collect(
