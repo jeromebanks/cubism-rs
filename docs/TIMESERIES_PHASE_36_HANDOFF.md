@@ -2,8 +2,11 @@
 
 Date: 2026-08-28
 
-Branch: `feature/timeseries-phase-0a` @ `78982f6` — **the only outstanding
-branch.** PR #24 into `main`, 96 commits, 142 files, `MERGEABLE`.
+Branch: `feature/timeseries-phase-0a` @ `0a7cb0a` — **the only outstanding
+branch.** PR #24 into `main`, 98 commits, `MERGEABLE`.
+
+Status: **both High findings from the reviews are fixed.** Nothing known
+blocks the merge.
 
 **Superseded by:** (none yet — this is the latest handoff)
 
@@ -48,8 +51,8 @@ sat on a separate branch, so #24 would not have closed them. It will now.
   reconciliation to #38. Read that comment before re-deriving the list.
 
 The remaining gate is human: #24 has `reviewDecision: ""` and no status
-checks. Two reviews were run this session (below) and one High finding from
-them is **not** fixed — see "The one open question" .
+checks. Two reviews were run this session (below); both of their High
+findings are fixed on the branch.
 
 ## What this session did
 
@@ -107,8 +110,9 @@ pre-fix behaviour, a bare `Persist(RunConflict)` carrying no progress. No
 
 An advisor review and an independent Codex review
 (`codex resume 01a04a64-842a-7762-abf7-be7964846f0e`). **Codex's verdict was
-"request changes before merge."** Its two High findings were the partial-run
-defect (fixed above) and #50 (not fixed).
+"request changes before merge."** Both of its High findings — the
+partial-run defect (above) and #50 (below) — are now fixed, so that verdict
+has been addressed rather than overridden.
 
 Codex confirmed the partial-progress defect was **broader than first
 stated** — five per-window `?` paths could discard progress, not two.
@@ -126,10 +130,14 @@ What both reviews **cleared**, so the next session need not re-derive it:
   vacuity guards). It is **not** an independent oracle for aggregation
   semantics — both sides call the same `build_temporal`.
 
-## The one open question before merge
+## #50 — fixed (`0a7cb0a`)
 
-**#50 — the canonical `WindowId` encoding is not injective.** Verified
-empirically this session, not read off a review:
+This section was written as an open merge question; it was then fixed in
+the same session.
+
+`window_id_for` rendered every non-day bucket as `%Y-%m-%dT%H:%M:%SZ`,
+dropping fractional seconds, while `cubism-core` accepts `us`/`µs`/`ms`
+units. Verified empirically before being accepted:
 
 ```text
 PROBE bucket 0us   -> 1970-01-01T00:00:00Z
@@ -137,33 +145,25 @@ PROBE bucket 500ms -> 1970-01-01T00:00:00Z
 PROBE collide = true
 ```
 
-`window_id_for` formats the non-day case as `%Y-%m-%dT%H:%M:%SZ`, dropping
-fractional seconds, while `cubism-core` accepts `us`/`µs`/`ms` resolution
-units. `WindowId` is the publication key, so two buckets sharing one means a
-correction can target the wrong window, and the per-window CAS loses its
-scoping.
+`WindowId` is the publication key and `CorrectionCoordinator` CASes
+per-`WindowId`, so a collision removed the CAS's window scoping.
 
-Not reachable through the demo (daily buckets), so it is latent rather than
-live — but `windows.rs` declares this encoding **canonical**, and a
-sub-second warehouse would be silently wrong.
+**The fix adds a third form** — `YYYY-MM-DDTHH:MM:SS.ffffffZ` — emitted
+only when the bucket start has a sub-second remainder. That conditionality
+is the point: every id in existing warehouses is day-form or
+whole-second-form and is byte-for-byte unchanged, so no migration and no
+break of the Milestone 12a pin. Checked first: `WindowId` is an opaque key
+never parsed back into a time anywhere in the workspace.
 
-**Recommended fix, deliberately minimal:** emit microsecond precision only
-when the bucket start has a sub-second remainder. Every id current
-warehouses hold is day-form or whole-second-form, so nothing changes for
-them and `day_form_matches_the_existing_demo_convention` still holds. No
-migration. Encoding signed Unix microseconds outright is the alternative,
-but it breaks that pin.
-
-The owner was asked whether to fix this before merging and chose to commit
-the partial-correction fix and file the rest. **So the merge decision on #50
-is still open** — it is a latent High in a module the Phase 35 handoff
-itself flagged as most worth a reviewer's disagreement.
+Mutation-checked by disabling the sub-second branch — all six new tests
+fail, all eight pre-existing ones still pass, which is what shows the fix
+is *scoped* and not merely present.
 
 ## Issues filed this session
 
 | # | Sev | What |
 |---|---|---|
-| #50 | High | `WindowId` not injective for sub-second resolutions (above) |
+| ~~#50~~ | High | `WindowId` not injective for sub-second resolutions — **fixed in `0a7cb0a`** |
 | #51 | Med | `affected_windows` count calc `span / width + 1` unchecked; can panic or silently return zero windows |
 | #52 | Low | V2 version-byte corruption reports "unsupported version", defeating #9's stated rationale; the existing test asserts the wrong behaviour |
 | #53 | Low | `AverageState::decode` accepts `count == 0` with non-zero `sum`; `merge` then folds the orphaned sum in |
@@ -175,9 +175,9 @@ itself flagged as most worth a reviewer's disagreement.
 ## Verification performed
 
 ```text
-cargo test --workspace --exclude cubism-py   # 243 passed, 2 ignored, 27 suites (was 242)
+cargo test --workspace --exclude cubism-py   # 249 passed, 2 ignored, 27 suites (242 baseline, +1 #16 partial, +6 #50)
 cargo clippy --workspace --exclude cubism-py --all-targets --no-deps -- -D warnings   # clean
-cargo test -p cubism-correct                 # 9 passed (was 8)
+cargo test -p cubism-correct                 # 15 passed (was 8)
 ```
 
 The 242-baseline was reproduced independently before any change, so Phase
@@ -189,28 +189,27 @@ tests — it is referenced only in a shell-script comment (checked).
 
 ## Next session, ordered
 
-1. **Decide #50 before merging** (or decide explicitly to merge without it).
-   It is ~20 lines plus tests.
-2. **Merge PR #24.** Clean fast-forward; closes #7, #9, #13, #15, #16.
-3. **#3 then #43** on a branch off `main` — pin the toolchain so "fmt clean"
+1. **Merge PR #24.** Clean fast-forward; closes #7, #9, #13, #15, #16 —
+   and #50, fixed on the branch. Nothing known blocks it.
+2. **#3 then #43** on a branch off `main` — pin the toolchain so "fmt clean"
    is reproducible, *then* write the CI workflow that depends on it. Note
    #14's title presumes a CI that has never existed; re-scope it in that
    light.
-4. **Repo hygiene, cheaper now than later** (none are tickets):
+3. **Repo hygiene, cheaper now than later** (none are tickets):
    `crates/cubism-iceberg-spike` is a default workspace member with no
    dependents and would build in CI; `TIMESERIES_FINISH_PROMPT.md` sits at
    the repo root; two broken `](../../PLAN.md)` links in
    `TIMESERIES_IMPLEMENTATION_PLAN.md:36` and `TIMESERIES_FEASIBILITY.md:7`;
    38 of 61 files in `docs/` are handoffs and want a `docs/handoffs/`
    subdirectory; `spark-adapter/` needs an explicit ships-or-archived call.
-5. **Answer why `--exclude cubism-py` exists.** #43 names Python bindings as
+4. **Answer why `--exclude cubism-py` exists.** #43 names Python bindings as
    a required check, so this is now direct input rather than trivia.
-6. **#40 — the correction CLI**, starting with #56 (the request struct).
+5. **#40 — the correction CLI**, starting with #56 (the request struct).
    Then `--dry-run` over the existing `plan()`, then execute. The CLI must
    *surface* `CorrectError::Partial` — which windows landed, which did not,
    what to re-run. Hiding it converts a deliberate design decision into a
    silent partial failure.
-7. Then #8 (DataFusion `TableProvider`), Phase 6 (rolling comparisons), and
+6. Then #8 (DataFusion `TableProvider`), Phase 6 (rolling comparisons), and
    the production substrate (#10, #11, #12).
 
 ## Primary files
@@ -218,7 +217,7 @@ tests — it is referenced only in a shell-script comment (checked).
 - [`../crates/cubism-correct/src/engine.rs`](../crates/cubism-correct/src/engine.rs)
   — `CorrectError::Partial`, per-window commit semantics
 - [`../crates/cubism-correct/src/windows.rs`](../crates/cubism-correct/src/windows.rs)
-  — the canonical encoding; **#50 lives here**
+  — the canonical encoding, now injective (#50). #51 still lives here
 - [`../crates/cubism-correct/tests/recompute_equality.rs`](../crates/cubism-correct/tests/recompute_equality.rs)
   — the equality proof plus the new partial-progress test
 - [`../crates/cubism-core/src/aggregate_state.rs`](../crates/cubism-core/src/aggregate_state.rs)
