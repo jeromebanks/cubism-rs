@@ -1,0 +1,104 @@
+name: CI
+
+# Required pre-merge gate for #43: every PR into main, and every push to
+# main (post-merge signal), runs fmt/clippy/test/docs against the pinned
+# toolchain in rust-toolchain.toml, plus a build+import smoke test for the
+# Python bindings. See docs/sdlc-process-notes.md for why fmt/docs are
+# gated with warnings-as-errors from the start rather than added loose and
+# tightened later.
+#
+# Slow/optional suites (cargo-deny, the Scala Spark adapter, benchmark
+# regressions) live in nightly.yml instead, so this file stays fast enough
+# to be a required check on every PR.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (workspace)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-targets
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --workspace
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  python:
+    name: python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "maturin>=1.7,<2" pyarrow
+      # No pytest suite exists yet for bindings/cubism-py (tracked under
+      # #43's remaining workstreams) — this is a build + import smoke test,
+      # not a claim that the bindings have behavioral test coverage.
+      - name: maturin build
+        working-directory: bindings/cubism-py
+        run: maturin build --out dist
+      - run: pip install --no-index --find-links bindings/cubism-py/dist cubism
+      - run: python -c "import cubism; print(cubism.__file__)"
+
+  # Single required status check for branch protection, so the protected-
+  # branch rule doesn't need updating every time a job above is added,
+  # renamed, or split.
+  ci-required:
+    name: CI required checks
+    if: always()
+    needs: [fmt, clippy, test, docs, python]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all required jobs succeeded
+        run: |
+          for result in ${{ join(needs.*.result, ' ') }}; do
+            if [ "$result" != "success" ]; then
+              echo "at least one required job did not succeed: ${{ join(needs.*.result, ', ') }}"
+              exit 1
+            fi
+          done
