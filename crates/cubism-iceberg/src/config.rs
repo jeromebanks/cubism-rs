@@ -38,7 +38,10 @@ pub enum CatalogConfig {
     /// open the same `catalog_db` concurrently. `catalog_db` is created
     /// (`CREATE TABLE IF NOT EXISTS`, via SQLite's `mode=rwc` URI query
     /// param) if it does not already exist.
-    Sqlite { warehouse: PathBuf, catalog_db: PathBuf },
+    Sqlite {
+        warehouse: PathBuf,
+        catalog_db: PathBuf,
+    },
 }
 
 /// Open the catalog described by `config`.
@@ -56,7 +59,10 @@ pub async fn open_catalog(config: &CatalogConfig) -> Result<Arc<dyn Catalog>> {
                 .map_err(CubismIcebergError::Iceberg)?;
             Ok(Arc::new(catalog))
         }
-        CatalogConfig::Sqlite { warehouse, catalog_db } => {
+        CatalogConfig::Sqlite {
+            warehouse,
+            catalog_db,
+        } => {
             let warehouse_path = warehouse.to_string_lossy().into_owned();
             let db_uri = format!("sqlite:{}?mode=rwc", catalog_db.to_string_lossy());
             let catalog = SqlCatalogBuilder::default()
@@ -66,7 +72,10 @@ pub async fn open_catalog(config: &CatalogConfig) -> Result<Arc<dyn Catalog>> {
                     HashMap::from([
                         (SQL_CATALOG_PROP_URI.to_string(), db_uri),
                         (SQL_CATALOG_PROP_WAREHOUSE.to_string(), warehouse_path),
-                        (SQL_CATALOG_PROP_BIND_STYLE.to_string(), SqlBindStyle::QMark.to_string()),
+                        (
+                            SQL_CATALOG_PROP_BIND_STYLE.to_string(),
+                            SqlBindStyle::QMark.to_string(),
+                        ),
                     ]),
                 )
                 .await

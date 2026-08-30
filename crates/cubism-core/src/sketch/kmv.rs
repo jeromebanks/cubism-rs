@@ -42,7 +42,10 @@ pub struct KmvSketch {
 impl KmvSketch {
     pub fn new(k: u32) -> Self {
         assert!(k >= 8, "sketch size k must be at least 8");
-        KmvSketch { k, hashes: Vec::new() }
+        KmvSketch {
+            k,
+            hashes: Vec::new(),
+        }
     }
 
     pub fn k(&self) -> u32 {
@@ -115,7 +118,10 @@ impl KmvSketch {
                 (None, None) => break,
             }
         }
-        KmvSketch { k: k as u32, hashes: merged }
+        KmvSketch {
+            k: k as u32,
+            hashes: merged,
+        }
     }
 
     /// Estimated distinct count. Exact while the sketch is under-full.
@@ -143,7 +149,11 @@ impl KmvSketch {
     /// Estimated Jaccard similarity |A∩B| / |A∪B|.
     pub fn jaccard(&self, other: &KmvSketch) -> f64 {
         let union = self.union_estimate(other);
-        if union == 0.0 { 0.0 } else { self.intersection_estimate(other) / union }
+        if union == 0.0 {
+            0.0
+        } else {
+            self.intersection_estimate(other) / union
+        }
     }
 
     /// Serialize as format v1: `"KMV" ver:u8 k:u32-le n:u32-le hash:u64-le*n`.
@@ -162,7 +172,10 @@ impl KmvSketch {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CubismError> {
         let err = |reason: String| CubismError::Decode(format!("KMV sketch: {reason}"));
         if bytes.len() < HEADER_LEN {
-            return Err(err(format!("{} bytes is shorter than the header", bytes.len())));
+            return Err(err(format!(
+                "{} bytes is shorter than the header",
+                bytes.len()
+            )));
         }
         if &bytes[0..3] != MAGIC {
             return Err(err("bad magic".into()));
@@ -173,7 +186,11 @@ impl KmvSketch {
         let k = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
         let n = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
         if bytes.len() != HEADER_LEN + n * 8 {
-            return Err(err(format!("expected {} bytes for n={n}, got {}", HEADER_LEN + n * 8, bytes.len())));
+            return Err(err(format!(
+                "expected {} bytes for n={n}, got {}",
+                HEADER_LEN + n * 8,
+                bytes.len()
+            )));
         }
         if n > k as usize {
             return Err(err(format!("n={n} exceeds k={k}")));
@@ -221,7 +238,10 @@ mod tests {
         let s = sketch_of(1024, (0..n).map(|i| format!("user_{i}")));
         let est = s.estimate();
         let rel_err = (est - n as f64).abs() / n as f64;
-        assert!(rel_err < 0.125, "estimate {est} vs {n}: rel err {rel_err:.4}");
+        assert!(
+            rel_err < 0.125,
+            "estimate {est} vs {n}: rel err {rel_err:.4}"
+        );
     }
 
     #[test]

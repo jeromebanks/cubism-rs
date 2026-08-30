@@ -20,22 +20,34 @@
 
 use chrono::DateTime;
 use cubism_core::encoding::canonical_xunit_content_id;
-use cubism_core::temporal::{AllowedLateness, BucketOrigin, FixedResolution, Resolution, TemporalSpec, WindowId, WindowRevision};
-use cubism_core::{AggKind, AggregateState, AggregateStateConfig, AverageState, CanonicalXUnit, CubeSpec, MeasureSpec, XUnit};
-use cubism_iceberg::config::open_catalog;
-use cubism_iceberg::{AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, PublicationStore, TemporalTable};
+use cubism_core::temporal::{
+    AllowedLateness, BucketOrigin, FixedResolution, Resolution, TemporalSpec, WindowId,
+    WindowRevision,
+};
+use cubism_core::{
+    AggKind, AggregateState, AggregateStateConfig, AverageState, CanonicalXUnit, CubeSpec,
+    MeasureSpec, XUnit,
+};
 use cubism_datafusion::datafusion::arrow::array::{
     BinaryArray, FixedSizeBinaryArray, Int64Array, RecordBatch, TimestampMicrosecondArray,
 };
-use cubism_datafusion::datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
-use serde_json::{json, Value};
+use cubism_datafusion::datafusion::arrow::datatypes::{
+    DataType, Field, Schema as ArrowSchema, TimeUnit,
+};
+use cubism_iceberg::config::open_catalog;
+use cubism_iceberg::{
+    AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, PublicationStore, TemporalTable,
+};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tempfile::TempDir;
 
 const CUBE_ID: &str = "series_e2e";
 
 fn micros(timestamp: &str) -> i64 {
-    DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp_micros()
+    DateTime::parse_from_rfc3339(timestamp)
+        .unwrap()
+        .timestamp_micros()
 }
 
 /// The real global-rollup `XUnitContentId`, computed the same two calls
@@ -45,7 +57,9 @@ fn micros(timestamp: &str) -> i64 {
 /// byte-identical id to what a real build would write, not arbitrary
 /// sentinel bytes, or `SeriesResponse`'s selector filter drops every row.
 fn global_content_id() -> [u8; 32] {
-    *canonical_xunit_content_id(&CanonicalXUnit::from(&XUnit::global())).unwrap().as_bytes()
+    *canonical_xunit_content_id(&CanonicalXUnit::from(&XUnit::global()))
+        .unwrap()
+        .as_bytes()
 }
 
 fn avg_states_schema() -> ArrowSchema {
@@ -61,8 +75,9 @@ fn avg_states_schema() -> ArrowSchema {
 }
 
 fn avg_states_batch(rows: &[(&str, [u8; 32], Vec<u8>)]) -> RecordBatch {
-    let bucket_start = TimestampMicrosecondArray::from_iter_values(rows.iter().map(|(t, _, _)| micros(t)))
-        .with_timezone("+00:00");
+    let bucket_start =
+        TimestampMicrosecondArray::from_iter_values(rows.iter().map(|(t, _, _)| micros(t)))
+            .with_timezone("+00:00");
     let xunit_id = FixedSizeBinaryArray::try_from_iter(rows.iter().map(|(_, x, _)| *x)).unwrap();
     let avg = BinaryArray::from_iter_values(rows.iter().map(|(_, _, blob)| blob.as_slice()));
     RecordBatch::try_new(
@@ -145,8 +160,9 @@ fn count_states_schema() -> ArrowSchema {
 }
 
 fn count_states_batch(rows: &[(&str, [u8; 32], i64)]) -> RecordBatch {
-    let bucket_start = TimestampMicrosecondArray::from_iter_values(rows.iter().map(|(t, _, _)| micros(t)))
-        .with_timezone("+00:00");
+    let bucket_start =
+        TimestampMicrosecondArray::from_iter_values(rows.iter().map(|(t, _, _)| micros(t)))
+            .with_timezone("+00:00");
     let xunit_id = FixedSizeBinaryArray::try_from_iter(rows.iter().map(|(_, x, _)| *x)).unwrap();
     let views = Int64Array::from_iter_values(rows.iter().map(|(_, _, v)| *v));
     RecordBatch::try_new(
@@ -177,17 +193,24 @@ async fn post(base: &str, path: &str, body: &Value) -> (u16, Value) {
     let text = String::from_utf8(buf).unwrap();
     let status: u16 = text.split_whitespace().nth(1).unwrap().parse().unwrap();
     let resp_body = text.split("\r\n\r\n").nth(1).unwrap_or("");
-    (status, serde_json::from_str(resp_body).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_str(resp_body).unwrap_or(Value::Null),
+    )
 }
 
 #[tokio::test]
-async fn series_endpoint_answers_an_aligned_two_window_range_and_reports_an_unknown_window_as_missing() {
+async fn series_endpoint_answers_an_aligned_two_window_range_and_reports_an_unknown_window_as_missing()
+ {
     let warehouse = TempDir::new().unwrap();
     let catalog_dir = TempDir::new().unwrap();
     let catalog_db = catalog_dir.path().join("catalog.sqlite");
     let control_dir = TempDir::new().unwrap();
     let control_db = control_dir.path().join("control.sqlite");
-    let config = CatalogConfig::Sqlite { warehouse: warehouse.path().to_path_buf(), catalog_db: catalog_db.clone() };
+    let config = CatalogConfig::Sqlite {
+        warehouse: warehouse.path().to_path_buf(),
+        catalog_db: catalog_db.clone(),
+    };
 
     let cube_spec = spec(day_spec());
 
@@ -208,18 +231,27 @@ async fn series_endpoint_answers_an_aligned_two_window_range_and_reports_an_unkn
     // durable state, not something wired to the same in-process objects.
     {
         let catalog = open_catalog(&config).await.unwrap();
-        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &avg_states_schema()).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &avg_states_schema())
+            .await
+            .unwrap();
         let publications = PublicationStore::sqlite(&control_db).await.unwrap();
 
         let global_id = global_content_id();
-        for (window, bucket_ts, state) in
-            [(&w1, "2026-08-13T12:00:00Z", &a), (&w2, "2026-08-14T12:00:00Z", &b)]
-        {
+        for (window, bucket_ts, state) in [
+            (&w1, "2026-08-13T12:00:00Z", &a),
+            (&w2, "2026-08-14T12:00:00Z", &b),
+        ] {
             let states = vec![avg_states_batch(&[(bucket_ts, global_id, state.encode())])];
             let registry = vec![registry_batch(&[(global_id, b"/G")])];
             let expected_rows: u64 = states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
             let claim = publications
-                .claim_run(CUBE_ID, window, &format!("run-{}", window.as_str()), revision, expected_rows)
+                .claim_run(
+                    CUBE_ID,
+                    window,
+                    &format!("run-{}", window.as_str()),
+                    revision,
+                    expected_rows,
+                )
                 .await
                 .unwrap();
             assert!(matches!(claim, ClaimResult::New(_)));
@@ -236,13 +268,21 @@ async fn series_endpoint_answers_an_aligned_two_window_range_and_reports_an_unkn
             )
             .await
             .unwrap();
-            publications.record_append(&format!("run-{}", window.as_str()), result.snapshot_id).await.unwrap();
-            publications.publish(&format!("run-{}", window.as_str()), None).await.unwrap();
+            publications
+                .record_append(&format!("run-{}", window.as_str()), result.snapshot_id)
+                .await
+                .unwrap();
+            publications
+                .publish(&format!("run-{}", window.as_str()), None)
+                .await
+                .unwrap();
         }
     }
 
     let series_publications = PublicationStore::sqlite(&control_db).await.unwrap();
-    let state = cubism_serve::SeriesState::open(cube_spec, &config, series_publications).await.unwrap();
+    let state = cubism_serve::SeriesState::open(cube_spec, &config, series_publications)
+        .await
+        .unwrap();
     let app = cubism_serve::series_router(Arc::new(state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = listener.local_addr().unwrap().to_string();
@@ -323,7 +363,10 @@ async fn series_endpoint_answers_a_count_measure_by_summing_the_published_window
     let catalog_db = catalog_dir.path().join("catalog.sqlite");
     let control_dir = TempDir::new().unwrap();
     let control_db = control_dir.path().join("control.sqlite");
-    let config = CatalogConfig::Sqlite { warehouse: warehouse.path().to_path_buf(), catalog_db: catalog_db.clone() };
+    let config = CatalogConfig::Sqlite {
+        warehouse: warehouse.path().to_path_buf(),
+        catalog_db: catalog_db.clone(),
+    };
 
     let w1 = WindowId::new("2026-08-13").unwrap();
     let w2 = WindowId::new("2026-08-14").unwrap();
@@ -331,17 +374,27 @@ async fn series_endpoint_answers_a_count_measure_by_summing_the_published_window
 
     {
         let catalog = open_catalog(&config).await.unwrap();
-        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &count_states_schema()).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &count_states_schema())
+            .await
+            .unwrap();
         let publications = PublicationStore::sqlite(&control_db).await.unwrap();
 
         let global_id = global_content_id();
-        for (window, bucket_ts, views) in [(&w1, "2026-08-13T12:00:00Z", 3i64), (&w2, "2026-08-14T12:00:00Z", 4)]
-        {
+        for (window, bucket_ts, views) in [
+            (&w1, "2026-08-13T12:00:00Z", 3i64),
+            (&w2, "2026-08-14T12:00:00Z", 4),
+        ] {
             let states = vec![count_states_batch(&[(bucket_ts, global_id, views)])];
             let registry = vec![registry_batch(&[(global_id, b"/G")])];
             let expected_rows: u64 = states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
             let claim = publications
-                .claim_run(CUBE_ID, window, &format!("run-{}", window.as_str()), revision, expected_rows)
+                .claim_run(
+                    CUBE_ID,
+                    window,
+                    &format!("run-{}", window.as_str()),
+                    revision,
+                    expected_rows,
+                )
                 .await
                 .unwrap();
             assert!(matches!(claim, ClaimResult::New(_)));
@@ -358,13 +411,22 @@ async fn series_endpoint_answers_a_count_measure_by_summing_the_published_window
             )
             .await
             .unwrap();
-            publications.record_append(&format!("run-{}", window.as_str()), result.snapshot_id).await.unwrap();
-            publications.publish(&format!("run-{}", window.as_str()), None).await.unwrap();
+            publications
+                .record_append(&format!("run-{}", window.as_str()), result.snapshot_id)
+                .await
+                .unwrap();
+            publications
+                .publish(&format!("run-{}", window.as_str()), None)
+                .await
+                .unwrap();
         }
     }
 
     let series_publications = PublicationStore::sqlite(&control_db).await.unwrap();
-    let state = cubism_serve::SeriesState::open(count_spec(day_spec()), &config, series_publications).await.unwrap();
+    let state =
+        cubism_serve::SeriesState::open(count_spec(day_spec()), &config, series_publications)
+            .await
+            .unwrap();
     let app = cubism_serve::series_router(Arc::new(state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = listener.local_addr().unwrap().to_string();
@@ -388,7 +450,11 @@ async fn series_endpoint_answers_a_count_measure_by_summing_the_published_window
     let points = body["points"].as_array().unwrap();
     assert_eq!(points.len(), 1);
     assert_eq!(points[0]["is_exact"], true);
-    assert_eq!(points[0]["value"], json!(7.0), "3 + 4 across both windows' rows");
+    assert_eq!(
+        points[0]["value"],
+        json!(7.0),
+        "3 + 4 across both windows' rows"
+    );
     assert_eq!(points[0]["published"].as_array().unwrap().len(), 2);
     assert_eq!(points[0]["missing"].as_array().unwrap().len(), 0);
 

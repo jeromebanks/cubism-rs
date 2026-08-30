@@ -24,7 +24,7 @@
 use cubism_core::{AggKind, AggregateState, AverageState, CubeSpec, QuantileState, VarianceState};
 use datafusion::arrow::array::{Array, ArrayRef, AsArray, Float64Builder, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef};
-use datafusion::common::{exec_err, Result, ScalarValue};
+use datafusion::common::{Result, ScalarValue, exec_err};
 use datafusion::logical_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion::logical_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, ColumnarValue, ScalarFunctionArgs, ScalarUDF,
@@ -38,7 +38,9 @@ fn to_df_err(e: cubism_core::CubismError) -> datafusion::common::DataFusionError
 
 fn iter_blobs(array: &ArrayRef) -> impl Iterator<Item = &[u8]> {
     let arr = array.as_binary::<i32>();
-    (0..arr.len()).filter(|&i| !arr.is_null(i)).map(move |i| arr.value(i))
+    (0..arr.len())
+        .filter(|&i| !arr.is_null(i))
+        .map(move |i| arr.value(i))
 }
 
 fn f64_input(values: &[ArrayRef]) -> impl Iterator<Item = f64> + '_ {
@@ -72,11 +74,17 @@ impl AggregateUDFImpl for AverageStateUdaf {
     }
 
     fn accumulator(&self, _args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        Ok(Box::new(AverageAccumulator { state: AverageState::new() }))
+        Ok(Box::new(AverageAccumulator {
+            state: AverageState::new(),
+        }))
     }
 
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
-        Ok(vec![Arc::new(Field::new(format!("{}[avg]", args.name), DataType::Binary, true))])
+        Ok(vec![Arc::new(Field::new(
+            format!("{}[avg]", args.name),
+            DataType::Binary,
+            true,
+        ))])
     }
 }
 
@@ -174,11 +182,17 @@ impl AggregateUDFImpl for VarianceStateUdaf {
     }
 
     fn accumulator(&self, _args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        Ok(Box::new(VarianceAccumulator { state: VarianceState::new() }))
+        Ok(Box::new(VarianceAccumulator {
+            state: VarianceState::new(),
+        }))
     }
 
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
-        Ok(vec![Arc::new(Field::new(format!("{}[variance]", args.name), DataType::Binary, true))])
+        Ok(vec![Arc::new(Field::new(
+            format!("{}[variance]", args.name),
+            DataType::Binary,
+            true,
+        ))])
     }
 }
 
@@ -307,7 +321,11 @@ impl AggregateUDFImpl for QuantileStateUdaf {
     }
 
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
-        Ok(vec![Arc::new(Field::new(format!("{}[quantile]", args.name), DataType::Binary, true))])
+        Ok(vec![Arc::new(Field::new(
+            format!("{}[quantile]", args.name),
+            DataType::Binary,
+            true,
+        ))])
     }
 }
 
@@ -403,12 +421,20 @@ pub fn state_udafs() -> (Vec<AggregateUDF>, Vec<ScalarUDF>) {
     let blob_arg = || Signature::exact(vec![DataType::Binary], Volatility::Immutable);
     (
         vec![
-            AggregateUDF::from(AverageStateUdaf { signature: double_arg() }),
-            AggregateUDF::from(VarianceStateUdaf { signature: double_arg() }),
+            AggregateUDF::from(AverageStateUdaf {
+                signature: double_arg(),
+            }),
+            AggregateUDF::from(VarianceStateUdaf {
+                signature: double_arg(),
+            }),
         ],
         vec![
-            ScalarUDF::from(AveragePresentUdf { signature: blob_arg() }),
-            ScalarUDF::from(VariancePresentUdf { signature: blob_arg() }),
+            ScalarUDF::from(AveragePresentUdf {
+                signature: blob_arg(),
+            }),
+            ScalarUDF::from(VariancePresentUdf {
+                signature: blob_arg(),
+            }),
         ],
     )
 }
@@ -524,7 +550,10 @@ mod tests {
 
     #[test]
     fn quantile_udaf_names_are_namespaced_per_measure() {
-        assert_eq!(quantile_state_udaf_name("latency_p50"), "cubism_quantile_state__latency_p50");
+        assert_eq!(
+            quantile_state_udaf_name("latency_p50"),
+            "cubism_quantile_state__latency_p50"
+        );
         assert_eq!(
             quantile_present_udf_name("latency_p50"),
             "cubism_quantile_present__latency_p50"

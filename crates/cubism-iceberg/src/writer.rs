@@ -4,6 +4,7 @@ use std::sync::Arc;
 use arrow_array::{Array, Date32Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use cubism_core::temporal::{WindowId, WindowRevision};
+use iceberg::Catalog;
 use iceberg::arrow::FieldMatchMode;
 use iceberg::spec::{DataFile, DataFileFormat, Literal, PartitionKey, Struct, Transform};
 use iceberg::table::Table;
@@ -18,12 +19,11 @@ use iceberg::writer::file_writer::rolling_writer::RollingFileWriterBuilder;
 use iceberg::writer::partitioning::PartitioningWriter;
 use iceberg::writer::partitioning::clustered_writer::ClusteredWriter;
 use iceberg::writer::{IcebergWriter, IcebergWriterBuilder};
-use iceberg::Catalog;
 use parquet::file::properties::WriterProperties;
 
 use crate::error::{CubismIcebergError, Result};
 use crate::schema::{REVISION_COLUMN, RUN_ID_COLUMN, WINDOW_ID_COLUMN};
-use crate::table::{current_snapshot_id, TemporalTable};
+use crate::table::{TemporalTable, current_snapshot_id};
 
 /// Result of one successful `append_window` commit. `snapshot_id` is the
 /// **exact** committed states-table snapshot ID, read back off the `Table`
@@ -79,10 +79,17 @@ impl AggregateWriter {
         temporal_table: &TemporalTable,
         window: AppendWindow<'_>,
     ) -> Result<CommitResult> {
-        let AppendWindow { window_id, revision, run_id, states, registry } = window;
+        let AppendWindow {
+            window_id,
+            revision,
+            run_id,
+            states,
+            registry,
+        } = window;
 
         let registry_table = temporal_table.registry_table(catalog).await?;
-        let registry_files = write_unpartitioned(&registry_table, run_id, "registry", registry).await?;
+        let registry_files =
+            write_unpartitioned(&registry_table, run_id, "registry", registry).await?;
         assert_unique_paths(registry_files.iter().map(DataFile::file_path))?;
         let registry_file_count = registry_files.len();
         if !registry_files.is_empty() {
@@ -91,21 +98,25 @@ impl AggregateWriter {
 
         let augmented_states: Vec<RecordBatch> = states
             .iter()
-            .map(|batch| augment_states_batch(batch, window_id.as_str(), revision.get() as i64, run_id))
+            .map(|batch| {
+                augment_states_batch(batch, window_id.as_str(), revision.get() as i64, run_id)
+            })
             .collect::<Result<_>>()?;
 
         let states_table = temporal_table.states_table(catalog).await?;
-        let states_files = write_states_partitioned(&states_table, run_id, &augmented_states).await?;
+        let states_files =
+            write_states_partitioned(&states_table, run_id, &augmented_states).await?;
         assert_unique_paths(states_files.iter().map(DataFile::file_path))?;
 
         let row_count: u64 = states_files.iter().map(DataFile::record_count).sum();
         let states_file_count = states_files.len();
         let committed = commit_append(catalog, &states_table, states_files).await?;
-        let snapshot_id = current_snapshot_id(committed.metadata())
-            .ok_or_else(|| CubismIcebergError::Iceberg(iceberg::Error::new(
+        let snapshot_id = current_snapshot_id(committed.metadata()).ok_or_else(|| {
+            CubismIcebergError::Iceberg(iceberg::Error::new(
                 iceberg::ErrorKind::Unexpected,
                 "states table has no current snapshot immediately after a successful commit",
-            )))?;
+            ))
+        })?;
 
         Ok(CommitResult {
             snapshot_id,
@@ -133,11 +144,17 @@ fn assert_unique_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Result<()> {
     Ok(())
 }
 
-async fn commit_append(catalog: &dyn Catalog, table: &Table, files: Vec<DataFile>) -> Result<Table> {
+async fn commit_append(
+    catalog: &dyn Catalog,
+    table: &Table,
+    files: Vec<DataFile>,
+) -> Result<Table> {
     let tx = Transaction::new(table);
     let action = tx.fast_append().add_data_files(files);
     let tx = action.apply(tx).map_err(CubismIcebergError::Iceberg)?;
-    tx.commit(catalog).await.map_err(CubismIcebergError::Iceberg)
+    tx.commit(catalog)
+        .await
+        .map_err(CubismIcebergError::Iceberg)
 }
 
 /// Day-partition `bucket_start` and write via [`ClusteredWriter`] — sorted
@@ -150,14 +167,16 @@ async fn write_states_partitioned(
 ) -> Result<Vec<DataFile>> {
     let schema = table.metadata().current_schema().clone();
     let partition_spec = table.metadata().default_partition_spec().as_ref().clone();
-    let location_generator = DefaultLocationGenerator::new(table.metadata()).map_err(CubismIcebergError::Iceberg)?;
+    let location_generator =
+        DefaultLocationGenerator::new(table.metadata()).map_err(CubismIcebergError::Iceberg)?;
     let file_name_generator =
         DefaultFileNameGenerator::new(format!("states-{run_id}"), None, DataFileFormat::Parquet);
     // Callers build their Arrow batches by column name (see
     // `augment_states_batch`), not with Iceberg's `PARQUET:field_id` Arrow
     // metadata — match by name rather than the crate's default ID mode.
-    let parquet_writer_builder = ParquetWriterBuilder::new(WriterProperties::default(), schema.clone())
-        .with_match_mode(FieldMatchMode::Name);
+    let parquet_writer_builder =
+        ParquetWriterBuilder::new(WriterProperties::default(), schema.clone())
+            .with_match_mode(FieldMatchMode::Name);
     let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
         parquet_writer_builder,
         table.file_io().clone(),
@@ -167,19 +186,22 @@ async fn write_states_partitioned(
     let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
     let mut writer = ClusteredWriter::new(data_file_writer_builder);
 
-    let day_transform = create_transform_function(&Transform::Day).map_err(CubismIcebergError::Iceberg)?;
+    let day_transform =
+        create_transform_function(&Transform::Day).map_err(CubismIcebergError::Iceberg)?;
 
     for batch in batches {
         if batch.num_rows() == 0 {
             continue;
         }
-        let bucket_start = batch
-            .column_by_name("bucket_start")
-            .ok_or_else(|| CubismIcebergError::Iceberg(iceberg::Error::new(
+        let bucket_start = batch.column_by_name("bucket_start").ok_or_else(|| {
+            CubismIcebergError::Iceberg(iceberg::Error::new(
                 iceberg::ErrorKind::DataInvalid,
                 "states batch is missing its 'bucket_start' column",
-            )))?;
-        let days = day_transform.transform(bucket_start.clone()).map_err(CubismIcebergError::Iceberg)?;
+            ))
+        })?;
+        let days = day_transform
+            .transform(bucket_start.clone())
+            .map_err(CubismIcebergError::Iceberg)?;
         let days = days
             .as_any()
             .downcast_ref::<Date32Array>()
@@ -211,14 +233,16 @@ async fn write_unpartitioned(
     batches: &[RecordBatch],
 ) -> Result<Vec<DataFile>> {
     let schema = table.metadata().current_schema().clone();
-    let location_generator = DefaultLocationGenerator::new(table.metadata()).map_err(CubismIcebergError::Iceberg)?;
+    let location_generator =
+        DefaultLocationGenerator::new(table.metadata()).map_err(CubismIcebergError::Iceberg)?;
     let file_name_generator =
         DefaultFileNameGenerator::new(format!("{prefix}-{run_id}"), None, DataFileFormat::Parquet);
     // Callers build their Arrow batches by column name (see
     // `augment_states_batch`), not with Iceberg's `PARQUET:field_id` Arrow
     // metadata — match by name rather than the crate's default ID mode.
-    let parquet_writer_builder = ParquetWriterBuilder::new(WriterProperties::default(), schema.clone())
-        .with_match_mode(FieldMatchMode::Name);
+    let parquet_writer_builder =
+        ParquetWriterBuilder::new(WriterProperties::default(), schema.clone())
+            .with_match_mode(FieldMatchMode::Name);
     let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
         parquet_writer_builder,
         table.file_io().clone(),
@@ -226,13 +250,19 @@ async fn write_unpartitioned(
         file_name_generator,
     );
     let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
-    let mut writer = data_file_writer_builder.build(None).await.map_err(CubismIcebergError::Iceberg)?;
+    let mut writer = data_file_writer_builder
+        .build(None)
+        .await
+        .map_err(CubismIcebergError::Iceberg)?;
 
     for batch in batches {
         if batch.num_rows() == 0 {
             continue;
         }
-        writer.write(batch.clone()).await.map_err(CubismIcebergError::Iceberg)?;
+        writer
+            .write(batch.clone())
+            .await
+            .map_err(CubismIcebergError::Iceberg)?;
     }
 
     writer.close().await.map_err(CubismIcebergError::Iceberg)
@@ -241,11 +271,20 @@ async fn write_unpartitioned(
 /// Prepend `window_id`/`revision`/`run_id` constant columns to a Phase-2
 /// states batch, matching [`crate::schema::states_iceberg_schema`]'s field
 /// order and types exactly.
-fn augment_states_batch(batch: &RecordBatch, window_id: &str, revision: i64, run_id: &str) -> Result<RecordBatch> {
+fn augment_states_batch(
+    batch: &RecordBatch,
+    window_id: &str,
+    revision: i64,
+    run_id: &str,
+) -> Result<RecordBatch> {
     let n = batch.num_rows();
-    let window_col: Arc<dyn Array> = Arc::new(StringArray::from_iter_values(std::iter::repeat_n(window_id, n)));
+    let window_col: Arc<dyn Array> = Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+        window_id, n,
+    )));
     let revision_col: Arc<dyn Array> = Arc::new(Int64Array::from(vec![revision; n]));
-    let run_col: Arc<dyn Array> = Arc::new(StringArray::from_iter_values(std::iter::repeat_n(run_id, n)));
+    let run_col: Arc<dyn Array> = Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+        run_id, n,
+    )));
 
     let mut fields = vec![
         Arc::new(Field::new(WINDOW_ID_COLUMN, DataType::Utf8, false)),
@@ -272,21 +311,31 @@ mod tests {
 
     #[test]
     fn a_duplicate_path_is_rejected_before_commit() {
-        let error = assert_unique_paths(["a.parquet", "b.parquet", "a.parquet"].into_iter()).unwrap_err();
-        assert!(matches!(error, CubismIcebergError::DuplicateDataFilePath(path) if path == "a.parquet"));
+        let error =
+            assert_unique_paths(["a.parquet", "b.parquet", "a.parquet"].into_iter()).unwrap_err();
+        assert!(
+            matches!(error, CubismIcebergError::DuplicateDataFilePath(path) if path == "a.parquet")
+        );
     }
 
     #[test]
     fn augmenting_a_batch_prepends_identity_columns_in_schema_order() {
         let inner = RecordBatch::try_new(
-            std::sync::Arc::new(ArrowSchema::new(vec![Field::new("x", DataType::Int64, false)])),
+            std::sync::Arc::new(ArrowSchema::new(vec![Field::new(
+                "x",
+                DataType::Int64,
+                false,
+            )])),
             vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
         )
         .unwrap();
         let augmented = augment_states_batch(&inner, "w-1", 7, "run-1").unwrap();
         let schema = augmented.schema();
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert_eq!(names, vec![WINDOW_ID_COLUMN, REVISION_COLUMN, RUN_ID_COLUMN, "x"]);
+        assert_eq!(
+            names,
+            vec![WINDOW_ID_COLUMN, REVISION_COLUMN, RUN_ID_COLUMN, "x"]
+        );
         assert_eq!(augmented.num_rows(), 3);
     }
 }

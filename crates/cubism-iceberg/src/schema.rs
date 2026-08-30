@@ -104,7 +104,10 @@ pub fn xunit_registry_iceberg_schema() -> Result<IcebergSchema> {
         .map_err(CubismIcebergError::Iceberg)
 }
 
-fn arrow_type_to_iceberg_primitive(field_name: &str, data_type: &DataType) -> Result<PrimitiveType> {
+fn arrow_type_to_iceberg_primitive(
+    field_name: &str,
+    data_type: &DataType,
+) -> Result<PrimitiveType> {
     match data_type {
         DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) if tz.as_ref() == "+00:00" => {
             Ok(PrimitiveType::Timestamptz)
@@ -115,7 +118,9 @@ fn arrow_type_to_iceberg_primitive(field_name: &str, data_type: &DataType) -> Re
         DataType::Int64 => Ok(PrimitiveType::Long),
         other => Err(CubismIcebergError::Iceberg(iceberg::Error::new(
             iceberg::ErrorKind::FeatureUnsupported,
-            format!("column '{field_name}' has unsupported Arrow type {other:?} for an Iceberg states table"),
+            format!(
+                "column '{field_name}' has unsupported Arrow type {other:?} for an Iceberg states table"
+            ),
         ))),
     }
 }

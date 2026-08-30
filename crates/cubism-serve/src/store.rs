@@ -6,7 +6,7 @@
 //! magic bytes of their versioned formats — the store needs no spec.
 
 use cubism_core::sketch::{Centroid, ExemplarSample, KmvSketch, TopK};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Debug, thiserror::Error)]
@@ -95,7 +95,11 @@ impl CubeStore {
             ));
         }
 
-        let index = xunits.iter().enumerate().map(|(i, x)| (x.clone(), i)).collect();
+        let index = xunits
+            .iter()
+            .enumerate()
+            .map(|(i, x)| (x.clone(), i))
+            .collect();
 
         let mut dimensions: BTreeSet<String> = BTreeSet::new();
         for xunit in &xunits {
@@ -151,25 +155,32 @@ impl CubeStore {
     }
 
     pub fn sketch_kind(&self, measure: &str) -> Option<SketchKind> {
-        self.sketches.iter().find(|(n, _)| n == measure).map(|(_, k)| *k)
+        self.sketches
+            .iter()
+            .find(|(n, _)| n == measure)
+            .map(|(_, k)| *k)
     }
 
     /// Decode one sketch blob into a JSON summary (never the raw bytes).
     pub fn decode_sketch(&self, measure: &str, row: usize) -> Value {
-        let Some(blob) = self.blob(measure, row) else { return Value::Null };
+        let Some(blob) = self.blob(measure, row) else {
+            return Value::Null;
+        };
         match SketchKind::detect(blob) {
-            SketchKind::Kmv => KmvSketch::from_bytes(blob).map_or(Value::Null, |s| {
-                json!({"kind": "kmv", "estimate": s.estimate(), "k": s.k()})
-            }),
-            SketchKind::TopK => TopK::from_bytes(blob).map_or(Value::Null, |t| {
-                json!({"kind": "top_k", "items": t.top()})
-            }),
-            SketchKind::Sample => ExemplarSample::from_bytes(blob).map_or(Value::Null, |s| {
-                json!({"kind": "sample", "values": s.values().collect::<Vec<_>>()})
-            }),
-            SketchKind::Centroid => Centroid::from_bytes(blob).map_or(Value::Null, |c| {
-                json!({"kind": "centroid", "dim": c.dim(), "mean": c.mean()})
-            }),
+            SketchKind::Kmv => KmvSketch::from_bytes(blob).map_or(
+                Value::Null,
+                |s| json!({"kind": "kmv", "estimate": s.estimate(), "k": s.k()}),
+            ),
+            SketchKind::TopK => TopK::from_bytes(blob)
+                .map_or(Value::Null, |t| json!({"kind": "top_k", "items": t.top()})),
+            SketchKind::Sample => ExemplarSample::from_bytes(blob).map_or(
+                Value::Null,
+                |s| json!({"kind": "sample", "values": s.values().collect::<Vec<_>>()}),
+            ),
+            SketchKind::Centroid => Centroid::from_bytes(blob).map_or(
+                Value::Null,
+                |c| json!({"kind": "centroid", "dim": c.dim(), "mean": c.mean()}),
+            ),
             SketchKind::Unknown => Value::Null,
         }
     }
@@ -182,9 +193,7 @@ impl CubeStore {
             .iter()
             .enumerate()
             .filter(|(_, x)| {
-                x.starts_with(&prefix)
-                    && !x.contains(',')
-                    && x.matches('=').count() == depth
+                x.starts_with(&prefix) && !x.contains(',') && x.matches('=').count() == depth
             })
             .map(|(i, _)| i)
             .collect()
@@ -197,7 +206,11 @@ impl CubeStore {
             .split('/')
             .filter_map(|seg| seg.split_once('=').map(|(_, v)| v))
             .collect();
-        if values.is_empty() { xunit.clone() } else { values.join(" / ") }
+        if values.is_empty() {
+            xunit.clone()
+        } else {
+            values.join(" / ")
+        }
     }
 }
 
@@ -207,7 +220,11 @@ fn append_strings(out: &mut Vec<String>, col: &arrow::array::ArrayRef) -> Result
         .as_string_opt::<i32>()
         .ok_or_else(|| StoreError::Shape(format!("xunit column is {}", col.data_type())))?;
     for i in 0..arr.len() {
-        out.push(if arr.is_null(i) { String::new() } else { arr.value(i).to_string() });
+        out.push(if arr.is_null(i) {
+            String::new()
+        } else {
+            arr.value(i).to_string()
+        });
     }
     Ok(())
 }
@@ -235,19 +252,31 @@ fn append_values(out: &mut Vec<Value>, col: &arrow::array::ArrayRef) -> Result<(
         DataType::Int64 => {
             let arr = col.as_primitive::<Int64Type>();
             for i in 0..arr.len() {
-                out.push(if arr.is_null(i) { Value::Null } else { json!(arr.value(i)) });
+                out.push(if arr.is_null(i) {
+                    Value::Null
+                } else {
+                    json!(arr.value(i))
+                });
             }
         }
         DataType::UInt64 => {
             let arr = col.as_primitive::<UInt64Type>();
             for i in 0..arr.len() {
-                out.push(if arr.is_null(i) { Value::Null } else { json!(arr.value(i)) });
+                out.push(if arr.is_null(i) {
+                    Value::Null
+                } else {
+                    json!(arr.value(i))
+                });
             }
         }
         DataType::Float64 => {
             let arr = col.as_primitive::<Float64Type>();
             for i in 0..arr.len() {
-                out.push(if arr.is_null(i) { Value::Null } else { json!(arr.value(i)) });
+                out.push(if arr.is_null(i) {
+                    Value::Null
+                } else {
+                    json!(arr.value(i))
+                });
             }
         }
         DataType::Utf8 => {
@@ -280,7 +309,9 @@ fn append_values(out: &mut Vec<Value>, col: &arrow::array::ArrayRef) -> Result<(
             }
         }
         other => {
-            return Err(StoreError::Shape(format!("unsupported measure column type {other}")));
+            return Err(StoreError::Shape(format!(
+                "unsupported measure column type {other}"
+            )));
         }
     }
     Ok(())

@@ -23,9 +23,9 @@
 //! by DataFusion — that's the design: the spec's `expr` fields are the
 //! engine's expression language.
 
-use crate::udf::{cube_udfs, SharedDictionary};
+use crate::udf::{SharedDictionary, cube_udfs};
 use cubism_core::{AggKind, CubeSpec};
-use datafusion::common::{plan_err, Result};
+use datafusion::common::{Result, plan_err};
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::context::SessionContext;
 
@@ -37,7 +37,8 @@ pub async fn build_cube(
     spec: &CubeSpec,
     source: &str,
 ) -> Result<(DataFrame, SharedDictionary)> {
-    spec.validate().map_err(|e| datafusion::common::DataFusionError::Plan(e.to_string()))?;
+    spec.validate()
+        .map_err(|e| datafusion::common::DataFusionError::Plan(e.to_string()))?;
 
     let (keys_udf, decode_udf, dict) = cube_udfs(spec);
     ctx.register_udf(keys_udf);
@@ -67,7 +68,10 @@ pub(crate) fn level_columns(spec: &CubeSpec) -> (Vec<String>, Vec<String>) {
     for dim in spec.sorted_dimensions() {
         for level in dim.effective_levels() {
             let alias = format!("__l{}", level_args.len());
-            level_selects.push(format!("CAST({} AS VARCHAR) AS {alias}", level.expression()));
+            level_selects.push(format!(
+                "CAST({} AS VARCHAR) AS {alias}",
+                level.expression()
+            ));
             level_args.push(alias);
         }
     }
@@ -124,21 +128,25 @@ pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
                 measure_selects.push(format!("CAST({by} AS DOUBLE) AS {alias}s"));
                 passthrough.push(format!("{alias}k"));
                 passthrough.push(format!("{alias}s"));
-                agg_selects
-                    .push(format!("cubism_topk_sketch({alias}k, {alias}s) AS \"{name}__sketch\""));
+                agg_selects.push(format!(
+                    "cubism_topk_sketch({alias}k, {alias}s) AS \"{name}__sketch\""
+                ));
                 final_cols.push(sketch_finals("cubism_topk_json"));
             }
             AggKind::ReservoirSample => {
                 measure_selects.push(format!("CAST({} AS VARCHAR) AS {alias}", input()));
                 passthrough.push(alias.clone());
-                agg_selects.push(format!("cubism_sample_sketch({alias}) AS \"{name}__sketch\""));
+                agg_selects.push(format!(
+                    "cubism_sample_sketch({alias}) AS \"{name}__sketch\""
+                ));
                 final_cols.push(sketch_finals("cubism_sample_json"));
             }
             AggKind::Centroid => {
                 measure_selects.push(format!("{} AS {alias}", input()));
                 passthrough.push(alias.clone());
-                agg_selects
-                    .push(format!("cubism_centroid_sketch({alias}) AS \"{name}__sketch\""));
+                agg_selects.push(format!(
+                    "cubism_centroid_sketch({alias}) AS \"{name}__sketch\""
+                ));
                 final_cols.push(sketch_finals("cubism_centroid_mean"));
             }
             AggKind::Quantile | AggKind::Variance => {
@@ -153,7 +161,11 @@ pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
         return plan_err!("cube spec has no measures");
     }
 
-    let input_cols = level_selects.iter().chain(&measure_selects).cloned().collect::<Vec<_>>();
+    let input_cols = level_selects
+        .iter()
+        .chain(&measure_selects)
+        .cloned()
+        .collect::<Vec<_>>();
     Ok(format!(
         "WITH __cubism_input AS (\n  SELECT {input}\n  FROM {source}\n),\n\
          __cubism_exploded AS (\n  SELECT unnest(cubism_xunit_keys({args})) AS __xunit_key{measures}\n  FROM __cubism_input\n),\n\
@@ -161,7 +173,10 @@ pub fn cube_sql(spec: &CubeSpec, source: &str) -> Result<String> {
          SELECT cubism_xunit_str(__xunit_key) AS xunit, {finals}\nFROM __cubism_cells",
         input = input_cols.join(", "),
         args = level_args.join(", "),
-        measures = passthrough.iter().map(|a| format!(", {a}")).collect::<String>(),
+        measures = passthrough
+            .iter()
+            .map(|a| format!(", {a}"))
+            .collect::<String>(),
         aggs = agg_selects.join(", "),
         finals = final_cols.join(", "),
     ))
@@ -186,9 +201,24 @@ mod tests {
         RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(StringArray::from(vec![Some("CZ"), Some("CZ"), Some("US"), None])),
-                Arc::new(StringArray::from(vec![Some("Prague"), Some("Brno"), None, None])),
-                Arc::new(StringArray::from(vec![Some("F"), Some("M"), Some("F"), Some("F")])),
+                Arc::new(StringArray::from(vec![
+                    Some("CZ"),
+                    Some("CZ"),
+                    Some("US"),
+                    None,
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("Prague"),
+                    Some("Brno"),
+                    None,
+                    None,
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("F"),
+                    Some("M"),
+                    Some("F"),
+                    Some("F"),
+                ])),
                 Arc::new(Int64Array::from(vec![10, 20, 40, 80])),
                 Arc::new(StringArray::from(vec!["u1", "u2", "u1", "u3"])),
             ],
@@ -221,9 +251,21 @@ includeGlobal: true
 
         let mut cells = HashMap::new();
         for batch in &batches {
-            let xunit = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            let pvs = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-            let events = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+            let xunit = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let pvs = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let events = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
             for i in 0..batch.num_rows() {
                 cells.insert(xunit.value(i).to_string(), (pvs.value(i), events.value(i)));
             }
@@ -252,7 +294,10 @@ includeGlobal: true
         ctx.register_batch("events", sample_batch()).unwrap();
         let (df, _dict) = build_cube(&ctx, &spec, "events").await.unwrap();
         let err = df.collect().await.unwrap_err().to_string();
-        assert!(err.contains("maxDictionaryEntries"), "unexpected error: {err}");
+        assert!(
+            err.contains("maxDictionaryEntries"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -271,7 +316,10 @@ includeGlobal: true
         assert_eq!(cells["/gender/gender=F"], (130, 3));
         // Cross cells combine dimensions.
         assert_eq!(cells["/gender/gender=F,/geo/country=CZ"], (10, 1));
-        assert_eq!(cells["/gender/gender=F,/geo/country=CZ/city=Prague"], (10, 1));
+        assert_eq!(
+            cells["/gender/gender=F,/geo/country=CZ/city=Prague"],
+            (10, 1)
+        );
 
         // Distinct cells across all rows: geo {CZ, CZ/Prague, CZ/Brno, US} +
         // gender {F, M} + crosses {CZ+F, CZ/Prague+F, CZ+M, CZ/Brno+M, US+F}
@@ -320,9 +368,21 @@ includeGlobal: true
 
         let mut cells: HashMap<String, (String, String)> = HashMap::new();
         for batch in &batches {
-            let xunit = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            let topk = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-            let sample = batch.column(3).as_any().downcast_ref::<StringArray>().unwrap();
+            let xunit = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let topk = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let sample = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
             for i in 0..batch.num_rows() {
                 cells.insert(
                     xunit.value(i).to_string(),
@@ -333,7 +393,10 @@ includeGlobal: true
 
         // Global: Prague pv=10, Brno pv=20 (rows 3,4 have null city — no key).
         let (topk, sample) = &cells["/G"];
-        assert_eq!(topk, r#"[{"key":"Brno","score":20.0},{"key":"Prague","score":10.0}]"#);
+        assert_eq!(
+            topk,
+            r#"[{"key":"Brno","score":20.0},{"key":"Prague","score":10.0}]"#
+        );
         // Distinct users u1,u2,u3 all fit in the sample.
         let users: Vec<String> = serde_json::from_str(sample).unwrap();
         let mut sorted = users.clone();
@@ -389,7 +452,11 @@ measures:
 
         let batch = &batches[0];
         assert_eq!(batch.num_rows(), 1); // one cell: /channel/channel=eng
-        let means = batch.column(1).as_any().downcast_ref::<ListArray>().unwrap();
+        let means = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
         let mean = means.value(0);
         let mean = mean
             .as_any()
@@ -423,13 +490,27 @@ measures:
         let mut reach = HashMap::new();
         let mut sketches: HashMap<String, KmvSketch> = HashMap::new();
         for batch in &batches {
-            let xunit = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            let est = batch.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
-            let blob = batch.column(2).as_any().downcast_ref::<BinaryArray>().unwrap();
+            let xunit = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let est = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let blob = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap();
             for i in 0..batch.num_rows() {
                 reach.insert(xunit.value(i).to_string(), est.value(i));
-                sketches
-                    .insert(xunit.value(i).to_string(), KmvSketch::from_bytes(blob.value(i)).unwrap());
+                sketches.insert(
+                    xunit.value(i).to_string(),
+                    KmvSketch::from_bytes(blob.value(i)).unwrap(),
+                );
             }
         }
 

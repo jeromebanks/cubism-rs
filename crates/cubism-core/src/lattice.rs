@@ -36,8 +36,10 @@ pub fn generate_xunits(
         if dim_ypaths.is_empty() {
             continue;
         }
-        let mut new_units: Vec<XUnit> =
-            dim_ypaths.iter().map(|yp| XUnit::new(vec![yp.clone()])).collect();
+        let mut new_units: Vec<XUnit> = dim_ypaths
+            .iter()
+            .map(|yp| XUnit::new(vec![yp.clone()]))
+            .collect();
         for existing in &candidates {
             if bound.is_some_and(|b| existing.num_dimensions() >= b) {
                 continue; // MaxDimensions is monotone: extensions can never re-qualify.
@@ -70,7 +72,9 @@ pub fn generate_xunits_unpruned(per_dimension: &[Vec<YPath>]) -> Vec<XUnit> {
             .iter()
             .map(|yp| XUnit::new(vec![yp.clone()]))
             .chain(candidates.iter().flat_map(|existing| {
-                dim_ypaths.iter().map(|yp| existing.clone().with_ypath(yp.clone()))
+                dim_ypaths
+                    .iter()
+                    .map(|yp| existing.clone().with_ypath(yp.clone()))
             }))
             .collect();
         candidates.extend(new_units);
@@ -123,7 +127,10 @@ mod tests {
         // Legacy ThreeDimRule ("xunit.ypaths.size == 3") over the same
         // fixture yields 4 XUnits: 2 platform levels × 2 geo levels × 1 gender.
         let rules = vec![FilterRule::And {
-            rules: vec![FilterRule::MinDimensions { n: 3 }, FilterRule::MaxDimensions { n: 3 }],
+            rules: vec![
+                FilterRule::MinDimensions { n: 3 },
+                FilterRule::MaxDimensions { n: 3 },
+            ],
         }];
         let x = generate_xunits(&test_dims(), &rules, false);
         assert_eq!(x.len(), 4);
@@ -149,7 +156,9 @@ mod tests {
     fn pruned_equals_filtered_unpruned() {
         let rules = vec![
             FilterRule::MaxDimensions { n: 2 },
-            FilterRule::NotTogether { dims: vec!["geo".into(), "platform".into()] },
+            FilterRule::NotTogether {
+                dims: vec!["geo".into(), "platform".into()],
+            },
         ];
         let pruned = generate_xunits(&test_dims(), &rules, false);
         let reference: Vec<XUnit> = generate_xunits_unpruned(&test_dims())

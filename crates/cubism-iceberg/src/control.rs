@@ -167,8 +167,14 @@ impl InMemoryStore {
         // only on the fresh-insert path (an existing run keeps its original
         // observation), inside the same mutex critical section as the
         // insert itself.
-        let observed_generation = state.window_generations.get(&window_key).copied().unwrap_or(0);
-        state.claim_generations.insert(run_id.to_string(), observed_generation);
+        let observed_generation = state
+            .window_generations
+            .get(&window_key)
+            .copied()
+            .unwrap_or(0);
+        state
+            .claim_generations
+            .insert(run_id.to_string(), observed_generation);
         Ok(ClaimResult::New(claimed))
     }
 
@@ -181,18 +187,24 @@ impl InMemoryStore {
             .ok_or_else(|| unknown_run(run_id))?;
 
         let appended = match current {
-            RunState::Claimed { window_key, revision, expected_rows } => RunState::Appended {
+            RunState::Claimed {
+                window_key,
+                revision,
+                expected_rows,
+            } => RunState::Appended {
                 window_key,
                 revision,
                 expected_rows,
                 aggregate_snapshot_id,
             },
-            RunState::Appended { aggregate_snapshot_id: existing, .. }
-            | RunState::Published { aggregate_snapshot_id: existing, .. }
-                if existing == aggregate_snapshot_id =>
-            {
-                current
+            RunState::Appended {
+                aggregate_snapshot_id: existing,
+                ..
             }
+            | RunState::Published {
+                aggregate_snapshot_id: existing,
+                ..
+            } if existing == aggregate_snapshot_id => current,
             other => {
                 return Err(CubismIcebergError::RunConflict {
                     run_id: run_id.to_string(),
@@ -207,7 +219,11 @@ impl InMemoryStore {
         Ok(appended)
     }
 
-    fn publish(&self, run_id: &str, expected_current: Option<WindowRevision>) -> Result<Publication> {
+    fn publish(
+        &self,
+        run_id: &str,
+        expected_current: Option<WindowRevision>,
+    ) -> Result<Publication> {
         let mut state = self.state.lock().expect("control store mutex poisoned");
         let run = state
             .runs
@@ -216,19 +232,36 @@ impl InMemoryStore {
             .ok_or_else(|| unknown_run(run_id))?;
 
         let (window_key, revision, expected_rows, aggregate_snapshot_id) = match run {
-            RunState::Appended { window_key, revision, expected_rows, aggregate_snapshot_id }
-            | RunState::Published { window_key, revision, expected_rows, aggregate_snapshot_id } => {
-                (window_key, revision, expected_rows, aggregate_snapshot_id)
+            RunState::Appended {
+                window_key,
+                revision,
+                expected_rows,
+                aggregate_snapshot_id,
             }
+            | RunState::Published {
+                window_key,
+                revision,
+                expected_rows,
+                aggregate_snapshot_id,
+            } => (window_key, revision, expected_rows, aggregate_snapshot_id),
             RunState::Claimed { .. } => {
-                return Err(CubismIcebergError::RunNotAppended { run_id: run_id.to_string() });
+                return Err(CubismIcebergError::RunNotAppended {
+                    run_id: run_id.to_string(),
+                });
             }
         };
 
-        let key = WindowKey { cube_id: window_key.0.clone(), window_id: window_key.1.clone() };
+        let key = WindowKey {
+            cube_id: window_key.0.clone(),
+            window_id: window_key.1.clone(),
+        };
         let actual = state.publications.get(&key).map(|p| p.revision);
         if actual == Some(revision) {
-            return Ok(state.publications.get(&key).expect("publication just observed").clone());
+            return Ok(state
+                .publications
+                .get(&key)
+                .expect("publication just observed")
+                .clone());
         }
         if actual != expected_current {
             return Err(CubismIcebergError::StaleRevision {
@@ -238,7 +271,11 @@ impl InMemoryStore {
             });
         }
 
-        let publication = Publication { revision, run_id: run_id.to_string(), aggregate_snapshot_id };
+        let publication = Publication {
+            revision,
+            run_id: run_id.to_string(),
+            aggregate_snapshot_id,
+        };
         state.publications.insert(key.clone(), publication.clone());
         // Bump only here — a *changing* write (first publication, later
         // correction, or rollback republish). The idempotent early-return
@@ -248,7 +285,12 @@ impl InMemoryStore {
         *state.window_generations.entry(key).or_insert(0) += 1;
         state.runs.insert(
             run_id.to_string(),
-            RunState::Published { window_key, revision, expected_rows, aggregate_snapshot_id },
+            RunState::Published {
+                window_key,
+                revision,
+                expected_rows,
+                aggregate_snapshot_id,
+            },
         );
         Ok(publication)
     }
@@ -257,7 +299,11 @@ impl InMemoryStore {
     /// incremented by every changing publish (see [`State`]'s field doc).
     fn publication_generation(&self, cube_id: &str, window_id: &WindowId) -> u64 {
         let state = self.state.lock().expect("control store mutex poisoned");
-        state.window_generations.get(&WindowKey::new(cube_id, window_id)).copied().unwrap_or(0)
+        state
+            .window_generations
+            .get(&WindowKey::new(cube_id, window_id))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The window generation this run observed at its first-ever claim, or
@@ -330,14 +376,24 @@ impl PublicationStore {
         expected_rows: u64,
     ) -> Result<ClaimResult> {
         match self {
-            Self::InMemory(store) => store.claim_run(cube_id, window_id, run_id, revision, expected_rows),
-            Self::Sqlite(store) => store.claim_run(cube_id, window_id, run_id, revision, expected_rows).await,
+            Self::InMemory(store) => {
+                store.claim_run(cube_id, window_id, run_id, revision, expected_rows)
+            }
+            Self::Sqlite(store) => {
+                store
+                    .claim_run(cube_id, window_id, run_id, revision, expected_rows)
+                    .await
+            }
         }
     }
 
     /// Record the atomic Iceberg snapshot produced by an append. A retry
     /// with the same snapshot ID is harmless.
-    pub async fn record_append(&self, run_id: &str, aggregate_snapshot_id: i64) -> Result<RunState> {
+    pub async fn record_append(
+        &self,
+        run_id: &str,
+        aggregate_snapshot_id: i64,
+    ) -> Result<RunState> {
         match self {
             Self::InMemory(store) => store.record_append(run_id, aggregate_snapshot_id),
             Self::Sqlite(store) => store.record_append(run_id, aggregate_snapshot_id).await,
@@ -347,7 +403,11 @@ impl PublicationStore {
     /// Atomically change the current revision for a window, iff the caller
     /// observed the expected current revision (CAS). `None` means "the
     /// window has never been published."
-    pub async fn publish(&self, run_id: &str, expected_current: Option<WindowRevision>) -> Result<Publication> {
+    pub async fn publish(
+        &self,
+        run_id: &str,
+        expected_current: Option<WindowRevision>,
+    ) -> Result<Publication> {
         match self {
             Self::InMemory(store) => store.publish(run_id, expected_current),
             Self::Sqlite(store) => store.publish(run_id, expected_current).await,
@@ -357,7 +417,11 @@ impl PublicationStore {
     /// The currently published revision for a window, if any. `Ok(None)`
     /// means unpublished; `Err` means the durable backend itself failed
     /// (e.g. a SQLite I/O error) — callers must not conflate the two.
-    pub async fn current(&self, cube_id: &str, window_id: &WindowId) -> Result<Option<WindowRevision>> {
+    pub async fn current(
+        &self,
+        cube_id: &str,
+        window_id: &WindowId,
+    ) -> Result<Option<WindowRevision>> {
         match self {
             Self::InMemory(store) => Ok(store.current(cube_id, window_id)),
             Self::Sqlite(store) => store.current(cube_id, window_id).await,
@@ -419,8 +483,14 @@ mod tests {
     async fn deterministic_retry_returns_existing_run_state() {
         let store = PublicationStore::in_memory();
         let w = window("2026-08-12");
-        let first = store.claim_run("cube", &w, "run-1", revision(1), 10).await.unwrap();
-        let retry = store.claim_run("cube", &w, "run-1", revision(1), 10).await.unwrap();
+        let first = store
+            .claim_run("cube", &w, "run-1", revision(1), 10)
+            .await
+            .unwrap();
+        let retry = store
+            .claim_run("cube", &w, "run-1", revision(1), 10)
+            .await
+            .unwrap();
         assert!(matches!(first, ClaimResult::New(_)));
         assert!(matches!(retry, ClaimResult::Existing(_)));
         assert_eq!(first.state(), retry.state());
@@ -430,8 +500,14 @@ mod tests {
     async fn claiming_the_same_run_id_with_different_inputs_is_rejected() {
         let store = PublicationStore::in_memory();
         let w = window("2026-08-12");
-        store.claim_run("cube", &w, "run-1", revision(1), 10).await.unwrap();
-        let error = store.claim_run("cube", &w, "run-1", revision(2), 10).await.unwrap_err();
+        store
+            .claim_run("cube", &w, "run-1", revision(1), 10)
+            .await
+            .unwrap();
+        let error = store
+            .claim_run("cube", &w, "run-1", revision(2), 10)
+            .await
+            .unwrap_err();
         assert!(matches!(error, CubismIcebergError::RunConflict { .. }));
     }
 
@@ -439,7 +515,10 @@ mod tests {
     async fn publish_requires_the_run_to_be_appended_first() {
         let store = PublicationStore::in_memory();
         let w = window("2026-08-12");
-        store.claim_run("cube", &w, "run-1", revision(1), 10).await.unwrap();
+        store
+            .claim_run("cube", &w, "run-1", revision(1), 10)
+            .await
+            .unwrap();
         let error = store.publish("run-1", None).await.unwrap_err();
         assert!(matches!(error, CubismIcebergError::RunNotAppended { .. }));
     }
@@ -449,20 +528,33 @@ mod tests {
         let store = PublicationStore::in_memory();
         let w = window("2026-08-12");
 
-        store.claim_run("cube", &w, "run-1", revision(1), 10).await.unwrap();
+        store
+            .claim_run("cube", &w, "run-1", revision(1), 10)
+            .await
+            .unwrap();
         store.record_append("run-1", 101).await.unwrap();
         store.publish("run-1", None).await.unwrap();
 
-        store.claim_run("cube", &w, "run-2", revision(2), 10).await.unwrap();
+        store
+            .claim_run("cube", &w, "run-2", revision(2), 10)
+            .await
+            .unwrap();
         store.record_append("run-2", 102).await.unwrap();
-        store.claim_run("cube", &w, "run-3", revision(3), 10).await.unwrap();
+        store
+            .claim_run("cube", &w, "run-3", revision(3), 10)
+            .await
+            .unwrap();
         store.record_append("run-3", 103).await.unwrap();
 
         store.publish("run-2", Some(revision(1))).await.unwrap();
         let error = store.publish("run-3", Some(revision(1))).await.unwrap_err();
         assert!(matches!(
             error,
-            CubismIcebergError::StaleRevision { expected: Some(1), actual: Some(2), .. }
+            CubismIcebergError::StaleRevision {
+                expected: Some(1),
+                actual: Some(2),
+                ..
+            }
         ));
         assert_eq!(store.current("cube", &w).await.unwrap(), Some(revision(2)));
     }
@@ -471,7 +563,10 @@ mod tests {
     async fn a_republish_of_the_already_current_revision_is_a_harmless_no_op() {
         let store = PublicationStore::in_memory();
         let w = window("2026-08-12");
-        store.claim_run("cube", &w, "run-1", revision(1), 10).await.unwrap();
+        store
+            .claim_run("cube", &w, "run-1", revision(1), 10)
+            .await
+            .unwrap();
         store.record_append("run-1", 101).await.unwrap();
         let first = store.publish("run-1", None).await.unwrap();
         let second = store.publish("run-1", None).await.unwrap();

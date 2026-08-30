@@ -149,9 +149,17 @@ use crate::writer::{AggregateWriter, AppendWindow};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconciliationRecord {
     NotStarted,
-    AwaitingAppend { revision: WindowRevision },
-    AwaitingPublish { revision: WindowRevision, aggregate_snapshot_id: i64 },
-    Published { revision: WindowRevision, aggregate_snapshot_id: i64 },
+    AwaitingAppend {
+        revision: WindowRevision,
+    },
+    AwaitingPublish {
+        revision: WindowRevision,
+        aggregate_snapshot_id: i64,
+    },
+    Published {
+        revision: WindowRevision,
+        aggregate_snapshot_id: i64,
+    },
 }
 
 impl ReconciliationRecord {
@@ -161,13 +169,25 @@ impl ReconciliationRecord {
     pub fn classify(run_state: Option<&RunState>) -> Self {
         match run_state {
             None => Self::NotStarted,
-            Some(RunState::Claimed { revision, .. }) => Self::AwaitingAppend { revision: *revision },
-            Some(RunState::Appended { revision, aggregate_snapshot_id, .. }) => {
-                Self::AwaitingPublish { revision: *revision, aggregate_snapshot_id: *aggregate_snapshot_id }
-            }
-            Some(RunState::Published { revision, aggregate_snapshot_id, .. }) => {
-                Self::Published { revision: *revision, aggregate_snapshot_id: *aggregate_snapshot_id }
-            }
+            Some(RunState::Claimed { revision, .. }) => Self::AwaitingAppend {
+                revision: *revision,
+            },
+            Some(RunState::Appended {
+                revision,
+                aggregate_snapshot_id,
+                ..
+            }) => Self::AwaitingPublish {
+                revision: *revision,
+                aggregate_snapshot_id: *aggregate_snapshot_id,
+            },
+            Some(RunState::Published {
+                revision,
+                aggregate_snapshot_id,
+                ..
+            }) => Self::Published {
+                revision: *revision,
+                aggregate_snapshot_id: *aggregate_snapshot_id,
+            },
         }
     }
 }
@@ -238,11 +258,18 @@ impl RunInspection {
         let revision_status = match &record {
             ReconciliationRecord::Published { revision, .. } => {
                 let current = publications.current(cube_id, window_id).await?;
-                Some(if current == Some(*revision) { RevisionStatus::Current } else { RevisionStatus::NotCurrent })
+                Some(if current == Some(*revision) {
+                    RevisionStatus::Current
+                } else {
+                    RevisionStatus::NotCurrent
+                })
             }
             _ => None,
         };
-        Ok(Self { record, revision_status })
+        Ok(Self {
+            record,
+            revision_status,
+        })
     }
 }
 
@@ -307,10 +334,16 @@ impl CorrectionCoordinator {
     ) -> Result<Publication> {
         let plan = CorrectionPlan::select(request.kinds);
         if plan.strategy() == CorrectionStrategy::AdditiveShortcut {
-            return Err(CubismIcebergError::UnsupportedCorrectionStrategy(plan.strategy()));
+            return Err(CubismIcebergError::UnsupportedCorrectionStrategy(
+                plan.strategy(),
+            ));
         }
 
-        let expected_rows: u64 = request.states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+        let expected_rows: u64 = request
+            .states
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum::<usize>() as u64;
         let claim = publications
             .claim_run(
                 &temporal_table.cube_id,
@@ -361,7 +394,9 @@ impl CorrectionCoordinator {
                     result.snapshot_id
                 }
             };
-            publications.record_append(request.run_id, snapshot_id).await?;
+            publications
+                .record_append(request.run_id, snapshot_id)
+                .await?;
         }
 
         // #20: a `Published` `RunState` alone does not prove this run's
@@ -385,7 +420,9 @@ impl CorrectionCoordinator {
         // shape against a run that never got that far needs a different
         // mechanism, below.
         if let ReconciliationRecord::Published { revision, .. } = record {
-            let current = publications.current(&temporal_table.cube_id, request.window_id).await?;
+            let current = publications
+                .current(&temporal_table.cube_id, request.window_id)
+                .await?;
             if current != Some(revision) {
                 return Err(CubismIcebergError::RunNoLongerCurrent {
                     run_id: request.run_id.to_string(),
@@ -425,12 +462,16 @@ impl CorrectionCoordinator {
         // -same-value slipping between them reopens a narrow race — the
         // same exposure class the plain CAS already has.
         if !matches!(record, ReconciliationRecord::Published { .. })
-            && let Some(observed_generation) = publications.run_observed_generation(request.run_id).await?
+            && let Some(observed_generation) =
+                publications.run_observed_generation(request.run_id).await?
         {
-            let current_generation =
-                publications.publication_generation(&temporal_table.cube_id, request.window_id).await?;
+            let current_generation = publications
+                .publication_generation(&temporal_table.cube_id, request.window_id)
+                .await?;
             if current_generation != observed_generation {
-                let current = publications.current(&temporal_table.cube_id, request.window_id).await?;
+                let current = publications
+                    .current(&temporal_table.cube_id, request.window_id)
+                    .await?;
                 return Err(CubismIcebergError::WindowChangedSinceClaim {
                     run_id: request.run_id.to_string(),
                     window_id: request.window_id.as_str().to_string(),
@@ -441,7 +482,9 @@ impl CorrectionCoordinator {
             }
         }
 
-        publications.publish(request.run_id, Some(request.observed_current)).await
+        publications
+            .publish(request.run_id, Some(request.observed_current))
+            .await
     }
 }
 
@@ -459,12 +502,21 @@ mod tests {
 
     #[test]
     fn classify_maps_every_run_state_stage_to_its_reconciliation_record() {
-        assert_eq!(ReconciliationRecord::classify(None), ReconciliationRecord::NotStarted);
+        assert_eq!(
+            ReconciliationRecord::classify(None),
+            ReconciliationRecord::NotStarted
+        );
 
-        let claimed = RunState::Claimed { window_key: window_key(), revision: revision(2), expected_rows: 3 };
+        let claimed = RunState::Claimed {
+            window_key: window_key(),
+            revision: revision(2),
+            expected_rows: 3,
+        };
         assert_eq!(
             ReconciliationRecord::classify(Some(&claimed)),
-            ReconciliationRecord::AwaitingAppend { revision: revision(2) }
+            ReconciliationRecord::AwaitingAppend {
+                revision: revision(2)
+            }
         );
 
         let appended = RunState::Appended {
@@ -475,7 +527,10 @@ mod tests {
         };
         assert_eq!(
             ReconciliationRecord::classify(Some(&appended)),
-            ReconciliationRecord::AwaitingPublish { revision: revision(2), aggregate_snapshot_id: 101 }
+            ReconciliationRecord::AwaitingPublish {
+                revision: revision(2),
+                aggregate_snapshot_id: 101
+            }
         );
 
         let published = RunState::Published {
@@ -486,7 +541,10 @@ mod tests {
         };
         assert_eq!(
             ReconciliationRecord::classify(Some(&published)),
-            ReconciliationRecord::Published { revision: revision(2), aggregate_snapshot_id: 101 }
+            ReconciliationRecord::Published {
+                revision: revision(2),
+                aggregate_snapshot_id: 101
+            }
         );
     }
 
@@ -506,15 +564,31 @@ mod tests {
         let store = PublicationStore::in_memory();
         let w = WindowId::new("2026-08-12").unwrap();
 
-        store.claim_run("cube", &w, "run-1", revision(1), 1).await.unwrap();
-        let claimed = RunInspection::inspect(&store, "cube", &w, "run-1").await.unwrap();
-        assert_eq!(claimed.record, ReconciliationRecord::AwaitingAppend { revision: revision(1) });
-        assert_eq!(claimed.revision_status, None, "no revision to compare against `current` before publish");
+        store
+            .claim_run("cube", &w, "run-1", revision(1), 1)
+            .await
+            .unwrap();
+        let claimed = RunInspection::inspect(&store, "cube", &w, "run-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            claimed.record,
+            ReconciliationRecord::AwaitingAppend {
+                revision: revision(1)
+            }
+        );
+        assert_eq!(
+            claimed.revision_status, None,
+            "no revision to compare against `current` before publish"
+        );
 
         store.record_append("run-1", 101).await.unwrap();
         store.publish("run-1", None).await.unwrap();
 
-        store.claim_run("cube", &w, "run-2", revision(2), 2).await.unwrap();
+        store
+            .claim_run("cube", &w, "run-2", revision(2), 2)
+            .await
+            .unwrap();
         store.record_append("run-2", 102).await.unwrap();
         store.publish("run-2", Some(revision(1))).await.unwrap();
 
@@ -523,17 +597,27 @@ mod tests {
         // `docs/TIMESERIES_PHASE_13_HANDOFF.md`.
         store.publish("run-1", Some(revision(2))).await.unwrap();
 
-        let run1 = RunInspection::inspect(&store, "cube", &w, "run-1").await.unwrap();
+        let run1 = RunInspection::inspect(&store, "cube", &w, "run-1")
+            .await
+            .unwrap();
         assert_eq!(
             run1.record,
-            ReconciliationRecord::Published { revision: revision(1), aggregate_snapshot_id: 101 }
+            ReconciliationRecord::Published {
+                revision: revision(1),
+                aggregate_snapshot_id: 101
+            }
         );
         assert_eq!(run1.revision_status, Some(RevisionStatus::Current));
 
-        let run2 = RunInspection::inspect(&store, "cube", &w, "run-2").await.unwrap();
+        let run2 = RunInspection::inspect(&store, "cube", &w, "run-2")
+            .await
+            .unwrap();
         assert_eq!(
             run2.record,
-            ReconciliationRecord::Published { revision: revision(2), aggregate_snapshot_id: 102 }
+            ReconciliationRecord::Published {
+                revision: revision(2),
+                aggregate_snapshot_id: 102
+            }
         );
         assert_eq!(
             run2.revision_status,

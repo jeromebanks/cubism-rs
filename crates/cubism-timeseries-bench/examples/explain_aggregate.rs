@@ -99,7 +99,9 @@ async fn main() -> Result<()> {
     }
 
     println!("=== EXPLAIN (logical + verbose physical plan) ===");
-    let df = context.sql(&format!("EXPLAIN VERBOSE {AGGREGATE_SQL}")).await?;
+    let df = context
+        .sql(&format!("EXPLAIN VERBOSE {AGGREGATE_SQL}"))
+        .await?;
     df.show().await?;
 
     Ok(())

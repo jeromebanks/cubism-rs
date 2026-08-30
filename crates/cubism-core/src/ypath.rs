@@ -26,7 +26,10 @@ pub struct YPath {
 
 impl YPath {
     pub fn new(dim: impl Into<String>) -> Self {
-        YPath { dim: dim.into(), attributes: Vec::new() }
+        YPath {
+            dim: dim.into(),
+            attributes: Vec::new(),
+        }
     }
 
     pub fn with_attribute(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
@@ -113,7 +116,14 @@ impl XUnit {
     }
 
     pub fn without_dimension(&self, dim: &str) -> XUnit {
-        XUnit { ypaths: self.ypaths.iter().filter(|yp| yp.dim != dim).cloned().collect() }
+        XUnit {
+            ypaths: self
+                .ypaths
+                .iter()
+                .filter(|yp| yp.dim != dim)
+                .cloned()
+                .collect(),
+        }
     }
 }
 
@@ -144,13 +154,19 @@ impl FromStr for XUnit {
             return Ok(XUnit::global());
         }
         if s.is_empty() {
-            return Err(CubismError::XUnitParse { input: s.into(), reason: "empty string".into() });
+            return Err(CubismError::XUnitParse {
+                input: s.into(),
+                reason: "empty string".into(),
+            });
         }
         let ypaths = s
             .split(',')
             .map(parse_ypath)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| CubismError::XUnitParse { input: s.into(), reason: e.to_string() })?;
+            .map_err(|e| CubismError::XUnitParse {
+                input: s.into(),
+                reason: e.to_string(),
+            })?;
         Ok(XUnit { ypaths })
     }
 }
@@ -162,20 +178,34 @@ impl FromStr for XUnit {
 /// sentinel sequence (`___`, `###`, `+++`) — spec validation should reject
 /// such dimension values at ingest when exactness matters.
 pub fn scrub_value(dirty: &str) -> String {
-    dirty.replace('/', "___").replace('=', "###").replace(',', "+++")
+    dirty
+        .replace('/', "___")
+        .replace('=', "###")
+        .replace(',', "+++")
 }
 
 /// Inverse of [`scrub_value`].
 pub fn unscrub_value(scrubbed: &str) -> String {
-    scrubbed.replace("___", "/").replace("###", "=").replace("+++", ",")
+    scrubbed
+        .replace("___", "/")
+        .replace("###", "=")
+        .replace("+++", ",")
 }
 
 fn parse_ypath(s: &str) -> Result<YPath, CubismError> {
-    let err = |reason: &str| CubismError::YPathParse { input: s.into(), reason: reason.into() };
+    let err = |reason: &str| CubismError::YPathParse {
+        input: s.into(),
+        reason: reason.into(),
+    };
 
-    let rest = s.strip_prefix('/').ok_or_else(|| err("must start with '/'"))?;
+    let rest = s
+        .strip_prefix('/')
+        .ok_or_else(|| err("must start with '/'"))?;
     let mut segments = rest.split('/');
-    let dim = segments.next().filter(|d| !d.is_empty()).ok_or_else(|| err("missing dimension name"))?;
+    let dim = segments
+        .next()
+        .filter(|d| !d.is_empty())
+        .ok_or_else(|| err("missing dimension name"))?;
 
     let attributes = segments
         .map(|seg| {
@@ -189,7 +219,10 @@ fn parse_ypath(s: &str) -> Result<YPath, CubismError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(YPath { dim: dim.to_string(), attributes })
+    Ok(YPath {
+        dim: dim.to_string(),
+        attributes,
+    })
 }
 
 #[cfg(test)]
@@ -197,7 +230,9 @@ mod tests {
     use super::*;
 
     fn geo() -> YPath {
-        YPath::new("geo").with_attribute("country", "CZ").with_attribute("city", "Prague")
+        YPath::new("geo")
+            .with_attribute("country", "CZ")
+            .with_attribute("city", "Prague")
     }
 
     #[test]
@@ -224,10 +259,19 @@ mod tests {
 
     #[test]
     fn xunit_display_is_normalized() {
-        let x = XUnit::new(vec![geo(), YPath::new("gender").with_attribute("gender", "F")]);
-        let y = XUnit::new(vec![YPath::new("gender").with_attribute("gender", "F"), geo()]);
+        let x = XUnit::new(vec![
+            geo(),
+            YPath::new("gender").with_attribute("gender", "F"),
+        ]);
+        let y = XUnit::new(vec![
+            YPath::new("gender").with_attribute("gender", "F"),
+            geo(),
+        ]);
         assert_eq!(x.to_string(), y.to_string());
-        assert_eq!(x.to_string(), "/gender/gender=F,/geo/country=CZ/city=Prague");
+        assert_eq!(
+            x.to_string(),
+            "/gender/gender=F,/geo/country=CZ/city=Prague"
+        );
     }
 
     #[test]
@@ -241,7 +285,10 @@ mod tests {
         let s = "/gender/gender=F,/geo/country=CZ/city=Prague";
         let x: XUnit = s.parse().unwrap();
         assert_eq!(x.num_dimensions(), 2);
-        assert_eq!(x.for_dimension("geo").unwrap().attribute_value("city"), Some("Prague"));
+        assert_eq!(
+            x.for_dimension("geo").unwrap().attribute_value("city"),
+            Some("Prague")
+        );
         assert_eq!(x.to_string(), s);
     }
 
@@ -254,7 +301,10 @@ mod tests {
 
     #[test]
     fn without_dimension() {
-        let x = XUnit::new(vec![geo(), YPath::new("gender").with_attribute("gender", "F")]);
+        let x = XUnit::new(vec![
+            geo(),
+            YPath::new("gender").with_attribute("gender", "F"),
+        ]);
         let stripped = x.without_dimension("geo");
         assert_eq!(stripped.num_dimensions(), 1);
         assert!(!stripped.contains_dimension("geo"));

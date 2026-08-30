@@ -47,13 +47,15 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
-use cubism_core::{AggKind, CubeSpec, EventTime, FixedResolution, Resolution, WindowId, WindowRevision, XUnit};
+use cubism_core::{
+    AggKind, CubeSpec, EventTime, FixedResolution, Resolution, WindowId, WindowRevision, XUnit,
+};
 use cubism_datafusion::temporal_build::{measure_column_name, temporal_state_schema};
 use cubism_datafusion::{CoveragePlan, GapPolicy, ResolutionPlan, SeriesResponse, TemporalQuery};
 use cubism_iceberg::config::open_catalog;
 use cubism_iceberg::{AggregateReader, CatalogConfig, PublicationStore, TemporalTable};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::api::ApiError;
 
@@ -97,7 +99,12 @@ impl SeriesState {
         let catalog = open_catalog(catalog_config).await?;
         let schema = temporal_state_schema(&spec)?;
         let table = TemporalTable::create(catalog.as_ref(), &spec.name, &schema).await?;
-        Ok(Self { catalog, table, publications, spec })
+        Ok(Self {
+            catalog,
+            table,
+            publications,
+            spec,
+        })
     }
 }
 
@@ -156,8 +163,10 @@ async fn series(
     State(state): State<Arc<SeriesState>>,
     Json(req): Json<SeriesRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let selector: XUnit =
-        req.selector.parse().map_err(|e| ApiError::bad_request(format!("bad selector: {e}")))?;
+    let selector: XUnit = req
+        .selector
+        .parse()
+        .map_err(|e| ApiError::bad_request(format!("bad selector: {e}")))?;
 
     let measure = state
         .spec
@@ -179,11 +188,9 @@ async fn series(
 
     // Checked in `SeriesState::open`, but a spec is mutable state this
     // handler doesn't own — re-check rather than trust construction-time.
-    let temporal_spec = state
-        .spec
-        .temporal
-        .as_ref()
-        .ok_or_else(|| ApiError::bad_request(format!("cube '{}' has no temporal spec", state.spec.name)))?;
+    let temporal_spec = state.spec.temporal.as_ref().ok_or_else(|| {
+        ApiError::bad_request(format!("cube '{}' has no temporal spec", state.spec.name))
+    })?;
 
     let resolution = req
         .resolution
@@ -207,7 +214,8 @@ async fn series(
     )
     .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
-    let plan = ResolutionPlan::new(&query, temporal_spec).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let plan = ResolutionPlan::new(&query, temporal_spec)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     // Assign each request-supplied window to the one segment whose range
     // contains its bucket_start (see the module doc comment), resolving its
@@ -221,8 +229,9 @@ async fn series(
             if !segment.range.contains(bucket_start) {
                 continue;
             }
-            let window_id = WindowId::new(w.window_id.clone())
-                .map_err(|e| ApiError::bad_request(format!("bad window_id '{}': {e}", w.window_id)))?;
+            let window_id = WindowId::new(w.window_id.clone()).map_err(|e| {
+                ApiError::bad_request(format!("bad window_id '{}': {e}", w.window_id))
+            })?;
             let current = state
                 .publications
                 .current(&state.table.cube_id, &window_id)
@@ -253,9 +262,15 @@ async fn series(
         batches.push(segment_batches);
     }
 
-    let response =
-        SeriesResponse::new(&coverage, gap_policy, measure.agg, &column, &[selector], &batches)
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let response = SeriesResponse::new(
+        &coverage,
+        gap_policy,
+        measure.agg,
+        &column,
+        &[selector],
+        &batches,
+    )
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     Ok(Json(json!({
         "cube": state.spec.name,
@@ -276,5 +291,7 @@ async fn series(
 }
 
 pub fn series_router(state: Arc<SeriesState>) -> Router {
-    Router::new().route("/api/series", post(series)).with_state(state)
+    Router::new()
+        .route("/api/series", post(series))
+        .with_state(state)
 }

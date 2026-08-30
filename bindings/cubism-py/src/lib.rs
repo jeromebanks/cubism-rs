@@ -12,9 +12,9 @@
 //! output: `xunit`, measures, and `*__sketch` blob columns).
 
 use arrow::pyarrow::ToPyArrow;
+use cubism_core::CubeSpec;
 use cubism_core::sketch::kmv::DEFAULT_SKETCH_SIZE;
 use cubism_core::sketch::{ExemplarSample, KmvSketch, TopK};
-use cubism_core::CubeSpec;
 use cubism_datafusion::datafusion::prelude::{CsvReadOptions, ParquetReadOptions, SessionContext};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -47,7 +47,8 @@ fn build_cube(py: Python<'_>, spec_yaml: &str, input_path: &str) -> PyResult<Py<
             runtime.block_on(async {
                 let ctx = SessionContext::new();
                 if input_path.ends_with(".csv") {
-                    ctx.register_csv("events", input_path, CsvReadOptions::new()).await?;
+                    ctx.register_csv("events", input_path, CsvReadOptions::new())
+                        .await?;
                 } else {
                     ctx.register_parquet("events", input_path, ParquetReadOptions::default())
                         .await?;
@@ -86,13 +87,17 @@ impl PyKmvSketch {
     #[new]
     #[pyo3(signature = (k = DEFAULT_SKETCH_SIZE))]
     fn new(k: u32) -> Self {
-        PyKmvSketch { inner: KmvSketch::new(k) }
+        PyKmvSketch {
+            inner: KmvSketch::new(k),
+        }
     }
 
     /// Deserialize a sketch blob (a `*__sketch` cube column value).
     #[staticmethod]
     fn from_bytes(data: &[u8]) -> PyResult<Self> {
-        Ok(PyKmvSketch { inner: KmvSketch::from_bytes(data).map_err(value_err)? })
+        Ok(PyKmvSketch {
+            inner: KmvSketch::from_bytes(data).map_err(value_err)?,
+        })
     }
 
     fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
@@ -101,7 +106,9 @@ impl PyKmvSketch {
 
     /// Union merge (associative + commutative).
     fn merge(&self, other: &PyKmvSketch) -> PyKmvSketch {
-        PyKmvSketch { inner: self.inner.merge(&other.inner) }
+        PyKmvSketch {
+            inner: self.inner.merge(&other.inner),
+        }
     }
 
     /// Estimated distinct count (exact while under-full).
@@ -128,7 +135,11 @@ impl PyKmvSketch {
     }
 
     fn __repr__(&self) -> String {
-        format!("KmvSketch(k={}, estimate={:.1})", self.inner.k(), self.inner.estimate())
+        format!(
+            "KmvSketch(k={}, estimate={:.1})",
+            self.inner.k(),
+            self.inner.estimate()
+        )
     }
 }
 

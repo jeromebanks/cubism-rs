@@ -65,7 +65,10 @@ impl AggregateReader {
             .build()
             .map_err(CubismIcebergError::Iceberg)?;
         let stream = scan.to_arrow().await.map_err(CubismIcebergError::Iceberg)?;
-        stream.try_collect().await.map_err(CubismIcebergError::Iceberg)
+        stream
+            .try_collect()
+            .await
+            .map_err(CubismIcebergError::Iceberg)
     }
 
     /// Whether a states row exists for exactly `(window_id, revision,

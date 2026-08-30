@@ -17,27 +17,51 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FilterRule {
     /// Include XUnits with at most `n` dimensions.
-    MaxDimensions { n: usize },
+    MaxDimensions {
+        n: usize,
+    },
     /// Include XUnits with at least `n` dimensions.
-    MinDimensions { n: usize },
+    MinDimensions {
+        n: usize,
+    },
     /// Include only XUnits containing this dimension.
-    ContainsDim { dim: String },
+    ContainsDim {
+        dim: String,
+    },
     /// Include only XUnits containing all of these dimensions.
-    ContainsAllDims { dims: Vec<String> },
+    ContainsAllDims {
+        dims: Vec<String>,
+    },
     /// Include this dimension only as a single-dimension (top-level) XUnit.
-    TopLevel { dim: String },
+    TopLevel {
+        dim: String,
+    },
     /// Exclude XUnits containing all of these dimensions together.
-    NotTogether { dims: Vec<String> },
+    NotTogether {
+        dims: Vec<String>,
+    },
     /// Exclude XUnits combining `dim` with a YPath for `other_dim` that has
     /// drilled down to attribute `attr`.
-    NotWithAttribute { dim: String, other_dim: String, attr: String },
+    NotWithAttribute {
+        dim: String,
+        other_dim: String,
+        attr: String,
+    },
     /// Exclude this dimension as a standalone single-dimension XUnit.
-    NotAlone { dim: String },
+    NotAlone {
+        dim: String,
+    },
     /// Include only XUnits containing this dimension (alias kept for spec
     /// readability; same predicate as `ContainsDim`).
-    OnlyWith { dim: String },
-    And { rules: Vec<FilterRule> },
-    Or { rules: Vec<FilterRule> },
+    OnlyWith {
+        dim: String,
+    },
+    And {
+        rules: Vec<FilterRule>,
+    },
+    Or {
+        rules: Vec<FilterRule>,
+    },
 }
 
 impl FilterRule {
@@ -52,10 +76,12 @@ impl FilterRule {
             FilterRule::TopLevel { dim } => {
                 xunit.num_dimensions() == 1 && xunit.contains_dimension(dim)
             }
-            FilterRule::NotTogether { dims } => {
-                !dims.iter().all(|d| xunit.contains_dimension(d))
-            }
-            FilterRule::NotWithAttribute { dim, other_dim, attr } => {
+            FilterRule::NotTogether { dims } => !dims.iter().all(|d| xunit.contains_dimension(d)),
+            FilterRule::NotWithAttribute {
+                dim,
+                other_dim,
+                attr,
+            } => {
                 if xunit.contains_dimension(dim) {
                     match xunit.for_dimension(other_dim) {
                         Some(yp) => !yp.attributes.iter().any(|(name, _)| name == attr),
@@ -121,7 +147,11 @@ mod tests {
     use crate::ypath::YPath;
 
     fn xu(dims: &[&str]) -> XUnit {
-        XUnit::new(dims.iter().map(|d| YPath::new(*d).with_attribute(*d, "v")).collect())
+        XUnit::new(
+            dims.iter()
+                .map(|d| YPath::new(*d).with_attribute(*d, "v"))
+                .collect(),
+        )
     }
 
     #[test]
@@ -138,7 +168,9 @@ mod tests {
 
     #[test]
     fn not_together() {
-        let rule = FilterRule::NotTogether { dims: vec!["a".into(), "b".into()] };
+        let rule = FilterRule::NotTogether {
+            dims: vec!["a".into(), "b".into()],
+        };
         assert!(!rule.should_include(&xu(&["a", "b", "c"])));
         assert!(rule.should_include(&xu(&["a", "c"])));
         assert!(rule.should_include(&xu(&["b"])));
@@ -147,7 +179,9 @@ mod tests {
     #[test]
     fn contains_all_dims_actually_checks_the_xunit() {
         // The legacy implementation was `dims.forall(dims.contains)` — always true.
-        let rule = FilterRule::ContainsAllDims { dims: vec!["a".into(), "b".into()] };
+        let rule = FilterRule::ContainsAllDims {
+            dims: vec!["a".into(), "b".into()],
+        };
         assert!(rule.should_include(&xu(&["a", "b", "c"])));
         assert!(!rule.should_include(&xu(&["a", "c"])));
     }
@@ -173,7 +207,9 @@ mod tests {
             attr: "city".into(),
         };
         let deep = XUnit::new(vec![
-            YPath::new("geo").with_attribute("country", "CZ").with_attribute("city", "Prague"),
+            YPath::new("geo")
+                .with_attribute("country", "CZ")
+                .with_attribute("city", "Prague"),
             YPath::new("gender").with_attribute("gender", "F"),
         ]);
         let shallow = XUnit::new(vec![
@@ -187,7 +223,10 @@ mod tests {
     #[test]
     fn and_or_combinators() {
         let exactly2 = FilterRule::And {
-            rules: vec![FilterRule::MaxDimensions { n: 2 }, FilterRule::MinDimensions { n: 2 }],
+            rules: vec![
+                FilterRule::MaxDimensions { n: 2 },
+                FilterRule::MinDimensions { n: 2 },
+            ],
         };
         assert!(exactly2.should_include(&xu(&["a", "b"])));
         assert!(!exactly2.should_include(&xu(&["a"])));
@@ -214,8 +253,12 @@ mod tests {
         assert_eq!(
             max_dimensions_bound(&[
                 FilterRule::MaxDimensions { n: 3 },
-                FilterRule::And { rules: vec![FilterRule::MaxDimensions { n: 2 }] },
-                FilterRule::Or { rules: vec![FilterRule::MaxDimensions { n: 1 }] },
+                FilterRule::And {
+                    rules: vec![FilterRule::MaxDimensions { n: 2 }]
+                },
+                FilterRule::Or {
+                    rules: vec![FilterRule::MaxDimensions { n: 1 }]
+                },
             ]),
             Some(2)
         );

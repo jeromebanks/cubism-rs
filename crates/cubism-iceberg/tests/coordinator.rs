@@ -35,8 +35,8 @@ use chrono::DateTime;
 use cubism_core::AggKind;
 use cubism_core::temporal::{WindowId, WindowRevision};
 use cubism_iceberg::{
-    AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, CorrectionCoordinator,
-    CorrectionRequest, CubismIcebergError, PublicationStore, TemporalTable,
+    AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult,
+    CorrectionCoordinator, CorrectionRequest, CubismIcebergError, PublicationStore, TemporalTable,
 };
 use iceberg::Catalog;
 use tempfile::TempDir;
@@ -44,7 +44,9 @@ use tempfile::TempDir;
 const CUBE_ID: &str = "web_analytics";
 
 fn micros(timestamp: &str) -> i64 {
-    DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp_micros()
+    DateTime::parse_from_rfc3339(timestamp)
+        .unwrap()
+        .timestamp_micros()
 }
 
 fn xunit_id(tag: u8) -> [u8; 32] {
@@ -70,14 +72,20 @@ fn sample_states_schema() -> ArrowSchema {
 }
 
 fn states_batch(rows: &[(&str, [u8; 32], i64, f64)]) -> RecordBatch {
-    let bucket_start = TimestampMicrosecondArray::from_iter_values(rows.iter().map(|(t, _, _, _)| micros(t)))
-        .with_timezone("+00:00");
+    let bucket_start =
+        TimestampMicrosecondArray::from_iter_values(rows.iter().map(|(t, _, _, _)| micros(t)))
+            .with_timezone("+00:00");
     let xunit_id = FixedSizeBinaryArray::try_from_iter(rows.iter().map(|(_, x, _, _)| *x)).unwrap();
     let count = Int64Array::from_iter_values(rows.iter().map(|(_, _, c, _)| *c));
     let sum = Float64Array::from_iter_values(rows.iter().map(|(_, _, _, s)| *s));
     RecordBatch::try_new(
         Arc::new(sample_states_schema()),
-        vec![Arc::new(bucket_start), Arc::new(xunit_id), Arc::new(count), Arc::new(sum)],
+        vec![
+            Arc::new(bucket_start),
+            Arc::new(xunit_id),
+            Arc::new(count),
+            Arc::new(sum),
+        ],
     )
     .unwrap()
 }
@@ -149,12 +157,20 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let warehouse = TempDir::new().unwrap();
-        let config = CatalogConfig::Memory { warehouse: warehouse.path().to_path_buf() };
+        let config = CatalogConfig::Memory {
+            warehouse: warehouse.path().to_path_buf(),
+        };
         let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
-        let temporal_table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
-            .await
-            .unwrap();
-        Self { _warehouse: warehouse, catalog, temporal_table, publications: PublicationStore::in_memory() }
+        let temporal_table =
+            TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
+                .await
+                .unwrap();
+        Self {
+            _warehouse: warehouse,
+            catalog,
+            temporal_table,
+            publications: PublicationStore::in_memory(),
+        }
     }
 
     /// Publish `states`/`registry` as a from-scratch first revision — the
@@ -162,7 +178,12 @@ impl Fixture {
     /// window's initial build goes through this path, never
     /// `CorrectionCoordinator` (see that module's doc comment on why
     /// `observed_current` is a required `WindowRevision`, not `Option`).
-    async fn publish_initial(&self, window_id: &WindowId, states: &[RecordBatch], registry: &[RecordBatch]) {
+    async fn publish_initial(
+        &self,
+        window_id: &WindowId,
+        states: &[RecordBatch],
+        registry: &[RecordBatch],
+    ) {
         let expected_rows: u64 = states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
         let revision = WindowRevision::new(1).unwrap();
         let claim = self
@@ -174,16 +195,34 @@ impl Fixture {
         let result = AggregateWriter::append_window(
             self.catalog.as_ref(),
             &self.temporal_table,
-            AppendWindow { window_id, revision, run_id: "run-initial", states, registry },
+            AppendWindow {
+                window_id,
+                revision,
+                run_id: "run-initial",
+                states,
+                registry,
+            },
         )
         .await
         .unwrap();
-        self.publications.record_append("run-initial", result.snapshot_id).await.unwrap();
-        self.publications.publish("run-initial", None).await.unwrap();
+        self.publications
+            .record_append("run-initial", result.snapshot_id)
+            .await
+            .unwrap();
+        self.publications
+            .publish("run-initial", None)
+            .await
+            .unwrap();
     }
 
     async fn read(&self, window_id: &WindowId) -> cubism_iceberg::error::Result<Vec<RecordBatch>> {
-        AggregateReader::read_window(self.catalog.as_ref(), &self.temporal_table, &self.publications, window_id).await
+        AggregateReader::read_window(
+            self.catalog.as_ref(),
+            &self.temporal_table,
+            &self.publications,
+            window_id,
+        )
+        .await
     }
 }
 
@@ -195,14 +234,24 @@ async fn coordinator_correction_is_revision_isolated_from_a_from_scratch_publish
         ("2026-08-12T00:10:00Z", xunit_id(1), 3, 9.0),
         ("2026-08-12T00:20:00Z", xunit_id(2), 5, 11.0),
     ])];
-    let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"US/mobile"), (xunit_id(2), b"EU/desktop")])];
+    let corrected_registry = vec![registry_batch(&[
+        (xunit_id(1), b"US/mobile"),
+        (xunit_id(2), b"EU/desktop"),
+    ])];
 
     // Path A: publish a partial (pre-correction) revision, then run
     // `CorrectionCoordinator` to replace it with the full corrected data.
     let fixture_a = Fixture::new().await;
-    let partial_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 3, 9.0)])];
+    let partial_states = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        3,
+        9.0,
+    )])];
     let partial_registry = vec![registry_batch(&[(xunit_id(1), b"US/mobile")])];
-    fixture_a.publish_initial(&window_id, &partial_states, &partial_registry).await;
+    fixture_a
+        .publish_initial(&window_id, &partial_states, &partial_registry)
+        .await;
 
     let request = CorrectionRequest {
         window_id: &window_id,
@@ -233,7 +282,9 @@ async fn coordinator_correction_is_revision_isolated_from_a_from_scratch_publish
     // Path B: a fresh fixture publishes the exact same corrected content
     // once, from scratch, as revision 1 — no correction involved.
     let fixture_b = Fixture::new().await;
-    fixture_b.publish_initial(&window_id, &corrected_states, &corrected_registry).await;
+    fixture_b
+        .publish_initial(&window_id, &corrected_states, &corrected_registry)
+        .await;
     let clean_read = fixture_b.read(&window_id).await.unwrap();
 
     assert_eq!(
@@ -244,23 +295,42 @@ async fn coordinator_correction_is_revision_isolated_from_a_from_scratch_publish
 }
 
 #[tokio::test]
-async fn coordinator_rejects_a_correction_planned_against_a_superseded_revision_and_does_not_move_current() {
+async fn coordinator_rejects_a_correction_planned_against_a_superseded_revision_and_does_not_move_current()
+ {
     let window_id = WindowId::new("2026-08-12").unwrap();
     let fixture = Fixture::new().await;
 
-    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let states_v1 = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        1,
+        1.0,
+    )])];
     let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
-    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
+    fixture
+        .publish_initial(&window_id, &states_v1, &registry_v1)
+        .await;
 
     // A second writer publishes revision 2 directly (not via the
     // coordinator) before the correction below gets a chance to run —
     // simulating a concurrent build that moved `current` out from under a
     // correction that was planned against revision 1.
-    let states_v2 = vec![states_batch(&[("2026-08-12T00:15:00Z", xunit_id(2), 2, 2.0)])];
+    let states_v2 = vec![states_batch(&[(
+        "2026-08-12T00:15:00Z",
+        xunit_id(2),
+        2,
+        2.0,
+    )])];
     let registry_v2 = vec![registry_batch(&[(xunit_id(2), b"b")])];
     let claim = fixture
         .publications
-        .claim_run(CUBE_ID, &window_id, "run-concurrent", WindowRevision::new(2).unwrap(), 1)
+        .claim_run(
+            CUBE_ID,
+            &window_id,
+            "run-concurrent",
+            WindowRevision::new(2).unwrap(),
+            1,
+        )
         .await
         .unwrap();
     assert!(matches!(claim, ClaimResult::New(_)));
@@ -277,14 +347,27 @@ async fn coordinator_rejects_a_correction_planned_against_a_superseded_revision_
     )
     .await
     .unwrap();
-    fixture.publications.record_append("run-concurrent", result.snapshot_id).await.unwrap();
-    fixture.publications.publish("run-concurrent", Some(WindowRevision::new(1).unwrap())).await.unwrap();
+    fixture
+        .publications
+        .record_append("run-concurrent", result.snapshot_id)
+        .await
+        .unwrap();
+    fixture
+        .publications
+        .publish("run-concurrent", Some(WindowRevision::new(1).unwrap()))
+        .await
+        .unwrap();
 
     // The correction below still observed revision 1 as current (planned
     // before the concurrent write above landed) — the coordinator must
     // surface the CAS rejection as-is and must not retry it internally
     // (see `coordinator.rs`'s module doc comment).
-    let corrected_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 9, 9.0)])];
+    let corrected_states = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        9,
+        9.0,
+    )])];
     let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
     let request = CorrectionRequest {
         window_id: &window_id,
@@ -305,11 +388,19 @@ async fn coordinator_rejects_a_correction_planned_against_a_superseded_revision_
     .unwrap_err();
     assert!(matches!(
         error,
-        CubismIcebergError::StaleRevision { expected: Some(1), actual: Some(2), .. }
+        CubismIcebergError::StaleRevision {
+            expected: Some(1),
+            actual: Some(2),
+            ..
+        }
     ));
 
     assert_eq!(
-        fixture.publications.current(CUBE_ID, &window_id).await.unwrap(),
+        fixture
+            .publications
+            .current(CUBE_ID, &window_id)
+            .await
+            .unwrap(),
         Some(WindowRevision::new(2).unwrap()),
         "a rejected correction must not move `current`"
     );
@@ -332,21 +423,37 @@ async fn coordinator_skips_a_redundant_append_when_the_run_was_already_appended(
     let window_id = WindowId::new("2026-08-12").unwrap();
     let fixture = Fixture::new().await;
 
-    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let states_v1 = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        1,
+        1.0,
+    )])];
     let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
-    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
+    fixture
+        .publish_initial(&window_id, &states_v1, &registry_v1)
+        .await;
 
     let corrected_states = vec![states_batch(&[
         ("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0),
         ("2026-08-12T00:20:00Z", xunit_id(2), 2, 2.0),
     ])];
     let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a"), (xunit_id(2), b"b")])];
-    let expected_rows: u64 = corrected_states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let expected_rows: u64 = corrected_states
+        .iter()
+        .map(RecordBatch::num_rows)
+        .sum::<usize>() as u64;
     let revision = WindowRevision::new(2).unwrap();
 
     let claim = fixture
         .publications
-        .claim_run(CUBE_ID, &window_id, "run-correction", revision, expected_rows)
+        .claim_run(
+            CUBE_ID,
+            &window_id,
+            "run-correction",
+            revision,
+            expected_rows,
+        )
         .await
         .unwrap();
     assert!(matches!(claim, ClaimResult::New(_)));
@@ -363,7 +470,11 @@ async fn coordinator_skips_a_redundant_append_when_the_run_was_already_appended(
     )
     .await
     .unwrap();
-    fixture.publications.record_append("run-correction", first_append.snapshot_id).await.unwrap();
+    fixture
+        .publications
+        .record_append("run-correction", first_append.snapshot_id)
+        .await
+        .unwrap();
 
     let request = CorrectionRequest {
         window_id: &window_id,
@@ -389,7 +500,11 @@ async fn coordinator_skips_a_redundant_append_when_the_run_was_already_appended(
     );
 
     let read = fixture.read(&window_id).await.unwrap();
-    assert_eq!(total_rows(&read), 2, "a retried append-skip path must not duplicate rows");
+    assert_eq!(
+        total_rows(&read),
+        2,
+        "a retried append-skip path must not duplicate rows"
+    );
 }
 
 /// Proves the benign side of `coordinator.rs`'s #20 fix: replaying
@@ -407,15 +522,28 @@ async fn coordinator_skips_a_redundant_append_when_the_run_was_already_appended(
 /// involved (isolating the #20 guard's own logic from durability/restart
 /// concerns, which is that other test's job).
 #[tokio::test]
-async fn coordinator_replaying_a_published_correction_with_nothing_changed_returns_the_same_publication() {
+async fn coordinator_replaying_a_published_correction_with_nothing_changed_returns_the_same_publication()
+ {
     let window_id = WindowId::new("2026-08-12").unwrap();
     let fixture = Fixture::new().await;
 
-    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let states_v1 = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        1,
+        1.0,
+    )])];
     let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
-    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
+    fixture
+        .publish_initial(&window_id, &states_v1, &registry_v1)
+        .await;
 
-    let corrected_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 9, 9.0)])];
+    let corrected_states = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        9,
+        9.0,
+    )])];
     let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
     let build_request = || CorrectionRequest {
         window_id: &window_id,
@@ -476,17 +604,37 @@ async fn coordinator_replaying_a_published_correction_with_nothing_changed_retur
 /// shape (a run that crashed before its own publish) — that gap is
 /// deliberately out of scope for this fix, tracked as #21.
 #[tokio::test]
-async fn coordinator_rejects_a_replayed_correction_after_a_rollback_restored_its_observed_current() {
+async fn coordinator_rejects_a_replayed_correction_after_a_rollback_restored_its_observed_current()
+{
     let window_id = WindowId::new("2026-08-12").unwrap();
     let fixture = Fixture::new().await;
 
-    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let states_v1 = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        1,
+        1.0,
+    )])];
     let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
-    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
-    assert_eq!(fixture.publications.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(1).unwrap()));
+    fixture
+        .publish_initial(&window_id, &states_v1, &registry_v1)
+        .await;
+    assert_eq!(
+        fixture
+            .publications
+            .current(CUBE_ID, &window_id)
+            .await
+            .unwrap(),
+        Some(WindowRevision::new(1).unwrap())
+    );
 
     // The correction: revision B, moving `current` from A (1) to B (2).
-    let corrected_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 9, 9.0)])];
+    let corrected_states = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        9,
+        9.0,
+    )])];
     let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
     let original_request = || CorrectionRequest {
         window_id: &window_id,
@@ -506,15 +654,30 @@ async fn coordinator_rejects_a_replayed_correction_after_a_rollback_restored_its
     .await
     .unwrap();
     assert_eq!(published.revision, WindowRevision::new(2).unwrap());
-    assert_eq!(fixture.publications.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+    assert_eq!(
+        fixture
+            .publications
+            .current(CUBE_ID, &window_id)
+            .await
+            .unwrap(),
+        Some(WindowRevision::new(2).unwrap())
+    );
 
     // The rollback: republish `run-initial` (revision A) via the same CAS
     // `publish` call, expecting the current B — the existing, already-
     // shipped rollback mechanism (`docs/TIMESERIES_PHASE_13_HANDOFF.md`),
     // not new code under test here.
-    fixture.publications.publish("run-initial", Some(WindowRevision::new(2).unwrap())).await.unwrap();
+    fixture
+        .publications
+        .publish("run-initial", Some(WindowRevision::new(2).unwrap()))
+        .await
+        .unwrap();
     assert_eq!(
-        fixture.publications.current(CUBE_ID, &window_id).await.unwrap(),
+        fixture
+            .publications
+            .current(CUBE_ID, &window_id)
+            .await
+            .unwrap(),
         Some(WindowRevision::new(1).unwrap()),
         "rollback should have restored current to revision A"
     );
@@ -534,11 +697,19 @@ async fn coordinator_rejects_a_replayed_correction_after_a_rollback_restored_its
     .unwrap_err();
     assert!(matches!(
         error,
-        CubismIcebergError::RunNoLongerCurrent { revision: 2, current: Some(1), .. }
+        CubismIcebergError::RunNoLongerCurrent {
+            revision: 2,
+            current: Some(1),
+            ..
+        }
     ));
 
     assert_eq!(
-        fixture.publications.current(CUBE_ID, &window_id).await.unwrap(),
+        fixture
+            .publications
+            .current(CUBE_ID, &window_id)
+            .await
+            .unwrap(),
         Some(WindowRevision::new(1).unwrap()),
         "a rejected replay must not undo the rollback — current must stay at revision A"
     );
@@ -572,20 +743,43 @@ async fn coordinator_rejects_a_replayed_correction_after_a_rollback_restored_its
 /// implementation comment (pre-claim staleness; the concurrent
 /// check-vs-publish race).
 #[tokio::test]
-async fn coordinator_rejects_a_replayed_awaiting_publish_correction_after_a_rollback_restored_its_observed_current() {
+async fn coordinator_rejects_a_replayed_awaiting_publish_correction_after_a_rollback_restored_its_observed_current()
+ {
     let window_id = WindowId::new("2026-08-12").unwrap();
     let fixture = Fixture::new().await;
 
-    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let states_v1 = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        1,
+        1.0,
+    )])];
     let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
-    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
-    assert_eq!(fixture.publications.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(1).unwrap()));
+    fixture
+        .publish_initial(&window_id, &states_v1, &registry_v1)
+        .await;
+    assert_eq!(
+        fixture
+            .publications
+            .current(CUBE_ID, &window_id)
+            .await
+            .unwrap(),
+        Some(WindowRevision::new(1).unwrap())
+    );
 
     // The crashed correction: claimed + appended + recorded, never
     // published. Its request still carries `observed_current: A`.
-    let corrected_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 9, 9.0)])];
+    let corrected_states = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        9,
+        9.0,
+    )])];
     let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
-    let expected_rows: u64 = corrected_states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let expected_rows: u64 = corrected_states
+        .iter()
+        .map(RecordBatch::num_rows)
+        .sum::<usize>() as u64;
     let crashed_request = || CorrectionRequest {
         window_id: &window_id,
         revision: WindowRevision::new(2).unwrap(),
@@ -597,7 +791,13 @@ async fn coordinator_rejects_a_replayed_awaiting_publish_correction_after_a_roll
     };
     let claim = fixture
         .publications
-        .claim_run(CUBE_ID, &window_id, "run-correction", WindowRevision::new(2).unwrap(), expected_rows)
+        .claim_run(
+            CUBE_ID,
+            &window_id,
+            "run-correction",
+            WindowRevision::new(2).unwrap(),
+            expected_rows,
+        )
         .await
         .unwrap();
     assert!(matches!(claim, ClaimResult::New(_)));
@@ -614,10 +814,19 @@ async fn coordinator_rejects_a_replayed_awaiting_publish_correction_after_a_roll
     )
     .await
     .unwrap();
-    fixture.publications.record_append("run-correction", crashed_append.snapshot_id).await.unwrap();
+    fixture
+        .publications
+        .record_append("run-correction", crashed_append.snapshot_id)
+        .await
+        .unwrap();
 
     // A different, real correction completes normally: revision C (3).
-    let later_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 5, 5.0)])];
+    let later_states = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        5,
+        5.0,
+    )])];
     let later_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
     let published = CorrectionCoordinator::execute(
         fixture.catalog.as_ref(),
@@ -639,9 +848,17 @@ async fn coordinator_rejects_a_replayed_awaiting_publish_correction_after_a_roll
 
     // The operator's deliberate rollback to A — undoing run-second-
     // correction, with no knowledge of the crashed run.
-    fixture.publications.publish("run-initial", Some(WindowRevision::new(3).unwrap())).await.unwrap();
+    fixture
+        .publications
+        .publish("run-initial", Some(WindowRevision::new(3).unwrap()))
+        .await
+        .unwrap();
     assert_eq!(
-        fixture.publications.current(CUBE_ID, &window_id).await.unwrap(),
+        fixture
+            .publications
+            .current(CUBE_ID, &window_id)
+            .await
+            .unwrap(),
         Some(WindowRevision::new(1).unwrap()),
         "rollback should have restored current to revision A"
     );
@@ -661,14 +878,23 @@ async fn coordinator_rejects_a_replayed_awaiting_publish_correction_after_a_roll
     assert!(
         matches!(
             error,
-            CubismIcebergError::WindowChangedSinceClaim { observed_generation: 1, current_generation: 3, current: Some(1), .. }
+            CubismIcebergError::WindowChangedSinceClaim {
+                observed_generation: 1,
+                current_generation: 3,
+                current: Some(1),
+                ..
+            }
         ),
         "expected WindowChangedSinceClaim with the claim-time generation (1) vs the live one after \
          correction-plus-rollback (3) and the rolled-back current revision"
     );
 
     assert_eq!(
-        fixture.publications.current(CUBE_ID, &window_id).await.unwrap(),
+        fixture
+            .publications
+            .current(CUBE_ID, &window_id)
+            .await
+            .unwrap(),
         Some(WindowRevision::new(1).unwrap()),
         "a rejected replay must not undo the rollback — current must stay at revision A"
     );
@@ -692,9 +918,16 @@ async fn coordinator_completes_an_interrupted_correction_when_nothing_changed_si
     let window_id = WindowId::new("2026-08-12").unwrap();
     let fixture = Fixture::new().await;
 
-    let states_v1 = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let states_v1 = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        1,
+        1.0,
+    )])];
     let registry_v1 = vec![registry_batch(&[(xunit_id(1), b"a")])];
-    fixture.publish_initial(&window_id, &states_v1, &registry_v1).await;
+    fixture
+        .publish_initial(&window_id, &states_v1, &registry_v1)
+        .await;
 
     // Stage the interrupted run: claimed + appended + recorded, never
     // published, nothing else touching the window afterward.
@@ -703,10 +936,19 @@ async fn coordinator_completes_an_interrupted_correction_when_nothing_changed_si
         ("2026-08-12T00:20:00Z", xunit_id(2), 2, 2.0),
     ])];
     let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a"), (xunit_id(2), b"b")])];
-    let expected_rows: u64 = corrected_states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let expected_rows: u64 = corrected_states
+        .iter()
+        .map(RecordBatch::num_rows)
+        .sum::<usize>() as u64;
     let claim = fixture
         .publications
-        .claim_run(CUBE_ID, &window_id, "run-correction", WindowRevision::new(2).unwrap(), expected_rows)
+        .claim_run(
+            CUBE_ID,
+            &window_id,
+            "run-correction",
+            WindowRevision::new(2).unwrap(),
+            expected_rows,
+        )
         .await
         .unwrap();
     assert!(matches!(claim, ClaimResult::New(_)));
@@ -723,7 +965,11 @@ async fn coordinator_completes_an_interrupted_correction_when_nothing_changed_si
     )
     .await
     .unwrap();
-    fixture.publications.record_append("run-correction", staged_append.snapshot_id).await.unwrap();
+    fixture
+        .publications
+        .record_append("run-correction", staged_append.snapshot_id)
+        .await
+        .unwrap();
 
     let request = CorrectionRequest {
         window_id: &window_id,
@@ -747,5 +993,12 @@ async fn coordinator_completes_an_interrupted_correction_when_nothing_changed_si
         publication.aggregate_snapshot_id, staged_append.snapshot_id,
         "recovery must complete the interrupted run's own publish, not perform a second append"
     );
-    assert_eq!(fixture.publications.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+    assert_eq!(
+        fixture
+            .publications
+            .current(CUBE_ID, &window_id)
+            .await
+            .unwrap(),
+        Some(WindowRevision::new(2).unwrap())
+    );
 }

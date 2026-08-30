@@ -46,13 +46,11 @@ use arrow_array::RecordBatch;
 use cubism_core::temporal::{TimeRange, WindowId, WindowRevision};
 use cubism_core::{AggKind, CubeSpec};
 use cubism_datafusion::datafusion::prelude::SessionContext;
-use cubism_datafusion::temporal_build::{build_temporal, NullEventTimePolicy};
-use cubism_iceberg::{
-    CorrectionCoordinator, CorrectionRequest, PublicationStore, TemporalTable,
-};
+use cubism_datafusion::temporal_build::{NullEventTimePolicy, build_temporal};
+use cubism_iceberg::{CorrectionCoordinator, CorrectionRequest, PublicationStore, TemporalTable};
 
-use crate::windows::{affected_windows, AffectedWindow};
 use crate::CorrectError;
+use crate::windows::{AffectedWindow, affected_windows};
 
 /// One window's correction result.
 #[derive(Debug, Clone, PartialEq, Eq)]
