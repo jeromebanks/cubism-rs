@@ -754,11 +754,17 @@ mod tests {
         let bucket_end = BucketEnd::from_unix_micros(0);
 
         assert_eq!(
-            policy.classify(EventTime::from_unix_micros(10 * MICROS_PER_SECOND - 1), bucket_end),
+            policy.classify(
+                EventTime::from_unix_micros(10 * MICROS_PER_SECOND - 1),
+                bucket_end
+            ),
             Lateness::OnTime
         );
         assert_eq!(
-            policy.classify(EventTime::from_unix_micros(10 * MICROS_PER_SECOND), bucket_end),
+            policy.classify(
+                EventTime::from_unix_micros(10 * MICROS_PER_SECOND),
+                bucket_end
+            ),
             Lateness::Late
         );
     }

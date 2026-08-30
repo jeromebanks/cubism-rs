@@ -1,0 +1,60 @@
+name: Nightly
+
+# The slow/optional half of #43's gate: dependency & license scanning, the
+# Scala Spark adapter (not a Cargo workspace member — see spark-adapter/),
+# and a benchmark-regression smoke test. None of these are required PR
+# checks (ci.yml is), so a red run here doesn't block a merge — it's a
+# signal for whoever is on the #43 rotation to triage, per the remediation
+# policy in deny.toml.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in sync with ci.yml's RUST_TOOLCHAIN and rust-toolchain.toml.
+  RUST_TOOLCHAIN: "1.96.1"
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (advisories, licenses, bans, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  bench-smoke:
+    name: benchmark regression smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      # Runs the #[ignore]'d 1M-row golden-digest case that ci.yml skips to
+      # stay fast. Not a perf-regression *comparison* yet (no baseline
+      # storage/threshold) — that's still open under #43's "publish deeper
+      # benchmarks on a schedule" workstream; today this only proves the
+      # 1M-row path still runs and its digest still matches.
+      - run: cargo test -p cubism-timeseries-bench --lib -- --ignored golden_digest_sparse_1m
+
+  spark-adapter:
+    name: spark-adapter (sbt)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: sbt/setup-sbt@v1
+      - uses: coursier/cache-action@v6
+      - working-directory: spark-adapter
+        run: sbt test

@@ -41,15 +41,17 @@
 //! `docs/TIMESERIES_PHASE_3_HANDOFF.md` for how the non-durable default was
 //! discovered to be a hard limitation, not just a production gap.
 
+use cubism_core::temporal::{WindowId, WindowRevision};
 use cubism_core::{CubeSpec, EventTime, TimeRange};
 use cubism_datafusion::build_cube;
 use cubism_datafusion::datafusion::dataframe::DataFrameWriteOptions;
 use cubism_datafusion::datafusion::prelude::{CsvReadOptions, ParquetReadOptions, SessionContext};
 use cubism_datafusion::temporal_build::{
-    explain_temporal_build, temporal_state_schema, write_temporal_fixtures, NullEventTimePolicy,
+    NullEventTimePolicy, explain_temporal_build, temporal_state_schema, write_temporal_fixtures,
 };
-use cubism_core::temporal::{WindowId, WindowRevision};
-use cubism_iceberg::{AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, PublicationStore, TemporalTable};
+use cubism_iceberg::{
+    AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, PublicationStore, TemporalTable,
+};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
@@ -73,19 +75,28 @@ fn validate(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn run(spec_path: &str, input: &str, output: Option<&str>, show: usize) -> Result<(), String> {
+async fn run(
+    spec_path: &str,
+    input: &str,
+    output: Option<&str>,
+    show: usize,
+) -> Result<(), String> {
     let spec = load_spec(spec_path)?;
     let ctx = SessionContext::new();
 
     let started = Instant::now();
     if input.ends_with(".csv") {
-        ctx.register_csv("events", input, CsvReadOptions::new()).await
+        ctx.register_csv("events", input, CsvReadOptions::new())
+            .await
     } else {
-        ctx.register_parquet("events", input, ParquetReadOptions::default()).await
+        ctx.register_parquet("events", input, ParquetReadOptions::default())
+            .await
     }
     .map_err(|e| format!("cannot read {input}: {e}"))?;
 
-    let (df, dict) = build_cube(&ctx, &spec, "events").await.map_err(|e| e.to_string())?;
+    let (df, dict) = build_cube(&ctx, &spec, "events")
+        .await
+        .map_err(|e| e.to_string())?;
 
     let cube = df.cache().await.map_err(|e| e.to_string())?;
     let cells = cube.clone().count().await.map_err(|e| e.to_string())?;
@@ -110,8 +121,10 @@ async fn run(spec_path: &str, input: &str, output: Option<&str>, show: usize) ->
         cube.clone()
             .select_columns(&display_cols)
             .and_then(|d| {
-                d.sort(vec![cubism_datafusion::datafusion::prelude::col(&spec.measures[0].name)
-                    .sort(false, false)])
+                d.sort(vec![
+                    cubism_datafusion::datafusion::prelude::col(&spec.measures[0].name)
+                        .sort(false, false),
+                ])
             })
             .and_then(|d| d.limit(0, Some(show)))
             .map_err(|e| e.to_string())?
@@ -149,7 +162,11 @@ async fn temporal_build(
     let null_policy = match null_policy {
         "reject" => NullEventTimePolicy::Reject,
         "quarantine" => NullEventTimePolicy::Quarantine,
-        other => return Err(format!("--null-policy expects 'reject' or 'quarantine', got '{other}'")),
+        other => {
+            return Err(format!(
+                "--null-policy expects 'reject' or 'quarantine', got '{other}'"
+            ));
+        }
     };
     let window = match window {
         Some((start, end)) => {
@@ -163,9 +180,11 @@ async fn temporal_build(
     let ctx = SessionContext::new();
     let started = Instant::now();
     if input.ends_with(".csv") {
-        ctx.register_csv("events", input, CsvReadOptions::new()).await
+        ctx.register_csv("events", input, CsvReadOptions::new())
+            .await
     } else {
-        ctx.register_parquet("events", input, ParquetReadOptions::default()).await
+        ctx.register_parquet("events", input, ParquetReadOptions::default())
+            .await
     }
     .map_err(|e| format!("cannot read {input}: {e}"))?;
 
@@ -196,9 +215,10 @@ async fn temporal_build(
         }
     };
 
-    let output = cubism_datafusion::build_temporal(&ctx, &spec, "events", window, None, null_policy)
-        .await
-        .map_err(|e| e.to_string())?;
+    let output =
+        cubism_datafusion::build_temporal(&ctx, &spec, "events", window, None, null_policy)
+            .await
+            .map_err(|e| e.to_string())?;
     write_temporal_fixtures(&output, states_path, registry_path)
         .await
         .map_err(|e| e.to_string())?;
@@ -276,17 +296,26 @@ async fn iceberg_build(
 
     let states_schema = temporal_state_schema(&spec).map_err(|e| e.to_string())?;
     let config = if durable {
-        CatalogConfig::Sqlite { warehouse: PathBuf::from(warehouse), catalog_db: PathBuf::from(catalog_db) }
+        CatalogConfig::Sqlite {
+            warehouse: PathBuf::from(warehouse),
+            catalog_db: PathBuf::from(catalog_db),
+        }
     } else {
-        CatalogConfig::Memory { warehouse: PathBuf::from(warehouse) }
+        CatalogConfig::Memory {
+            warehouse: PathBuf::from(warehouse),
+        }
     };
-    let catalog = cubism_iceberg::config::open_catalog(&config).await.map_err(|e| e.to_string())?;
+    let catalog = cubism_iceberg::config::open_catalog(&config)
+        .await
+        .map_err(|e| e.to_string())?;
     let table = TemporalTable::create(catalog.as_ref(), &spec.name, &states_schema)
         .await
         .map_err(|e| e.to_string())?;
 
     let publications = if durable {
-        PublicationStore::sqlite(std::path::Path::new(control_db)).await.map_err(|e| e.to_string())?
+        PublicationStore::sqlite(std::path::Path::new(control_db))
+            .await
+            .map_err(|e| e.to_string())?
     } else {
         PublicationStore::in_memory()
     };
@@ -368,9 +397,14 @@ async fn iceberg_build(
         }
     };
 
-    let expected_current =
-        publications.current(&spec.name, &window_id).await.map_err(|e| e.to_string())?;
-    let publication = publications.publish(run_id, expected_current).await.map_err(|e| e.to_string())?;
+    let expected_current = publications
+        .current(&spec.name, &window_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let publication = publications
+        .publish(run_id, expected_current)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let visible = AggregateReader::read_window(catalog.as_ref(), &table, &publications, &window_id)
         .await
@@ -389,7 +423,9 @@ async fn iceberg_build(
         result.row_count,
     );
     if durable {
-        println!("catalog and control store are durable (--catalog-db, --control-db) — a second invocation with the same paths observes this one's tables and publications");
+        println!(
+            "catalog and control store are durable (--catalog-db, --control-db) — a second invocation with the same paths observes this one's tables and publications"
+        );
     } else {
         println!(
             "note: this build used the non-durable defaults — catalog and control store do not survive past this process (pass --catalog-db and --control-db for a durable build; see docs/TIMESERIES_PHASE_4_HANDOFF.md)"
@@ -414,30 +450,44 @@ async fn serve(
 ) -> Result<(), String> {
     let store = cubism_serve::CubeStore::from_path(cube_path).map_err(|e| e.to_string())?;
     match (spec_path, warehouse) {
-        (None, None) => cubism_serve::serve(store, port).await.map_err(|e| e.to_string()),
+        (None, None) => cubism_serve::serve(store, port)
+            .await
+            .map_err(|e| e.to_string()),
         (Some(spec_path), Some(warehouse)) => {
             let spec = load_spec(spec_path)?;
             let durable = catalog_db.is_some() || control_db.is_some();
             let (catalog_db, control_db) = match (catalog_db, control_db) {
                 (Some(c), Some(p)) => (c, p),
                 _ if durable => {
-                    return Err("--catalog-db and --control-db must both be given, or neither".into());
+                    return Err(
+                        "--catalog-db and --control-db must both be given, or neither".into(),
+                    );
                 }
                 _ => ("", ""),
             };
             let config = if durable {
-                CatalogConfig::Sqlite { warehouse: PathBuf::from(warehouse), catalog_db: PathBuf::from(catalog_db) }
+                CatalogConfig::Sqlite {
+                    warehouse: PathBuf::from(warehouse),
+                    catalog_db: PathBuf::from(catalog_db),
+                }
             } else {
-                CatalogConfig::Memory { warehouse: PathBuf::from(warehouse) }
+                CatalogConfig::Memory {
+                    warehouse: PathBuf::from(warehouse),
+                }
             };
             let publications = if durable {
-                PublicationStore::sqlite(std::path::Path::new(control_db)).await.map_err(|e| e.to_string())?
+                PublicationStore::sqlite(std::path::Path::new(control_db))
+                    .await
+                    .map_err(|e| e.to_string())?
             } else {
                 PublicationStore::in_memory()
             };
-            let series =
-                cubism_serve::SeriesState::open(spec, &config, publications).await.map_err(|e| e.to_string())?;
-            cubism_serve::serve_with_series(store, series, port).await.map_err(|e| e.to_string())
+            let series = cubism_serve::SeriesState::open(spec, &config, publications)
+                .await
+                .map_err(|e| e.to_string())?;
+            cubism_serve::serve_with_series(store, series, port)
+                .await
+                .map_err(|e| e.to_string())
         }
         _ => Err("--spec and --warehouse must be given together, or neither".into()),
     }
@@ -593,7 +643,10 @@ async fn main() -> ExitCode {
                     ("--window-id", Some(v)) => window_id = Some(v.clone()),
                     ("--revision", Some(v)) => match v.parse() {
                         Ok(n) => revision = Some(n),
-                        Err(_) => flag_err = Some(format!("--revision expects a positive integer, got '{v}'")),
+                        Err(_) => {
+                            flag_err =
+                                Some(format!("--revision expects a positive integer, got '{v}'"))
+                        }
                     },
                     ("--run-id", Some(v)) => run_id = Some(v.clone()),
                     ("--warehouse", Some(v)) => warehouse = Some(v.clone()),

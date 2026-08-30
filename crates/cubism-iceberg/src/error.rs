@@ -44,7 +44,9 @@ pub enum CubismIcebergError {
     #[error("catalog kind is not implemented in this deployment: {0}")]
     UnsupportedCatalog(String),
 
-    #[error("run '{run_id}' was already claimed with different inputs (window {window_id}, revision {revision}, expected_rows {expected_rows})")]
+    #[error(
+        "run '{run_id}' was already claimed with different inputs (window {window_id}, revision {revision}, expected_rows {expected_rows})"
+    )]
     RunConflict {
         run_id: String,
         window_id: String,

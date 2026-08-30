@@ -11,7 +11,7 @@
 //! `state` / `merge_batch` / `evaluate`), which maps 1:1 onto the mergeable
 //! sketch algebra in `cubism_core::sketch`.
 
-use cubism_core::sketch::kmv::{hash_value, KmvSketch, DEFAULT_SKETCH_SIZE};
+use cubism_core::sketch::kmv::{DEFAULT_SKETCH_SIZE, KmvSketch, hash_value};
 use cubism_core::sketch::sample::DEFAULT_SAMPLE_CAPACITY;
 use cubism_core::sketch::topk::DEFAULT_TOPK_CAPACITY;
 use cubism_core::sketch::{Centroid, ExemplarSample, TopK};
@@ -19,7 +19,7 @@ use datafusion::arrow::array::{
     Array, ArrayRef, AsArray, BinaryBuilder, BooleanArray, Float64Builder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef};
-use datafusion::common::{exec_err, Result, ScalarValue};
+use datafusion::common::{Result, ScalarValue, exec_err};
 use datafusion::logical_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion::logical_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, ColumnarValue, EmitTo, GroupsAccumulator,
@@ -47,7 +47,9 @@ impl AggregateUDFImpl for KmvSketchUdaf {
     }
 
     fn accumulator(&self, _args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        Ok(Box::new(KmvAccumulator { sketch: KmvSketch::new(self.k) }))
+        Ok(Box::new(KmvAccumulator {
+            sketch: KmvSketch::new(self.k),
+        }))
     }
 
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
@@ -66,7 +68,9 @@ impl AggregateUDFImpl for KmvSketchUdaf {
         &self,
         _args: AccumulatorArgs,
     ) -> Result<Box<dyn GroupsAccumulator>> {
-        Ok(Box::new(SketchGroupsAccumulator::new(KmvKernel { k: self.k })))
+        Ok(Box::new(SketchGroupsAccumulator::new(KmvKernel {
+            k: self.k,
+        })))
     }
 }
 
@@ -183,11 +187,17 @@ impl AggregateUDFImpl for TopKUdaf {
     }
 
     fn accumulator(&self, _args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        Ok(Box::new(TopKAccumulator { topk: TopK::new(self.capacity) }))
+        Ok(Box::new(TopKAccumulator {
+            topk: TopK::new(self.capacity),
+        }))
     }
 
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
-        Ok(vec![Arc::new(Field::new(format!("{}[topk]", args.name), DataType::Binary, true))])
+        Ok(vec![Arc::new(Field::new(
+            format!("{}[topk]", args.name),
+            DataType::Binary,
+            true,
+        ))])
     }
 
     fn groups_accumulator_supported(&self, _args: AccumulatorArgs) -> bool {
@@ -198,7 +208,9 @@ impl AggregateUDFImpl for TopKUdaf {
         &self,
         _args: AccumulatorArgs,
     ) -> Result<Box<dyn GroupsAccumulator>> {
-        Ok(Box::new(SketchGroupsAccumulator::new(TopKKernel { capacity: self.capacity })))
+        Ok(Box::new(SketchGroupsAccumulator::new(TopKKernel {
+            capacity: self.capacity,
+        })))
     }
 }
 
@@ -266,11 +278,17 @@ impl AggregateUDFImpl for SampleUdaf {
     }
 
     fn accumulator(&self, _args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        Ok(Box::new(SampleAccumulator { sample: ExemplarSample::new(self.capacity) }))
+        Ok(Box::new(SampleAccumulator {
+            sample: ExemplarSample::new(self.capacity),
+        }))
     }
 
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
-        Ok(vec![Arc::new(Field::new(format!("{}[sample]", args.name), DataType::Binary, true))])
+        Ok(vec![Arc::new(Field::new(
+            format!("{}[sample]", args.name),
+            DataType::Binary,
+            true,
+        ))])
     }
 
     fn groups_accumulator_supported(&self, _args: AccumulatorArgs) -> bool {
@@ -281,7 +299,9 @@ impl AggregateUDFImpl for SampleUdaf {
         &self,
         _args: AccumulatorArgs,
     ) -> Result<Box<dyn GroupsAccumulator>> {
-        Ok(Box::new(SketchGroupsAccumulator::new(SampleKernel { capacity: self.capacity })))
+        Ok(Box::new(SketchGroupsAccumulator::new(SampleKernel {
+            capacity: self.capacity,
+        })))
     }
 }
 
@@ -344,11 +364,17 @@ impl AggregateUDFImpl for CentroidUdaf {
     }
 
     fn accumulator(&self, _args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        Ok(Box::new(CentroidAccumulator { centroid: Centroid::new() }))
+        Ok(Box::new(CentroidAccumulator {
+            centroid: Centroid::new(),
+        }))
     }
 
     fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<FieldRef>> {
-        Ok(vec![Arc::new(Field::new(format!("{}[centroid]", args.name), DataType::Binary, true))])
+        Ok(vec![Arc::new(Field::new(
+            format!("{}[centroid]", args.name),
+            DataType::Binary,
+            true,
+        ))])
     }
 
     fn groups_accumulator_supported(&self, _args: AccumulatorArgs) -> bool {
@@ -403,8 +429,15 @@ impl Accumulator for CentroidAccumulator {
                     continue;
                 }
                 let (start, end) = (offsets[i] as usize, offsets[i + 1] as usize);
-                let vector: Vec<f64> =
-                    (start..end).map(|j| if floats.is_null(j) { 0.0 } else { floats.value(j) }).collect();
+                let vector: Vec<f64> = (start..end)
+                    .map(|j| {
+                        if floats.is_null(j) {
+                            0.0
+                        } else {
+                            floats.value(j)
+                        }
+                    })
+                    .collect();
                 self.centroid.add(&vector).map_err(to_df_err)?;
             }
         }
@@ -474,9 +507,7 @@ impl ScalarUDFImpl for BlobPresenterUdf {
                 continue;
             }
             let rendered = match self.kind {
-                PresenterKind::TopKJson => {
-                    TopK::from_bytes(blobs.value(i)).map(|t| t.to_json())
-                }
+                PresenterKind::TopKJson => TopK::from_bytes(blobs.value(i)).map(|t| t.to_json()),
                 PresenterKind::SampleJson => {
                     ExemplarSample::from_bytes(blobs.value(i)).map(|s| s.to_json())
                 }
@@ -505,7 +536,11 @@ impl ScalarUDFImpl for CentroidMeanUdf {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        Ok(DataType::List(Arc::new(Field::new("item", DataType::Float64, true))))
+        Ok(DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Float64,
+            true,
+        ))))
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
@@ -572,7 +607,10 @@ struct SketchGroupsAccumulator<K: SketchKernel> {
 
 impl<K: SketchKernel> SketchGroupsAccumulator<K> {
     fn new(kernel: K) -> Self {
-        SketchGroupsAccumulator { kernel, groups: Vec::new() }
+        SketchGroupsAccumulator {
+            kernel,
+            groups: Vec::new(),
+        }
     }
 
     fn resize(&mut self, total_num_groups: usize) {
@@ -598,7 +636,8 @@ impl<K: SketchKernel> GroupsAccumulator for SketchGroupsAccumulator<K> {
         total_num_groups: usize,
     ) -> Result<()> {
         self.resize(total_num_groups);
-        self.kernel.update_rows(&mut self.groups, values, group_indices, opt_filter)
+        self.kernel
+            .update_rows(&mut self.groups, values, group_indices, opt_filter)
     }
 
     fn evaluate(&mut self, emit_to: EmitTo) -> Result<ArrayRef> {
@@ -633,8 +672,7 @@ impl<K: SketchKernel> GroupsAccumulator for SketchGroupsAccumulator<K> {
     }
 
     fn size(&self) -> usize {
-        std::mem::size_of::<Self>()
-            + self.groups.iter().map(K::mem_size).sum::<usize>()
+        std::mem::size_of::<Self>() + self.groups.iter().map(K::mem_size).sum::<usize>()
     }
 }
 
@@ -812,7 +850,13 @@ impl SketchKernel for CentroidKernel {
                 groups[group].add(&flat[start..end]).map_err(to_df_err)?;
             } else {
                 let vector: Vec<f64> = (start..end)
-                    .map(|j| if floats.is_null(j) { 0.0 } else { floats.value(j) })
+                    .map(|j| {
+                        if floats.is_null(j) {
+                            0.0
+                        } else {
+                            floats.value(j)
+                        }
+                    })
                     .collect();
                 groups[group].add(&vector).map_err(to_df_err)?;
             }
@@ -821,7 +865,9 @@ impl SketchKernel for CentroidKernel {
     }
 
     fn merge_blob(sketch: &mut Centroid, blob: &[u8]) -> Result<()> {
-        *sketch = sketch.merge(&Centroid::from_bytes(blob).map_err(to_df_err)?).map_err(to_df_err)?;
+        *sketch = sketch
+            .merge(&Centroid::from_bytes(blob).map_err(to_df_err)?)
+            .map_err(to_df_err)?;
         Ok(())
     }
 
@@ -842,7 +888,9 @@ fn to_df_err(e: cubism_core::CubismError) -> datafusion::common::DataFusionError
 
 fn iter_blobs(array: &ArrayRef) -> impl Iterator<Item = &[u8]> {
     let arr = array.as_binary::<i32>();
-    (0..arr.len()).filter(|&i| !arr.is_null(i)).map(move |i| arr.value(i))
+    (0..arr.len())
+        .filter(|&i| !arr.is_null(i))
+        .map(move |i| arr.value(i))
 }
 
 /// All sketch UDFs. They are stateless (unlike the per-build XUnit UDFs) and
@@ -866,10 +914,14 @@ pub fn sketch_udfs() -> (Vec<AggregateUDF>, Vec<ScalarUDF>) {
                 capacity: DEFAULT_SAMPLE_CAPACITY,
                 signature: Signature::exact(vec![DataType::Utf8], Volatility::Immutable),
             }),
-            AggregateUDF::from(CentroidUdaf { signature: Signature::any(1, Volatility::Immutable) }),
+            AggregateUDF::from(CentroidUdaf {
+                signature: Signature::any(1, Volatility::Immutable),
+            }),
         ],
         vec![
-            ScalarUDF::from(KmvEstimateUdf { signature: binary_arg() }),
+            ScalarUDF::from(KmvEstimateUdf {
+                signature: binary_arg(),
+            }),
             ScalarUDF::from(BlobPresenterUdf {
                 name: "cubism_topk_json",
                 signature: binary_arg(),
@@ -880,7 +932,9 @@ pub fn sketch_udfs() -> (Vec<AggregateUDF>, Vec<ScalarUDF>) {
                 signature: binary_arg(),
                 kind: PresenterKind::SampleJson,
             }),
-            ScalarUDF::from(CentroidMeanUdf { signature: binary_arg() }),
+            ScalarUDF::from(CentroidMeanUdf {
+                signature: binary_arg(),
+            }),
         ],
     )
 }

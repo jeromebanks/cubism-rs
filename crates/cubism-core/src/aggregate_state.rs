@@ -784,8 +784,7 @@ mod tests {
     ///
     /// [issue #9]: https://github.com/jeromebanks/cubism-rs/issues/9
     const GOLDEN_AVERAGE_V1: &str = "41564701000000000000f83f0100000000000000";
-    const GOLDEN_VARIANCE_V1: &str =
-        "56415201010000000000000000000000000000400000000000000000";
+    const GOLDEN_VARIANCE_V1: &str = "56415201010000000000000000000000000000400000000000000000";
 
     /// Both vectors below were cross-checked against Python's
     /// `zlib.crc32` over the same body bytes, so they are pinned by an
@@ -796,7 +795,10 @@ mod tests {
         let mut average = AverageState::new();
         average.accumulate(1.5).unwrap();
         // V1 body, version byte bumped to 02, plus the trailing CRC32.
-        assert_eq!(hex(&average.encode()), "41564702000000000000f83f0100000000000000dff5fa2d");
+        assert_eq!(
+            hex(&average.encode()),
+            "41564702000000000000f83f0100000000000000dff5fa2d"
+        );
 
         let mut variance = VarianceState::new();
         variance.accumulate(2.0).unwrap();

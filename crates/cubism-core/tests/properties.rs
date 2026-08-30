@@ -3,9 +3,9 @@
 //! - binary key encode/decode round-trip and key canonicality
 //! - pruned lattice generation ≡ generate-everything-then-filter
 
-use cubism_core::encoding::{decode_xunit, encode_xunit, XUnitDictionary};
+use cubism_core::encoding::{XUnitDictionary, decode_xunit, encode_xunit};
 use cubism_core::lattice::{generate_xunits, generate_xunits_unpruned};
-use cubism_core::rules::{include_xunit, FilterRule};
+use cubism_core::rules::{FilterRule, include_xunit};
 use cubism_core::sketch::KmvSketch;
 use cubism_core::{XUnit, YPath};
 use proptest::prelude::*;
@@ -27,7 +27,13 @@ fn ident_strategy() -> impl Strategy<Value = String> {
 fn ypath_strategy() -> impl Strategy<Value = YPath> {
     (
         ident_strategy(),
-        prop::collection::vec((ident_strategy(), prop::option::weighted(0.9, value_strategy())), 1..4),
+        prop::collection::vec(
+            (
+                ident_strategy(),
+                prop::option::weighted(0.9, value_strategy()),
+            ),
+            1..4,
+        ),
     )
         .prop_map(|(dim, attributes)| YPath { dim, attributes })
 }
@@ -45,7 +51,10 @@ fn xunit_strategy() -> impl Strategy<Value = XUnit> {
 /// Per-dimension YPath alternatives shaped like real hierarchy prefixes.
 fn per_dimension_strategy() -> impl Strategy<Value = Vec<Vec<YPath>>> {
     prop::collection::vec(
-        (ident_strategy(), prop::collection::vec((ident_strategy(), value_strategy()), 0..3)),
+        (
+            ident_strategy(),
+            prop::collection::vec((ident_strategy(), value_strategy()), 0..3),
+        ),
         1..4,
     )
     .prop_map(|dims| {
@@ -73,8 +82,7 @@ fn rules_strategy() -> impl Strategy<Value = Vec<FilterRule>> {
         dim.clone().prop_map(|d| FilterRule::ContainsDim { dim: d }),
         dim.clone().prop_map(|d| FilterRule::TopLevel { dim: d }),
         dim.clone().prop_map(|d| FilterRule::NotAlone { dim: d }),
-        (dim.clone(), dim.clone())
-            .prop_map(|(a, b)| FilterRule::NotTogether { dims: vec![a, b] }),
+        (dim.clone(), dim.clone()).prop_map(|(a, b)| FilterRule::NotTogether { dims: vec![a, b] }),
     ];
     let combined = leaf.clone().prop_recursive(2, 8, 3, |inner| {
         prop_oneof![

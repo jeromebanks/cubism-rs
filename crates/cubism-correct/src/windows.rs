@@ -33,7 +33,7 @@
 //! `build_temporal_demo.sh` already passes to `--window-id`, so warehouses
 //! built before this module resolve through it unchanged. That
 //! compatibility is asserted in this module's tests, not assumed —
-//! [`day_form_matches_the_existing_demo_convention`].
+//! `day_form_matches_the_existing_demo_convention`.
 //!
 //! # Why the encoding must be injective, and how the third form arose
 //!
@@ -101,7 +101,9 @@ pub fn window_id_for(
 ) -> Result<WindowId, CorrectError> {
     let micros = bucket_start.unix_micros();
     let timestamp = DateTime::<Utc>::from_timestamp_micros(micros).ok_or_else(|| {
-        CorrectError::WindowNaming(format!("bucket start {micros}µs is out of representable range"))
+        CorrectError::WindowNaming(format!(
+            "bucket start {micros}µs is out of representable range"
+        ))
     })?;
     // A whole number of days, and the bucket actually lands on a midnight:
     // a 1d resolution with a non-midnight origin is still sub-day-aligned
@@ -172,13 +174,14 @@ pub fn affected_windows(
 
     let mut windows = Vec::new();
     for step in 0..count {
-        let start = first
-            .start
-            .unix_micros()
-            .checked_add(step.checked_mul(width).ok_or_else(|| {
-                CorrectError::WindowNaming("window enumeration overflows".into())
-            })?)
-            .ok_or_else(|| CorrectError::WindowNaming("window enumeration overflows".into()))?;
+        let start =
+            first
+                .start
+                .unix_micros()
+                .checked_add(step.checked_mul(width).ok_or_else(|| {
+                    CorrectError::WindowNaming("window enumeration overflows".into())
+                })?)
+                .ok_or_else(|| CorrectError::WindowNaming("window enumeration overflows".into()))?;
         let end = start
             .checked_add(width)
             .ok_or_else(|| CorrectError::WindowNaming("window end overflows".into()))?;
@@ -204,7 +207,9 @@ mod tests {
         TemporalSpec {
             event_time: "timestamp".into(),
             ingestion_time: None,
-            base_resolution: Resolution::Fixed(FixedResolution::from_micros(MICROS_PER_DAY).unwrap()),
+            base_resolution: Resolution::Fixed(
+                FixedResolution::from_micros(MICROS_PER_DAY).unwrap(),
+            ),
             origin: BucketOrigin::default(),
             timezone: "UTC".into(),
             allowed_lateness: AllowedLateness::from_micros(0).unwrap(),
@@ -214,9 +219,7 @@ mod tests {
     }
 
     fn at(text: &str) -> EventTime {
-        EventTime::from_unix_micros(
-            text.parse::<DateTime<Utc>>().unwrap().timestamp_micros(),
-        )
+        EventTime::from_unix_micros(text.parse::<DateTime<Utc>>().unwrap().timestamp_micros())
     }
 
     /// The compatibility constraint this whole encoding is pinned by: the
@@ -227,7 +230,10 @@ mod tests {
     fn day_form_matches_the_existing_demo_convention() {
         let resolution = FixedResolution::from_micros(MICROS_PER_DAY).unwrap();
         let start = BucketStart::from_unix_micros(at("2026-04-06T00:00:00Z").unix_micros());
-        assert_eq!(window_id_for(start, resolution).unwrap().as_str(), "2026-04-06");
+        assert_eq!(
+            window_id_for(start, resolution).unwrap().as_str(),
+            "2026-04-06"
+        );
     }
 
     #[test]
@@ -264,7 +270,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            windows.iter().map(|w| w.window_id.as_str()).collect::<Vec<_>>(),
+            windows
+                .iter()
+                .map(|w| w.window_id.as_str())
+                .collect::<Vec<_>>(),
             ["2026-04-06"]
         );
 
@@ -279,7 +288,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            windows.iter().map(|w| w.window_id.as_str()).collect::<Vec<_>>(),
+            windows
+                .iter()
+                .map(|w| w.window_id.as_str())
+                .collect::<Vec<_>>(),
             ["2026-04-06", "2026-04-07"]
         );
     }
@@ -292,7 +304,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            windows.iter().map(|w| w.window_id.as_str()).collect::<Vec<_>>(),
+            windows
+                .iter()
+                .map(|w| w.window_id.as_str())
+                .collect::<Vec<_>>(),
             ["2026-04-06", "2026-04-07", "2026-04-08", "2026-04-09"]
         );
         // Contiguous: each window's end is the next one's start.
@@ -320,7 +335,12 @@ mod tests {
     fn adjacent_microsecond_buckets_do_not_collide() {
         let one_us = FixedResolution::from_micros(1).unwrap();
         let ids: Vec<String> = (0..4)
-            .map(|n| window_id_for(BucketStart::from_unix_micros(n), one_us).unwrap().as_str().to_string())
+            .map(|n| {
+                window_id_for(BucketStart::from_unix_micros(n), one_us)
+                    .unwrap()
+                    .as_str()
+                    .to_string()
+            })
             .collect();
         assert_eq!(
             ids,
@@ -343,9 +363,18 @@ mod tests {
         // Straddles a second boundary and the epoch, so both the
         // whole-second/sub-second split and the negative path are covered.
         let ids: HashSet<String> = (-2_000..2_000)
-            .map(|n| window_id_for(BucketStart::from_unix_micros(n), one_us).unwrap().as_str().to_string())
+            .map(|n| {
+                window_id_for(BucketStart::from_unix_micros(n), one_us)
+                    .unwrap()
+                    .as_str()
+                    .to_string()
+            })
             .collect();
-        assert_eq!(ids.len(), 4_000, "every distinct bucket start needs a distinct id");
+        assert_eq!(
+            ids.len(),
+            4_000,
+            "every distinct bucket start needs a distinct id"
+        );
     }
 
     /// Pre-epoch bucket starts are classified by where they sit inside
@@ -354,11 +383,15 @@ mod tests {
     fn pre_epoch_sub_second_buckets_render_correctly() {
         let half_sec = FixedResolution::from_micros(500_000).unwrap();
         assert_eq!(
-            window_id_for(BucketStart::from_unix_micros(-500_000), half_sec).unwrap().as_str(),
+            window_id_for(BucketStart::from_unix_micros(-500_000), half_sec)
+                .unwrap()
+                .as_str(),
             "1969-12-31T23:59:59.500000Z"
         );
         assert_eq!(
-            window_id_for(BucketStart::from_unix_micros(-1_000_000), half_sec).unwrap().as_str(),
+            window_id_for(BucketStart::from_unix_micros(-1_000_000), half_sec)
+                .unwrap()
+                .as_str(),
             "1969-12-31T23:59:59Z"
         );
     }

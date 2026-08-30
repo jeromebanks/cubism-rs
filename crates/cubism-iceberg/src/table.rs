@@ -6,7 +6,9 @@ use iceberg::table::Table;
 use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
 
 use crate::error::Result;
-use crate::schema::{states_iceberg_schema, states_partition_spec, states_sort_order, xunit_registry_iceberg_schema};
+use crate::schema::{
+    states_iceberg_schema, states_partition_spec, states_sort_order, xunit_registry_iceberg_schema,
+};
 
 /// The two Iceberg tables backing one cube's temporal aggregates: the
 /// day-partitioned `states` table (Phase 2's `temporal_state_schema()`
@@ -77,5 +79,7 @@ impl TemporalTable {
 }
 
 pub fn current_snapshot_id(metadata: &TableMetadata) -> Option<i64> {
-    metadata.current_snapshot().map(|snapshot| snapshot.snapshot_id())
+    metadata
+        .current_snapshot()
+        .map(|snapshot| snapshot.snapshot_id())
 }

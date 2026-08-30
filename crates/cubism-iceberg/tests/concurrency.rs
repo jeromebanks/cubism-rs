@@ -83,14 +83,26 @@ async fn two_same_window_writers_produce_exactly_one_published_winner() {
     let store_b = Arc::new(PublicationStore::sqlite(&control_db).await.unwrap());
 
     let claim_a = store_a
-        .claim_run(CUBE_ID, &window_id, "run-a", WindowRevision::new(1).unwrap(), 1)
+        .claim_run(
+            CUBE_ID,
+            &window_id,
+            "run-a",
+            WindowRevision::new(1).unwrap(),
+            1,
+        )
         .await
         .unwrap();
     assert!(matches!(claim_a, ClaimResult::New(_)));
     store_a.record_append("run-a", 101).await.unwrap();
 
     let claim_b = store_b
-        .claim_run(CUBE_ID, &window_id, "run-b", WindowRevision::new(2).unwrap(), 1)
+        .claim_run(
+            CUBE_ID,
+            &window_id,
+            "run-b",
+            WindowRevision::new(2).unwrap(),
+            1,
+        )
         .await
         .unwrap();
     assert!(matches!(claim_b, ClaimResult::New(_)));
@@ -122,11 +134,25 @@ async fn two_same_window_writers_produce_exactly_one_published_winner() {
     let result_b = result_b.unwrap();
 
     let winner_revision = match (&result_a, &result_b) {
-        (Ok(publication), Err(CubismIcebergError::StaleRevision { expected: None, actual: Some(actual), .. })) => {
+        (
+            Ok(publication),
+            Err(CubismIcebergError::StaleRevision {
+                expected: None,
+                actual: Some(actual),
+                ..
+            }),
+        ) => {
             assert_eq!(*actual, publication.revision.get());
             publication.revision
         }
-        (Err(CubismIcebergError::StaleRevision { expected: None, actual: Some(actual), .. }), Ok(publication)) => {
+        (
+            Err(CubismIcebergError::StaleRevision {
+                expected: None,
+                actual: Some(actual),
+                ..
+            }),
+            Ok(publication),
+        ) => {
             assert_eq!(*actual, publication.revision.get());
             publication.revision
         }
@@ -148,7 +174,11 @@ async fn two_same_window_writers_produce_exactly_one_published_winner() {
     // The loser's own run must still be `Appended`, never silently marked
     // `Published` -- `publish` only flips that status on the branch that
     // actually wins the CAS.
-    let loser_run_id = if winner_revision.get() == 1 { "run-b" } else { "run-a" };
+    let loser_run_id = if winner_revision.get() == 1 {
+        "run-b"
+    } else {
+        "run-a"
+    };
     let loser_state = store_c.run_state(loser_run_id).await.unwrap().unwrap();
     assert!(
         matches!(loser_state, RunState::Appended { .. }),
@@ -171,10 +201,19 @@ async fn concurrent_publish_of_the_same_run_from_two_handles_is_idempotent() {
 
     for store in [&store_a, &store_b] {
         let claim = store
-            .claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1)
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-1",
+                WindowRevision::new(1).unwrap(),
+                1,
+            )
             .await
             .unwrap();
-        assert!(matches!(claim, ClaimResult::New(_) | ClaimResult::Existing(_)));
+        assert!(matches!(
+            claim,
+            ClaimResult::New(_) | ClaimResult::Existing(_)
+        ));
         store.record_append("run-1", 101).await.unwrap();
     }
 
@@ -199,7 +238,10 @@ async fn concurrent_publish_of_the_same_run_from_two_handles_is_idempotent() {
     let (result_a, result_b) = tokio::join!(task_a, task_b);
     let publication_a = result_a.unwrap().unwrap();
     let publication_b = result_b.unwrap().unwrap();
-    assert_eq!(publication_a, publication_b, "both handles must observe the same published revision, not a race");
+    assert_eq!(
+        publication_a, publication_b,
+        "both handles must observe the same published revision, not a race"
+    );
 }
 
 /// Phase 4's "disjoint windows can commit concurrently"
@@ -249,14 +291,26 @@ async fn disjoint_windows_can_commit_concurrently_without_conflicting() {
     let store_b = Arc::new(PublicationStore::sqlite(&control_db).await.unwrap());
 
     let claim_a = store_a
-        .claim_run(CUBE_ID, &window_a, "run-a", WindowRevision::new(1).unwrap(), 1)
+        .claim_run(
+            CUBE_ID,
+            &window_a,
+            "run-a",
+            WindowRevision::new(1).unwrap(),
+            1,
+        )
         .await
         .unwrap();
     assert!(matches!(claim_a, ClaimResult::New(_)));
     store_a.record_append("run-a", 201).await.unwrap();
 
     let claim_b = store_b
-        .claim_run(CUBE_ID, &window_b, "run-b", WindowRevision::new(1).unwrap(), 1)
+        .claim_run(
+            CUBE_ID,
+            &window_b,
+            "run-b",
+            WindowRevision::new(1).unwrap(),
+            1,
+        )
         .await
         .unwrap();
     assert!(matches!(claim_b, ClaimResult::New(_)));
@@ -281,8 +335,12 @@ async fn disjoint_windows_can_commit_concurrently_without_conflicting() {
     };
 
     let (result_a, result_b) = tokio::join!(task_a, task_b);
-    let publication_a = result_a.unwrap().expect("window A's own publish must not be rejected by window B's activity");
-    let publication_b = result_b.unwrap().expect("window B's own publish must not be rejected by window A's activity");
+    let publication_a = result_a
+        .unwrap()
+        .expect("window A's own publish must not be rejected by window B's activity");
+    let publication_b = result_b
+        .unwrap()
+        .expect("window B's own publish must not be rejected by window A's activity");
     assert_eq!(publication_a.run_id, "run-a");
     assert_eq!(publication_b.run_id, "run-b");
 
@@ -316,21 +374,35 @@ async fn publish_waits_for_a_concurrently_held_write_lock_then_succeeds() {
 
     let store = Arc::new(PublicationStore::sqlite(&control_db).await.unwrap());
     store
-        .claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1)
+        .claim_run(
+            CUBE_ID,
+            &window_id,
+            "run-1",
+            WindowRevision::new(1).unwrap(),
+            1,
+        )
         .await
         .unwrap();
     store.record_append("run-1", 101).await.unwrap();
 
     let mut holder = SqliteConnection::connect_with(
-        &SqliteConnectOptions::new().filename(&control_db).busy_timeout(std::time::Duration::from_secs(5)),
+        &SqliteConnectOptions::new()
+            .filename(&control_db)
+            .busy_timeout(std::time::Duration::from_secs(5)),
     )
     .await
     .unwrap();
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut holder).await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut holder)
+        .await
+        .unwrap();
     // Any write against the shared database file is enough to hold the
     // RESERVED lock -- this table has nothing to do with the control store's
     // own schema.
-    sqlx::query("CREATE TABLE lock_probe (id INTEGER)").execute(&mut holder).await.unwrap();
+    sqlx::query("CREATE TABLE lock_probe (id INTEGER)")
+        .execute(&mut holder)
+        .await
+        .unwrap();
 
     let publish_task = {
         let store = Arc::clone(&store);
@@ -344,7 +416,10 @@ async fn publish_waits_for_a_concurrently_held_write_lock_then_succeeds() {
     sqlx::query("COMMIT").execute(&mut holder).await.unwrap();
 
     let result = publish_task.await.unwrap();
-    assert!(result.is_ok(), "publish must succeed once the concurrent holder releases the lock: {result:?}");
+    assert!(
+        result.is_ok(),
+        "publish must succeed once the concurrent holder releases the lock: {result:?}"
+    );
 }
 
 /// Forces `with_immediate_tx`'s Rust-level retry loop
@@ -444,21 +519,35 @@ async fn retry_loop_resolves_a_write_lock_held_past_busy_timeout() {
 
     let store = Arc::new(PublicationStore::sqlite(&control_db).await.unwrap());
     store
-        .claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1)
+        .claim_run(
+            CUBE_ID,
+            &window_id,
+            "run-1",
+            WindowRevision::new(1).unwrap(),
+            1,
+        )
         .await
         .unwrap();
     store.record_append("run-1", 101).await.unwrap();
 
     let mut holder = SqliteConnection::connect_with(
-        &SqliteConnectOptions::new().filename(&control_db).busy_timeout(std::time::Duration::from_secs(5)),
+        &SqliteConnectOptions::new()
+            .filename(&control_db)
+            .busy_timeout(std::time::Duration::from_secs(5)),
     )
     .await
     .unwrap();
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut holder).await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut holder)
+        .await
+        .unwrap();
     // Any write against the shared database file is enough to hold the
     // RESERVED lock -- this table has nothing to do with the control store's
     // own schema.
-    sqlx::query("CREATE TABLE lock_probe (id INTEGER)").execute(&mut holder).await.unwrap();
+    sqlx::query("CREATE TABLE lock_probe (id INTEGER)")
+        .execute(&mut holder)
+        .await
+        .unwrap();
 
     let publish_task = {
         let store = Arc::clone(&store);
@@ -483,7 +572,10 @@ async fn retry_loop_resolves_a_write_lock_held_past_busy_timeout() {
 
     let (result, publish_elapsed) = publish_task.await.unwrap();
 
-    assert!(result.is_ok(), "publish must succeed once the concurrent holder releases the lock: {result:?}");
+    assert!(
+        result.is_ok(),
+        "publish must succeed once the concurrent holder releases the lock: {result:?}"
+    );
     assert!(
         publish_elapsed > std::time::Duration::from_secs(6),
         "publish itself took only {publish_elapsed:?} -- at or before busy_timeout's 5s give-up point -- \

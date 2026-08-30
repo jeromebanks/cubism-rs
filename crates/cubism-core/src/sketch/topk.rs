@@ -32,7 +32,10 @@ pub struct TopK {
 impl TopK {
     pub fn new(capacity: u32) -> Self {
         assert!(capacity >= 1, "top-k capacity must be at least 1");
-        TopK { capacity, entries: HashMap::new() }
+        TopK {
+            capacity,
+            entries: HashMap::new(),
+        }
     }
 
     pub fn capacity(&self) -> u32 {
@@ -89,8 +92,7 @@ impl TopK {
     /// All tracked entries, best-first (score desc, key asc as tiebreak —
     /// the deterministic order used everywhere, including serialization).
     fn ranked(&self) -> Vec<(String, f64)> {
-        let mut v: Vec<(String, f64)> =
-            self.entries.iter().map(|(k, s)| (k.clone(), *s)).collect();
+        let mut v: Vec<(String, f64)> = self.entries.iter().map(|(k, s)| (k.clone(), *s)).collect();
         v.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         v
     }
@@ -151,8 +153,8 @@ impl TopK {
             if cursor.len() < 10 + len {
                 return Err(err("truncated key"));
             }
-            let key = std::str::from_utf8(&cursor[10..10 + len])
-                .map_err(|_| err("key is not utf8"))?;
+            let key =
+                std::str::from_utf8(&cursor[10..10 + len]).map_err(|_| err("key is not utf8"))?;
             entries.insert(key.to_string(), score);
             cursor = &cursor[10 + len..];
         }

@@ -30,12 +30,12 @@
 use std::sync::Arc;
 
 use arrow_array::{Array, FixedSizeBinaryArray, RecordBatch, TimestampMicrosecondArray};
-use cubism_core::temporal::{EventTime, TimeRange, WindowId, WindowRevision};
 use cubism_core::CubeSpec;
+use cubism_core::temporal::{EventTime, TimeRange, WindowId, WindowRevision};
 use cubism_correct::{CorrectError, CorrectionEngine, CorrectionOutcome};
 use cubism_datafusion::datafusion::prelude::{CsvReadOptions, SessionContext};
 use cubism_datafusion::temporal_build::{
-    build_temporal, temporal_state_schema, NullEventTimePolicy,
+    NullEventTimePolicy, build_temporal, temporal_state_schema,
 };
 use cubism_iceberg::{
     AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, PublicationStore,
@@ -98,7 +98,9 @@ fn write_csv(dir: &TempDir, name: &str, body: &str) -> String {
 
 fn at(text: &str) -> EventTime {
     EventTime::from_unix_micros(
-        chrono::DateTime::parse_from_rfc3339(text).unwrap().timestamp_micros(),
+        chrono::DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .timestamp_micros(),
     )
 }
 
@@ -113,11 +115,20 @@ struct Warehouse {
 impl Warehouse {
     async fn new(spec: &CubeSpec) -> Self {
         let dir = TempDir::new().unwrap();
-        let config = CatalogConfig::Memory { warehouse: dir.path().to_path_buf() };
+        let config = CatalogConfig::Memory {
+            warehouse: dir.path().to_path_buf(),
+        };
         let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
         let schema = temporal_state_schema(spec).unwrap();
-        let table = TemporalTable::create(catalog.as_ref(), &spec.name, &schema).await.unwrap();
-        Self { _dir: dir, catalog, table, publications: PublicationStore::in_memory() }
+        let table = TemporalTable::create(catalog.as_ref(), &spec.name, &schema)
+            .await
+            .unwrap();
+        Self {
+            _dir: dir,
+            catalog,
+            table,
+            publications: PublicationStore::in_memory(),
+        }
     }
 
     /// Build `window_id` from `source` and publish it as revision 1 through
@@ -147,7 +158,13 @@ impl Warehouse {
         let revision = WindowRevision::new(1).unwrap();
         let claim = self
             .publications
-            .claim_run(&self.table.cube_id, window_id, run_id, revision, expected_rows)
+            .claim_run(
+                &self.table.cube_id,
+                window_id,
+                run_id,
+                revision,
+                expected_rows,
+            )
             .await
             .unwrap();
         assert!(matches!(claim, ClaimResult::New(_)));
@@ -164,7 +181,10 @@ impl Warehouse {
         )
         .await
         .unwrap();
-        self.publications.record_append(run_id, result.snapshot_id).await.unwrap();
+        self.publications
+            .record_append(run_id, result.snapshot_id)
+            .await
+            .unwrap();
         self.publications.publish(run_id, None).await.unwrap();
     }
 
@@ -246,8 +266,11 @@ async fn a_late_event_rebuild_equals_a_clean_rebuild_from_the_corrected_source()
     let corrected_csv = write_csv(&dir, "corrected.csv", &format!("{BASE_ROWS}{LATE_ROWS}"));
 
     let day2 = WindowId::new("2026-04-07").unwrap();
-    let day2_range =
-        TimeRange::new(at("2026-04-07T00:00:00+00:00"), at("2026-04-08T00:00:00+00:00")).unwrap();
+    let day2_range = TimeRange::new(
+        at("2026-04-07T00:00:00+00:00"),
+        at("2026-04-08T00:00:00+00:00"),
+    )
+    .unwrap();
 
     // ---- Path A: publish the partial window, then correct it -----------
     let ctx_a = SessionContext::new();
@@ -269,7 +292,11 @@ async fn a_late_event_rebuild_equals_a_clean_rebuild_from_the_corrected_source()
         &ctx_a,
         &spec,
         "corrected",
-        TimeRange::new(at("2026-04-07T09:00:00+00:00"), at("2026-04-07T11:00:01+00:00")).unwrap(),
+        TimeRange::new(
+            at("2026-04-07T09:00:00+00:00"),
+            at("2026-04-07T11:00:01+00:00"),
+        )
+        .unwrap(),
         a.catalog.as_ref(),
         &a.table,
         &a.publications,
@@ -282,7 +309,11 @@ async fn a_late_event_rebuild_equals_a_clean_rebuild_from_the_corrected_source()
     let corrected = &outcome.corrected[0];
     assert_eq!(corrected.window_id.as_str(), "2026-04-07");
     assert_eq!(corrected.previous_revision.get(), 1);
-    assert_eq!(corrected.revision.get(), 2, "the correction bumped the revision");
+    assert_eq!(
+        corrected.revision.get(),
+        2,
+        "the correction bumped the revision"
+    );
     assert!(outcome.skipped_unpublished.is_empty());
 
     // ---- Path B: a clean, single-revision build from corrected source --
@@ -299,7 +330,10 @@ async fn a_late_event_rebuild_equals_a_clean_rebuild_from_the_corrected_source()
     let corrected_rows = domain_rows(&a.read(&day2).await);
     let clean_rows = domain_rows(&b.read(&day2).await);
 
-    assert!(!clean_rows.is_empty(), "the clean build produced rows to compare");
+    assert!(
+        !clean_rows.is_empty(),
+        "the clean build produced rows to compare"
+    );
     assert_eq!(
         corrected_rows, clean_rows,
         "a late-event rebuild must equal a clean rebuild from the corrected source"
@@ -351,8 +385,16 @@ async fn a_change_spanning_days_corrects_each_published_window_and_reports_unpub
 
     // Publish only two of the three days the range below spans.
     for (day, start, end) in [
-        ("2026-04-06", "2026-04-06T00:00:00+00:00", "2026-04-07T00:00:00+00:00"),
-        ("2026-04-08", "2026-04-08T00:00:00+00:00", "2026-04-09T00:00:00+00:00"),
+        (
+            "2026-04-06",
+            "2026-04-06T00:00:00+00:00",
+            "2026-04-07T00:00:00+00:00",
+        ),
+        (
+            "2026-04-08",
+            "2026-04-08T00:00:00+00:00",
+            "2026-04-09T00:00:00+00:00",
+        ),
     ] {
         let window = WindowId::new(day).unwrap();
         w.build_and_publish_initial(
@@ -370,7 +412,11 @@ async fn a_change_spanning_days_corrects_each_published_window_and_reports_unpub
         &ctx,
         &spec,
         "corrected",
-        TimeRange::new(at("2026-04-06T12:00:00+00:00"), at("2026-04-08T12:00:00+00:00")).unwrap(),
+        TimeRange::new(
+            at("2026-04-06T12:00:00+00:00"),
+            at("2026-04-08T12:00:00+00:00"),
+        )
+        .unwrap(),
         w.catalog.as_ref(),
         &w.table,
         &w.publications,
@@ -380,7 +426,11 @@ async fn a_change_spanning_days_corrects_each_published_window_and_reports_unpub
     .unwrap();
 
     assert_eq!(
-        outcome.corrected.iter().map(|c| c.window_id.as_str()).collect::<Vec<_>>(),
+        outcome
+            .corrected
+            .iter()
+            .map(|c| c.window_id.as_str())
+            .collect::<Vec<_>>(),
         ["2026-04-06", "2026-04-08"],
         "every published window in the range is corrected, in time order"
     );
@@ -388,7 +438,11 @@ async fn a_change_spanning_days_corrects_each_published_window_and_reports_unpub
     // 2026-04-07 was never published: a correction revises an existing
     // window, it must not conjure one into being.
     assert_eq!(
-        outcome.skipped_unpublished.iter().map(WindowId::as_str).collect::<Vec<_>>(),
+        outcome
+            .skipped_unpublished
+            .iter()
+            .map(WindowId::as_str)
+            .collect::<Vec<_>>(),
         ["2026-04-07"]
     );
     assert!(
@@ -431,8 +485,16 @@ async fn a_failure_part_way_through_reports_the_windows_that_already_landed() {
 
     // 2026-04-06 and 2026-04-08 published; 2026-04-07 deliberately not.
     for (day, start, end) in [
-        ("2026-04-06", "2026-04-06T00:00:00+00:00", "2026-04-07T00:00:00+00:00"),
-        ("2026-04-08", "2026-04-08T00:00:00+00:00", "2026-04-09T00:00:00+00:00"),
+        (
+            "2026-04-06",
+            "2026-04-06T00:00:00+00:00",
+            "2026-04-07T00:00:00+00:00",
+        ),
+        (
+            "2026-04-08",
+            "2026-04-08T00:00:00+00:00",
+            "2026-04-09T00:00:00+00:00",
+        ),
     ] {
         let window = WindowId::new(day).unwrap();
         w.build_and_publish_initial(
@@ -463,7 +525,11 @@ async fn a_failure_part_way_through_reports_the_windows_that_already_landed() {
         &ctx,
         &spec,
         "corrected",
-        TimeRange::new(at("2026-04-06T12:00:00+00:00"), at("2026-04-08T12:00:00+00:00")).unwrap(),
+        TimeRange::new(
+            at("2026-04-06T12:00:00+00:00"),
+            at("2026-04-08T12:00:00+00:00"),
+        )
+        .unwrap(),
         w.catalog.as_ref(),
         &w.table,
         &w.publications,
@@ -472,19 +538,30 @@ async fn a_failure_part_way_through_reports_the_windows_that_already_landed() {
     .await
     .expect_err("the poisoned second window must fail the run");
 
-    let CorrectError::Partial { corrected, skipped_unpublished, source } = err else {
+    let CorrectError::Partial {
+        corrected,
+        skipped_unpublished,
+        source,
+    } = err
+    else {
         panic!("a mid-run failure must surface as CorrectError::Partial, got: {err:?}");
     };
 
     // The prefix is REPORTED...
     assert_eq!(
-        corrected.iter().map(|c| c.window_id.as_str()).collect::<Vec<_>>(),
+        corrected
+            .iter()
+            .map(|c| c.window_id.as_str())
+            .collect::<Vec<_>>(),
         ["2026-04-06"],
         "the window corrected before the failure must travel out with the error"
     );
     assert_eq!(corrected[0].revision.get(), 2);
     assert_eq!(
-        skipped_unpublished.iter().map(WindowId::as_str).collect::<Vec<_>>(),
+        skipped_unpublished
+            .iter()
+            .map(WindowId::as_str)
+            .collect::<Vec<_>>(),
         ["2026-04-07"],
         "never-published windows are still reported on the failure path"
     );
@@ -506,7 +583,12 @@ async fn a_failure_part_way_through_reports_the_windows_that_already_landed() {
         "the corrected prefix really was published"
     );
     assert_eq!(
-        w.publications.current(&w.table.cube_id, &poisoned).await.unwrap().unwrap().get(),
+        w.publications
+            .current(&w.table.cube_id, &poisoned)
+            .await
+            .unwrap()
+            .unwrap()
+            .get(),
         1,
         "the failed window was left at its original revision"
     );

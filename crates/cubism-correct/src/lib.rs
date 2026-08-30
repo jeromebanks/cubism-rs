@@ -24,8 +24,8 @@
 pub mod engine;
 pub mod windows;
 
-pub use engine::{CorrectionOutcome, CorrectionEngine, WindowCorrection};
-pub use windows::{affected_windows, window_id_for, AffectedWindow};
+pub use engine::{CorrectionEngine, CorrectionOutcome, WindowCorrection};
+pub use windows::{AffectedWindow, affected_windows, window_id_for};
 
 /// This crate's error type. Deliberately keeps the two underlying failure
 /// domains distinguishable rather than flattening them to strings: a
@@ -65,6 +65,8 @@ pub enum CorrectError {
     Rebuild(#[from] cubism_datafusion::datafusion::error::DataFusionError),
     #[error(transparent)]
     Persist(#[from] cubism_iceberg::CubismIcebergError),
-    #[error("window '{window_id}' has never been published; a correction revises an existing window, it does not create one")]
+    #[error(
+        "window '{window_id}' has never been published; a correction revises an existing window, it does not create one"
+    )]
     UnpublishedWindow { window_id: String },
 }

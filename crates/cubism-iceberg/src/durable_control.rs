@@ -109,7 +109,9 @@ use std::time::Duration;
 use cubism_core::temporal::{WindowId, WindowRevision};
 use futures::future::BoxFuture;
 use sqlx::Row;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqlitePool, SqlitePoolOptions, SqliteRow};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteConnection, SqlitePool, SqlitePoolOptions, SqliteRow,
+};
 
 use crate::control::{ClaimResult, Publication, RunState};
 use crate::error::{CubismIcebergError, Result};
@@ -139,7 +141,10 @@ impl SqliteStore {
         // behind one physical SQLite connection, so this handle never
         // races itself; a second handle/process still arbitrates through
         // SQLite's own file locking (see the module doc comment).
-        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS control_runs (
@@ -191,9 +196,11 @@ impl SqliteStore {
                 .await?;
         }
         if !sqlite_column_exists(&pool, "control_publications", "generation").await? {
-            sqlx::query("ALTER TABLE control_publications ADD COLUMN generation INTEGER NOT NULL DEFAULT 0")
-                .execute(&pool)
-                .await?;
+            sqlx::query(
+                "ALTER TABLE control_publications ADD COLUMN generation INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(&pool)
+            .await?;
         }
 
         Ok(Self { pool })
@@ -278,7 +285,11 @@ impl SqliteStore {
         .await
     }
 
-    pub async fn record_append(&self, run_id: &str, aggregate_snapshot_id: i64) -> Result<RunState> {
+    pub async fn record_append(
+        &self,
+        run_id: &str,
+        aggregate_snapshot_id: i64,
+    ) -> Result<RunState> {
         let run_id = run_id.to_string();
 
         self.with_immediate_tx(move |conn| {
@@ -305,12 +316,14 @@ impl SqliteStore {
                 }
 
                 match &state {
-                    RunState::Appended { aggregate_snapshot_id: existing, .. }
-                    | RunState::Published { aggregate_snapshot_id: existing, .. }
-                        if *existing == aggregate_snapshot_id =>
-                    {
-                        Ok(state)
+                    RunState::Appended {
+                        aggregate_snapshot_id: existing,
+                        ..
                     }
+                    | RunState::Published {
+                        aggregate_snapshot_id: existing,
+                        ..
+                    } if *existing == aggregate_snapshot_id => Ok(state),
                     other => Err(CubismIcebergError::RunConflict {
                         run_id,
                         window_id: state_window_key(other).1,
@@ -323,7 +336,11 @@ impl SqliteStore {
         .await
     }
 
-    pub async fn publish(&self, run_id: &str, expected_current: Option<WindowRevision>) -> Result<Publication> {
+    pub async fn publish(
+        &self,
+        run_id: &str,
+        expected_current: Option<WindowRevision>,
+    ) -> Result<Publication> {
         let run_id = run_id.to_string();
 
         self.with_immediate_tx(move |conn| {
@@ -416,13 +433,24 @@ impl SqliteStore {
         .await
     }
 
-    pub async fn current(&self, cube_id: &str, window_id: &WindowId) -> Result<Option<WindowRevision>> {
-        let row = sqlx::query("SELECT revision FROM control_publications WHERE cube_id = ? AND window_id = ?")
-            .bind(cube_id)
-            .bind(window_id.as_str())
-            .fetch_optional(&self.pool)
-            .await?;
-        row.map(|row| Ok(WindowRevision::new(row.try_get::<i64, _>("revision")? as u64)?)).transpose()
+    pub async fn current(
+        &self,
+        cube_id: &str,
+        window_id: &WindowId,
+    ) -> Result<Option<WindowRevision>> {
+        let row = sqlx::query(
+            "SELECT revision FROM control_publications WHERE cube_id = ? AND window_id = ?",
+        )
+        .bind(cube_id)
+        .bind(window_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(WindowRevision::new(
+                row.try_get::<i64, _>("revision")? as u64
+            )?)
+        })
+        .transpose()
     }
 
     pub async fn run_state(&self, run_id: &str) -> Result<Option<RunState>> {
@@ -440,12 +468,17 @@ impl SqliteStore {
     /// bumped by every changing publish — see
     /// [`crate::control::PublicationStore::publication_generation`]).
     pub async fn publication_generation(&self, cube_id: &str, window_id: &WindowId) -> Result<u64> {
-        let row = sqlx::query("SELECT generation FROM control_publications WHERE cube_id = ? AND window_id = ?")
-            .bind(cube_id)
-            .bind(window_id.as_str())
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|row| row.try_get::<i64, _>("generation")).transpose()?.unwrap_or(0) as u64)
+        let row = sqlx::query(
+            "SELECT generation FROM control_publications WHERE cube_id = ? AND window_id = ?",
+        )
+        .bind(cube_id)
+        .bind(window_id.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row
+            .map(|row| row.try_get::<i64, _>("generation"))
+            .transpose()?
+            .unwrap_or(0) as u64)
     }
 
     /// The window generation a run observed at its first-ever claim.
@@ -455,8 +488,10 @@ impl SqliteStore {
     /// and fall through unprotected, not as a refusal (refusing would
     /// permanently break crash recovery across an upgrade).
     pub async fn run_observed_generation(&self, run_id: &str) -> Result<Option<u64>> {
-        let row =
-            sqlx::query("SELECT observed_generation FROM control_runs WHERE run_id = ?").bind(run_id).fetch_optional(&self.pool).await?;
+        let row = sqlx::query("SELECT observed_generation FROM control_runs WHERE run_id = ?")
+            .bind(run_id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row
             .map(|row| row.try_get::<Option<i64>, _>("observed_generation"))
             .transpose()?
@@ -559,7 +594,11 @@ async fn sqlite_column_exists(pool: &SqlitePool, table: &str, column: &str) -> R
     let rows = sqlx::query(&format!("SELECT name FROM pragma_table_info('{table}')"))
         .fetch_all(pool)
         .await?;
-    Ok(rows.iter().any(|row| row.try_get::<String, _>("name").map(|name| name == column).unwrap_or(false)))
+    Ok(rows.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|name| name == column)
+            .unwrap_or(false)
+    }))
 }
 
 async fn fetch_run_row(conn: &mut SqliteConnection, run_id: &str) -> Result<Option<SqliteRow>> {
@@ -587,7 +626,11 @@ fn row_to_run_state(row: &SqliteRow) -> Result<RunState> {
     let corrupt = |detail: &str| CubismIcebergError::CorruptControlStore(detail.to_string());
 
     Ok(match status.as_str() {
-        "claimed" => RunState::Claimed { window_key, revision, expected_rows },
+        "claimed" => RunState::Claimed {
+            window_key,
+            revision,
+            expected_rows,
+        },
         "appended" => RunState::Appended {
             window_key,
             revision,

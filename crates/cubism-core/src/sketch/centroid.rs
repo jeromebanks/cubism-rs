@@ -27,7 +27,10 @@ impl Default for Centroid {
 
 impl Centroid {
     pub fn new() -> Self {
-        Centroid { count: 0, sums: Vec::new() }
+        Centroid {
+            count: 0,
+            sums: Vec::new(),
+        }
     }
 
     pub fn count(&self) -> u64 {
@@ -78,7 +81,12 @@ impl Centroid {
         }
         Ok(Centroid {
             count: self.count + other.count,
-            sums: self.sums.iter().zip(&other.sums).map(|(a, b)| a + b).collect(),
+            sums: self
+                .sums
+                .iter()
+                .zip(&other.sums)
+                .map(|(a, b)| a + b)
+                .collect(),
         })
     }
 

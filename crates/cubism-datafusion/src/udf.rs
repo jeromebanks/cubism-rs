@@ -9,12 +9,12 @@
 //! `cubism_xunit_str(key) -> Utf8` decodes a binary key to the canonical
 //! string form at the present boundary.
 
-use cubism_core::encoding::{decode_xunit, encode_xunit, XUnitDictionary};
+use cubism_core::encoding::{XUnitDictionary, decode_xunit, encode_xunit};
 use cubism_core::lattice::generate_xunits;
 use cubism_core::{CubeSpec, FilterRule};
 use datafusion::arrow::array::{Array, AsArray, BinaryBuilder, ListBuilder, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field};
-use datafusion::common::{exec_err, Result};
+use datafusion::common::{Result, exec_err};
 use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
@@ -45,7 +45,13 @@ impl ExplodeShape {
             .sorted_dimensions()
             .iter()
             .map(|d| {
-                (d.name.clone(), d.effective_levels().iter().map(|l| l.name.clone()).collect())
+                (
+                    d.name.clone(),
+                    d.effective_levels()
+                        .iter()
+                        .map(|l| l.name.clone())
+                        .collect(),
+                )
             })
             .collect();
         ExplodeShape {
@@ -81,7 +87,11 @@ type KeyMemo = Arc<Mutex<Arc<HashMap<u64, MemoBucket>>>>;
 /// rows just take the compute path; results stay identical.
 const MEMO_MAX_BUCKETS: usize = 1 << 18;
 
-fn tuple_matches(stored: &[Option<String>], cols: &[&datafusion::arrow::array::StringArray], row: usize) -> bool {
+fn tuple_matches(
+    stored: &[Option<String>],
+    cols: &[&datafusion::arrow::array::StringArray],
+    row: usize,
+) -> bool {
     stored.iter().zip(cols).all(|(s, col)| match s {
         None => col.is_null(row),
         Some(v) => !col.is_null(row) && col.value(row) == v,
@@ -143,8 +153,11 @@ impl XUnitKeysUdf {
             per_dimension.push(ypaths);
         }
 
-        let xunits =
-            generate_xunits(&per_dimension, &self.shape.filter_rules, self.shape.include_global);
+        let xunits = generate_xunits(
+            &per_dimension,
+            &self.shape.filter_rules,
+            self.shape.include_global,
+        );
         let keys = xunits.iter().map(|x| encode_xunit(x, dict)).collect();
         if dict.len() > self.shape.max_dictionary_entries {
             return exec_err!(
@@ -171,7 +184,11 @@ impl ScalarUDFImpl for XUnitKeysUdf {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        Ok(DataType::List(Arc::new(Field::new("item", DataType::Binary, true))))
+        Ok(DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Binary,
+            true,
+        ))))
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
@@ -231,7 +248,10 @@ impl ScalarUDFImpl for XUnitKeysUdf {
                             .iter()
                             .map(|c| (!c.is_null(row)).then(|| c.value(row).to_string()))
                             .collect();
-                        batch_misses.entry(memo_key).or_default().push((tuple, Arc::clone(&keys)));
+                        batch_misses
+                            .entry(memo_key)
+                            .or_default()
+                            .push((tuple, Arc::clone(&keys)));
                     }
                     keys
                 }

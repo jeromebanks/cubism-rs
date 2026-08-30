@@ -27,7 +27,10 @@ pub struct ExemplarSample {
 impl ExemplarSample {
     pub fn new(capacity: u32) -> Self {
         assert!(capacity >= 1, "sample capacity must be at least 1");
-        ExemplarSample { capacity, entries: Vec::new() }
+        ExemplarSample {
+            capacity,
+            entries: Vec::new(),
+        }
     }
 
     pub fn capacity(&self) -> u32 {
@@ -85,7 +88,10 @@ impl ExemplarSample {
                 (None, None) => break,
             }
         }
-        ExemplarSample { capacity, entries: merged }
+        ExemplarSample {
+            capacity,
+            entries: merged,
+        }
     }
 
     /// The sampled values (hash order — effectively random order).
@@ -96,7 +102,9 @@ impl ExemplarSample {
     /// Present as a JSON array of the sampled values.
     pub fn to_json(&self) -> String {
         serde_json::Value::Array(
-            self.values().map(|v| serde_json::Value::String(v.to_string())).collect(),
+            self.values()
+                .map(|v| serde_json::Value::String(v.to_string()))
+                .collect(),
         )
         .to_string()
     }
@@ -139,17 +147,15 @@ impl ExemplarSample {
             if cursor.len() < 10 + len {
                 return Err(err("truncated value"));
             }
-            let value = std::str::from_utf8(&cursor[10..10 + len])
-                .map_err(|_| err("value is not utf8"))?;
+            let value =
+                std::str::from_utf8(&cursor[10..10 + len]).map_err(|_| err("value is not utf8"))?;
             entries.push((hash, value.to_string()));
             cursor = &cursor[10 + len..];
         }
         if !cursor.is_empty() {
             return Err(err("trailing bytes"));
         }
-        if !entries.is_sorted_by_key(|(h, _)| *h)
-            || entries.windows(2).any(|w| w[0].0 == w[1].0)
-        {
+        if !entries.is_sorted_by_key(|(h, _)| *h) || entries.windows(2).any(|w| w[0].0 == w[1].0) {
             return Err(err("entries are not sorted-distinct by hash"));
         }
         Ok(ExemplarSample { capacity, entries })

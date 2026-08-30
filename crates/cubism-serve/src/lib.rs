@@ -26,9 +26,9 @@ pub mod store;
 pub use series::{SeriesState, series_router};
 pub use store::{CubeStore, StoreError};
 
+use axum::Router;
 use axum::response::Html;
 use axum::routing::get;
-use axum::Router;
 use std::sync::Arc;
 
 const DASHBOARD: &str = include_str!("../assets/index.html");
@@ -64,7 +64,11 @@ async fn serve_inner(
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     println!(
         "serving {cells} cells at http://127.0.0.1:{port}{}",
-        if has_series { " (with /api/series)" } else { "" }
+        if has_series {
+            " (with /api/series)"
+        } else {
+            ""
+        }
     );
     axum::serve(listener, app).await
 }
@@ -75,6 +79,10 @@ pub async fn serve(store: CubeStore, port: u16) -> std::io::Result<()> {
 }
 
 /// Same as [`serve`], plus `/api/series` backed by `series`.
-pub async fn serve_with_series(store: CubeStore, series: SeriesState, port: u16) -> std::io::Result<()> {
+pub async fn serve_with_series(
+    store: CubeStore,
+    series: SeriesState,
+    port: u16,
+) -> std::io::Result<()> {
     serve_inner(Arc::new(store), Some(Arc::new(series)), port).await
 }

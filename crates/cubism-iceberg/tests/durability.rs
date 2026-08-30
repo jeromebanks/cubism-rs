@@ -15,16 +15,18 @@
 
 use std::sync::Arc;
 
-use arrow_array::{FixedSizeBinaryArray, Float64Array, Int64Array, RecordBatch, TimestampMicrosecondArray};
+use arrow_array::{
+    FixedSizeBinaryArray, Float64Array, Int64Array, RecordBatch, TimestampMicrosecondArray,
+};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use chrono::DateTime;
 use cubism_core::AggKind;
 use cubism_core::temporal::{WindowId, WindowRevision};
 use cubism_iceberg::table::current_snapshot_id;
 use cubism_iceberg::{
-    AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult, CorrectionCoordinator,
-    CorrectionRequest, CubismIcebergError, PublicationStore, ReconciliationRecord, RevisionStatus, RunInspection,
-    RunState, TemporalTable,
+    AggregateReader, AggregateWriter, AppendWindow, CatalogConfig, ClaimResult,
+    CorrectionCoordinator, CorrectionRequest, CubismIcebergError, PublicationStore,
+    ReconciliationRecord, RevisionStatus, RunInspection, RunState, TemporalTable,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
@@ -32,7 +34,9 @@ use tempfile::TempDir;
 const CUBE_ID: &str = "web_analytics";
 
 fn micros(timestamp: &str) -> i64 {
-    DateTime::parse_from_rfc3339(timestamp).unwrap().timestamp_micros()
+    DateTime::parse_from_rfc3339(timestamp)
+        .unwrap()
+        .timestamp_micros()
 }
 
 fn xunit_id(tag: u8) -> [u8; 32] {
@@ -55,14 +59,20 @@ fn sample_states_schema() -> ArrowSchema {
 }
 
 fn states_batch(rows: &[(&str, [u8; 32], i64, f64)]) -> RecordBatch {
-    let bucket_start = TimestampMicrosecondArray::from_iter_values(rows.iter().map(|(t, _, _, _)| micros(t)))
-        .with_timezone("+00:00");
+    let bucket_start =
+        TimestampMicrosecondArray::from_iter_values(rows.iter().map(|(t, _, _, _)| micros(t)))
+            .with_timezone("+00:00");
     let xunit_id = FixedSizeBinaryArray::try_from_iter(rows.iter().map(|(_, x, _, _)| *x)).unwrap();
     let count = Int64Array::from_iter_values(rows.iter().map(|(_, _, c, _)| *c));
     let sum = Float64Array::from_iter_values(rows.iter().map(|(_, _, _, s)| *s));
     RecordBatch::try_new(
         Arc::new(sample_states_schema()),
-        vec![Arc::new(bucket_start), Arc::new(xunit_id), Arc::new(count), Arc::new(sum)],
+        vec![
+            Arc::new(bucket_start),
+            Arc::new(xunit_id),
+            Arc::new(count),
+            Arc::new(sum),
+        ],
     )
     .unwrap()
 }
@@ -96,7 +106,9 @@ async fn sqlite_catalog_tables_are_visible_from_a_freshly_opened_handle() {
     // so this really does release the only reference).
     {
         let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
-        TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+        TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
+            .await
+            .unwrap();
     }
 
     // Second handle, same paths, no shared state with the first: this is
@@ -115,7 +127,9 @@ async fn sqlite_catalog_tables_are_visible_from_a_freshly_opened_handle() {
     // TemporalTable::create must also be idempotent from the fresh handle
     // (its own `table_exists` checks must see the first handle's tables,
     // not attempt — and fail — to recreate them).
-    TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+    TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -132,7 +146,12 @@ async fn an_append_committed_by_one_handle_is_readable_after_publishing_from_a_s
 
     let window_id = WindowId::new("2026-08-12").unwrap();
     let revision = WindowRevision::new(1).unwrap();
-    let states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 3, 9.0)])];
+    let states = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        3,
+        9.0,
+    )])];
     let registry = vec![registry_batch(&[(xunit_id(1), b"US/mobile")])];
 
     // First handle: create tables, claim, append. Deliberately does NOT
@@ -140,7 +159,9 @@ async fn an_append_committed_by_one_handle_is_readable_after_publishing_from_a_s
     // up the claim/append state and finishes the job.
     let snapshot_id = {
         let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
-        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
+            .await
+            .unwrap();
         let publications = PublicationStore::sqlite(&control_db).await.unwrap();
         let claim = publications
             .claim_run(CUBE_ID, &window_id, "run-1", revision, 3)
@@ -150,11 +171,20 @@ async fn an_append_committed_by_one_handle_is_readable_after_publishing_from_a_s
         let result = AggregateWriter::append_window(
             catalog.as_ref(),
             &table,
-            AppendWindow { window_id: &window_id, revision, run_id: "run-1", states: &states, registry: &registry },
+            AppendWindow {
+                window_id: &window_id,
+                revision,
+                run_id: "run-1",
+                states: &states,
+                registry: &registry,
+            },
         )
         .await
         .unwrap();
-        publications.record_append("run-1", result.snapshot_id).await.unwrap();
+        publications
+            .record_append("run-1", result.snapshot_id)
+            .await
+            .unwrap();
         result.snapshot_id
     };
 
@@ -162,24 +192,43 @@ async fn an_append_committed_by_one_handle_is_readable_after_publishing_from_a_s
     // sharing anything with the first. It reconciles the existing claim
     // (Existing(Appended)) instead of re-appending, then publishes.
     let catalog_b = cubism_iceberg::config::open_catalog(&config).await.unwrap();
-    let table_b = TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+    let table_b = TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema())
+        .await
+        .unwrap();
     let publications_b = PublicationStore::sqlite(&control_db).await.unwrap();
 
-    let reclaim = publications_b.claim_run(CUBE_ID, &window_id, "run-1", revision, 3).await.unwrap();
+    let reclaim = publications_b
+        .claim_run(CUBE_ID, &window_id, "run-1", revision, 3)
+        .await
+        .unwrap();
     let recovered_snapshot = match &reclaim {
-        ClaimResult::Existing(cubism_iceberg::RunState::Appended { aggregate_snapshot_id, .. }) => *aggregate_snapshot_id,
+        ClaimResult::Existing(cubism_iceberg::RunState::Appended {
+            aggregate_snapshot_id,
+            ..
+        }) => *aggregate_snapshot_id,
         other => panic!("expected Existing(Appended {{ .. }}) from a fresh handle, got {other:?}"),
     };
-    assert_eq!(recovered_snapshot, snapshot_id, "the recovered snapshot id must match what the first handle committed");
+    assert_eq!(
+        recovered_snapshot, snapshot_id,
+        "the recovered snapshot id must match what the first handle committed"
+    );
 
     let expected_current = publications_b.current(CUBE_ID, &window_id).await.unwrap();
     assert_eq!(expected_current, None, "not published yet");
-    publications_b.publish("run-1", expected_current).await.unwrap();
-
-    let visible = AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id)
+    publications_b
+        .publish("run-1", expected_current)
         .await
         .unwrap();
-    assert_eq!(total_rows(&visible), 1, "the first handle's append must be visible after the second handle publishes");
+
+    let visible =
+        AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id)
+            .await
+            .unwrap();
+    assert_eq!(
+        total_rows(&visible),
+        1,
+        "the first handle's append must be visible after the second handle publishes"
+    );
 }
 
 #[tokio::test]
@@ -190,7 +239,16 @@ async fn sqlite_publication_store_cas_survives_reopen_from_a_fresh_handle() {
 
     {
         let store = PublicationStore::sqlite(&control_db).await.unwrap();
-        store.claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1).await.unwrap();
+        store
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-1",
+                WindowRevision::new(1).unwrap(),
+                1,
+            )
+            .await
+            .unwrap();
         store.record_append("run-1", 101).await.unwrap();
         store.publish("run-1", None).await.unwrap();
     }
@@ -200,24 +258,52 @@ async fn sqlite_publication_store_cas_survives_reopen_from_a_fresh_handle() {
     // through SQLite, not through anything held in this process's memory.
     let store_b = PublicationStore::sqlite(&control_db).await.unwrap();
     let current = store_b.current(CUBE_ID, &window_id).await.unwrap();
-    assert_eq!(current, Some(WindowRevision::new(1).unwrap()), "publication from the dropped handle must be visible");
+    assert_eq!(
+        current,
+        Some(WindowRevision::new(1).unwrap()),
+        "publication from the dropped handle must be visible"
+    );
 
-    store_b.claim_run(CUBE_ID, &window_id, "run-2", WindowRevision::new(2).unwrap(), 1).await.unwrap();
+    store_b
+        .claim_run(
+            CUBE_ID,
+            &window_id,
+            "run-2",
+            WindowRevision::new(2).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
     store_b.record_append("run-2", 102).await.unwrap();
 
     // A real CAS: this must be rejected because the caller's belief about
     // the current revision (99) does not match what the fresh handle can
     // see (1) — not a hardcoded `None` that any first publish would accept.
-    let stale = store_b.publish("run-2", Some(WindowRevision::new(99).unwrap())).await;
-    assert!(matches!(stale, Err(CubismIcebergError::StaleRevision { expected: Some(99), actual: Some(1), .. })));
+    let stale = store_b
+        .publish("run-2", Some(WindowRevision::new(99).unwrap()))
+        .await;
+    assert!(matches!(
+        stale,
+        Err(CubismIcebergError::StaleRevision {
+            expected: Some(99),
+            actual: Some(1),
+            ..
+        })
+    ));
 
     store_b.publish("run-2", current).await.unwrap();
-    assert_eq!(store_b.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+    assert_eq!(
+        store_b.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(2).unwrap())
+    );
 
     // A third handle sees run-2's publication too, not just what handle B
     // did in its own memory.
     let store_c = PublicationStore::sqlite(&control_db).await.unwrap();
-    assert_eq!(store_c.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+    assert_eq!(
+        store_c.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(2).unwrap())
+    );
 }
 
 /// Roadmap Milestone 2 (`docs/TIMESERIES_ROADMAP.md`): a correction computed
@@ -252,13 +338,34 @@ async fn sqlite_correction_against_a_superseded_revision_is_rejected_then_succee
         // again. Both happen on a handle that is then dropped, so run-3
         // below cannot see either through anything but the database.
         let store = PublicationStore::sqlite(&control_db).await.unwrap();
-        store.claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1).await.unwrap();
+        store
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-1",
+                WindowRevision::new(1).unwrap(),
+                1,
+            )
+            .await
+            .unwrap();
         store.record_append("run-1", 101).await.unwrap();
         store.publish("run-1", None).await.unwrap();
 
-        store.claim_run(CUBE_ID, &window_id, "run-2", WindowRevision::new(2).unwrap(), 1).await.unwrap();
+        store
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-2",
+                WindowRevision::new(2).unwrap(),
+                1,
+            )
+            .await
+            .unwrap();
         store.record_append("run-2", 102).await.unwrap();
-        store.publish("run-2", Some(WindowRevision::new(1).unwrap())).await.unwrap();
+        store
+            .publish("run-2", Some(WindowRevision::new(1).unwrap()))
+            .await
+            .unwrap();
     }
 
     // run-3 is the correction, on a freshly-opened handle: it was computed
@@ -266,24 +373,51 @@ async fn sqlite_correction_against_a_superseded_revision_is_rejected_then_succee
     // a guessed-wrong value like the reopen test above uses, and not a
     // belief carried over in this process's memory from the block above.
     let store_b = PublicationStore::sqlite(&control_db).await.unwrap();
-    store_b.claim_run(CUBE_ID, &window_id, "run-3", WindowRevision::new(3).unwrap(), 1).await.unwrap();
+    store_b
+        .claim_run(
+            CUBE_ID,
+            &window_id,
+            "run-3",
+            WindowRevision::new(3).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
     store_b.record_append("run-3", 103).await.unwrap();
-    let stale = store_b.publish("run-3", Some(WindowRevision::new(1).unwrap())).await;
-    assert!(matches!(stale, Err(CubismIcebergError::StaleRevision { expected: Some(1), actual: Some(2), .. })));
+    let stale = store_b
+        .publish("run-3", Some(WindowRevision::new(1).unwrap()))
+        .await;
+    assert!(matches!(
+        stale,
+        Err(CubismIcebergError::StaleRevision {
+            expected: Some(1),
+            actual: Some(2),
+            ..
+        })
+    ));
     // The rejected correction must not have moved `current`.
-    assert_eq!(store_b.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+    assert_eq!(
+        store_b.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(2).unwrap())
+    );
 
     // Refresh-and-retry: the correction re-reads `current`, retries with the
     // refreshed expected revision, and succeeds — the protocol Milestone 4's
     // coordinator will need for a real correction run.
     let refreshed = store_b.current(CUBE_ID, &window_id).await.unwrap();
     store_b.publish("run-3", refreshed).await.unwrap();
-    assert_eq!(store_b.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(3).unwrap()));
+    assert_eq!(
+        store_b.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(3).unwrap())
+    );
 
     // A third, freshly-opened handle sees the corrected revision too, not
     // just handle B's in-memory belief about its own retry.
     let store_c = PublicationStore::sqlite(&control_db).await.unwrap();
-    assert_eq!(store_c.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(3).unwrap()));
+    assert_eq!(
+        store_c.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(3).unwrap())
+    );
 }
 
 /// Roadmap Milestone 5 (`docs/TIMESERIES_ROADMAP.md`): `ReconciliationRecord`
@@ -323,25 +457,42 @@ async fn sqlite_correction_against_a_superseded_revision_is_rejected_then_succee
 /// already proves it, against the in-memory backend; this test does not
 /// duplicate that coverage.
 #[tokio::test]
-async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a_published_run_after_reopen() {
+async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a_published_run_after_reopen()
+ {
     let warehouse = TempDir::new().unwrap();
     let catalog_dir = TempDir::new().unwrap();
     let catalog_db = catalog_dir.path().join("catalog.sqlite");
     let control_dir = TempDir::new().unwrap();
     let control_db = control_dir.path().join("control.sqlite");
-    let config = CatalogConfig::Sqlite { warehouse: warehouse.path().to_path_buf(), catalog_db: catalog_db.clone() };
+    let config = CatalogConfig::Sqlite {
+        warehouse: warehouse.path().to_path_buf(),
+        catalog_db: catalog_db.clone(),
+    };
     let window_id = WindowId::new("2026-08-12").unwrap();
 
     // An initial revision 1 is published directly (raw protocol) so the
     // correction below has something to replace.
-    let initial_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let initial_states = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        1,
+        1.0,
+    )])];
     let initial_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
     {
         let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
-        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
+            .await
+            .unwrap();
         let publications = PublicationStore::sqlite(&control_db).await.unwrap();
         let claim = publications
-            .claim_run(CUBE_ID, &window_id, "run-initial", WindowRevision::new(1).unwrap(), 1)
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-initial",
+                WindowRevision::new(1).unwrap(),
+                1,
+            )
             .await
             .unwrap();
         assert!(matches!(claim, ClaimResult::New(_)));
@@ -358,7 +509,10 @@ async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a
         )
         .await
         .unwrap();
-        publications.record_append("run-initial", result.snapshot_id).await.unwrap();
+        publications
+            .record_append("run-initial", result.snapshot_id)
+            .await
+            .unwrap();
         publications.publish("run-initial", None).await.unwrap();
     }
 
@@ -370,17 +524,28 @@ async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a
         ("2026-08-12T00:20:00Z", xunit_id(2), 2, 2.0),
     ])];
     let corrected_registry = vec![registry_batch(&[(xunit_id(1), b"a"), (xunit_id(2), b"b")])];
-    let expected_rows: u64 = corrected_states.iter().map(RecordBatch::num_rows).sum::<usize>() as u64;
+    let expected_rows: u64 = corrected_states
+        .iter()
+        .map(RecordBatch::num_rows)
+        .sum::<usize>() as u64;
     {
         let publications = PublicationStore::sqlite(&control_db).await.unwrap();
         let claim = publications
-            .claim_run(CUBE_ID, &window_id, "run-correction", WindowRevision::new(2).unwrap(), expected_rows)
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-correction",
+                WindowRevision::new(2).unwrap(),
+                expected_rows,
+            )
             .await
             .unwrap();
         assert!(matches!(claim, ClaimResult::New(_)));
         assert_eq!(
             ReconciliationRecord::classify(Some(claim.state())),
-            ReconciliationRecord::AwaitingAppend { revision: WindowRevision::new(2).unwrap() }
+            ReconciliationRecord::AwaitingAppend {
+                revision: WindowRevision::new(2).unwrap()
+            }
         );
     }
 
@@ -397,7 +562,9 @@ async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a
         registry: &corrected_registry,
     };
     let catalog_b = cubism_iceberg::config::open_catalog(&config).await.unwrap();
-    let table_b = TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+    let table_b = TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema())
+        .await
+        .unwrap();
     let publications_b = PublicationStore::sqlite(&control_db).await.unwrap();
 
     // Confirm the claim actually survived the restart, observed through
@@ -407,23 +574,33 @@ async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a
     let recovered = publications_b.run_state("run-correction").await.unwrap();
     assert_eq!(
         ReconciliationRecord::classify(recovered.as_ref()),
-        ReconciliationRecord::AwaitingAppend { revision: WindowRevision::new(2).unwrap() },
+        ReconciliationRecord::AwaitingAppend {
+            revision: WindowRevision::new(2).unwrap()
+        },
         "the claim must survive the restart as AwaitingAppend, observed through a fresh handle"
     );
 
     let first_publication =
-        CorrectionCoordinator::execute(catalog_b.as_ref(), &table_b, &publications_b, request).await.unwrap();
+        CorrectionCoordinator::execute(catalog_b.as_ref(), &table_b, &publications_b, request)
+            .await
+            .unwrap();
     assert_eq!(first_publication.revision, WindowRevision::new(2).unwrap());
 
     let read_after_recovery =
-        AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id).await.unwrap();
+        AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id)
+            .await
+            .unwrap();
     assert_eq!(
         total_rows(&read_after_recovery),
         2,
         "recovering a claimed-but-unattempted run must append exactly once"
     );
 
-    let run_state_after = publications_b.run_state("run-correction").await.unwrap().unwrap();
+    let run_state_after = publications_b
+        .run_state("run-correction")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         ReconciliationRecord::classify(Some(&run_state_after)),
         ReconciliationRecord::Published {
@@ -446,18 +623,32 @@ async fn sqlite_coordinator_execute_recovers_an_unattempted_claim_then_replays_a
         registry: &corrected_registry,
     };
     let catalog_c = cubism_iceberg::config::open_catalog(&config).await.unwrap();
-    let table_c = TemporalTable::create(catalog_c.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+    let table_c = TemporalTable::create(catalog_c.as_ref(), CUBE_ID, &sample_states_schema())
+        .await
+        .unwrap();
     let publications_c = PublicationStore::sqlite(&control_db).await.unwrap();
-    let replayed_publication =
-        CorrectionCoordinator::execute(catalog_c.as_ref(), &table_c, &publications_c, request_retry).await.unwrap();
+    let replayed_publication = CorrectionCoordinator::execute(
+        catalog_c.as_ref(),
+        &table_c,
+        &publications_c,
+        request_retry,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         replayed_publication, first_publication,
         "replaying a completed correction after a restart must return the identical publication, not a new one"
     );
 
     let read_after_replay =
-        AggregateReader::read_window(catalog_c.as_ref(), &table_c, &publications_c, &window_id).await.unwrap();
-    assert_eq!(total_rows(&read_after_replay), 2, "replaying a completed correction must not duplicate rows");
+        AggregateReader::read_window(catalog_c.as_ref(), &table_c, &publications_c, &window_id)
+            .await
+            .unwrap();
+    assert_eq!(
+        total_rows(&read_after_replay),
+        2,
+        "replaying a completed correction must not duplicate rows"
+    );
 }
 
 /// [Issue #17](https://github.com/jeromebanks/cubism-rs/issues/17)'s fix:
@@ -765,10 +956,18 @@ async fn publish_repoints_a_window_to_a_prior_published_revision_via_the_existin
     let catalog_db = catalog_dir.path().join("catalog.sqlite");
     let control_dir = TempDir::new().unwrap();
     let control_db = control_dir.path().join("control.sqlite");
-    let config = CatalogConfig::Sqlite { warehouse: warehouse.path().to_path_buf(), catalog_db: catalog_db.clone() };
+    let config = CatalogConfig::Sqlite {
+        warehouse: warehouse.path().to_path_buf(),
+        catalog_db: catalog_db.clone(),
+    };
     let window_id = WindowId::new("2026-08-12").unwrap();
 
-    let original_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let original_states = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        1,
+        1.0,
+    )])];
     let original_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
     let corrected_states = vec![states_batch(&[
         ("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0),
@@ -782,11 +981,19 @@ async fn publish_repoints_a_window_to_a_prior_published_revision_via_the_existin
     // anything but the database.
     let (original_snapshot_id, corrected_snapshot_id) = {
         let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
-        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
+            .await
+            .unwrap();
         let publications = PublicationStore::sqlite(&control_db).await.unwrap();
 
         publications
-            .claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1)
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-1",
+                WindowRevision::new(1).unwrap(),
+                1,
+            )
             .await
             .unwrap();
         let result = AggregateWriter::append_window(
@@ -802,11 +1009,20 @@ async fn publish_repoints_a_window_to_a_prior_published_revision_via_the_existin
         )
         .await
         .unwrap();
-        publications.record_append("run-1", result.snapshot_id).await.unwrap();
+        publications
+            .record_append("run-1", result.snapshot_id)
+            .await
+            .unwrap();
         publications.publish("run-1", None).await.unwrap();
 
         publications
-            .claim_run(CUBE_ID, &window_id, "run-2", WindowRevision::new(2).unwrap(), 2)
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-2",
+                WindowRevision::new(2).unwrap(),
+                2,
+            )
             .await
             .unwrap();
         let result2 = AggregateWriter::append_window(
@@ -822,8 +1038,14 @@ async fn publish_repoints_a_window_to_a_prior_published_revision_via_the_existin
         )
         .await
         .unwrap();
-        publications.record_append("run-2", result2.snapshot_id).await.unwrap();
-        publications.publish("run-2", Some(WindowRevision::new(1).unwrap())).await.unwrap();
+        publications
+            .record_append("run-2", result2.snapshot_id)
+            .await
+            .unwrap();
+        publications
+            .publish("run-2", Some(WindowRevision::new(1).unwrap()))
+            .await
+            .unwrap();
 
         (result.snapshot_id, result2.snapshot_id)
     };
@@ -832,25 +1054,44 @@ async fn publish_repoints_a_window_to_a_prior_published_revision_via_the_existin
     // revision 2 is current and its 2 rows are visible before rolling
     // back — the baseline the rollback below must actually change.
     let catalog_b = cubism_iceberg::config::open_catalog(&config).await.unwrap();
-    let table_b = TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+    let table_b = TemporalTable::create(catalog_b.as_ref(), CUBE_ID, &sample_states_schema())
+        .await
+        .unwrap();
     let publications_b = PublicationStore::sqlite(&control_db).await.unwrap();
-    assert_eq!(publications_b.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
+    assert_eq!(
+        publications_b.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(2).unwrap())
+    );
     let before_rollback =
-        AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id).await.unwrap();
-    assert_eq!(total_rows(&before_rollback), 2, "revision 2's 2 rows must be visible before rollback");
+        AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id)
+            .await
+            .unwrap();
+    assert_eq!(
+        total_rows(&before_rollback),
+        2,
+        "revision 2's 2 rows must be visible before rollback"
+    );
 
     // The rollback: re-publish run-1's own already-claimed, fixed revision
     // against the window's actual current revision (2) as the CAS anchor.
     // No new claim, no new append, no new run_id — the existing mechanism,
     // called a second time.
-    let rolled_back = publications_b.publish("run-1", Some(WindowRevision::new(2).unwrap())).await.unwrap();
+    let rolled_back = publications_b
+        .publish("run-1", Some(WindowRevision::new(2).unwrap()))
+        .await
+        .unwrap();
     assert_eq!(rolled_back.revision, WindowRevision::new(1).unwrap());
     assert_eq!(rolled_back.run_id, "run-1");
     assert_eq!(rolled_back.aggregate_snapshot_id, original_snapshot_id);
 
-    assert_eq!(publications_b.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(1).unwrap()));
+    assert_eq!(
+        publications_b.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(1).unwrap())
+    );
     let after_rollback =
-        AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id).await.unwrap();
+        AggregateReader::read_window(catalog_b.as_ref(), &table_b, &publications_b, &window_id)
+            .await
+            .unwrap();
     assert_eq!(
         total_rows(&after_rollback),
         1,
@@ -860,12 +1101,23 @@ async fn publish_repoints_a_window_to_a_prior_published_revision_via_the_existin
     // A third, freshly-opened handle pair sees the rollback too, not just
     // handle B's in-memory belief about its own write.
     let catalog_c = cubism_iceberg::config::open_catalog(&config).await.unwrap();
-    let table_c = TemporalTable::create(catalog_c.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+    let table_c = TemporalTable::create(catalog_c.as_ref(), CUBE_ID, &sample_states_schema())
+        .await
+        .unwrap();
     let publications_c = PublicationStore::sqlite(&control_db).await.unwrap();
-    assert_eq!(publications_c.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(1).unwrap()));
+    assert_eq!(
+        publications_c.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(1).unwrap())
+    );
     let read_c =
-        AggregateReader::read_window(catalog_c.as_ref(), &table_c, &publications_c, &window_id).await.unwrap();
-    assert_eq!(total_rows(&read_c), 1, "a third fresh handle must see the rollback too");
+        AggregateReader::read_window(catalog_c.as_ref(), &table_c, &publications_c, &window_id)
+            .await
+            .unwrap();
+    assert_eq!(
+        total_rows(&read_c),
+        1,
+        "a third fresh handle must see the rollback too"
+    );
 
     // The consequence #18 tracks, proven directly rather than inferred: the
     // rollback above touched only `control_publications` and run-1's own
@@ -899,10 +1151,18 @@ async fn run_inspection_distinguishes_the_rolled_back_to_run_from_the_rolled_bac
     let catalog_db = catalog_dir.path().join("catalog.sqlite");
     let control_dir = TempDir::new().unwrap();
     let control_db = control_dir.path().join("control.sqlite");
-    let config = CatalogConfig::Sqlite { warehouse: warehouse.path().to_path_buf(), catalog_db: catalog_db.clone() };
+    let config = CatalogConfig::Sqlite {
+        warehouse: warehouse.path().to_path_buf(),
+        catalog_db: catalog_db.clone(),
+    };
     let window_id = WindowId::new("2026-08-12").unwrap();
 
-    let original_states = vec![states_batch(&[("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0)])];
+    let original_states = vec![states_batch(&[(
+        "2026-08-12T00:10:00Z",
+        xunit_id(1),
+        1,
+        1.0,
+    )])];
     let original_registry = vec![registry_batch(&[(xunit_id(1), b"a")])];
     let corrected_states = vec![states_batch(&[
         ("2026-08-12T00:10:00Z", xunit_id(1), 1, 1.0),
@@ -916,11 +1176,19 @@ async fn run_inspection_distinguishes_the_rolled_back_to_run_from_the_rolled_bac
     // holds.
     {
         let catalog = cubism_iceberg::config::open_catalog(&config).await.unwrap();
-        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema()).await.unwrap();
+        let table = TemporalTable::create(catalog.as_ref(), CUBE_ID, &sample_states_schema())
+            .await
+            .unwrap();
         let publications = PublicationStore::sqlite(&control_db).await.unwrap();
 
         publications
-            .claim_run(CUBE_ID, &window_id, "run-1", WindowRevision::new(1).unwrap(), 1)
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-1",
+                WindowRevision::new(1).unwrap(),
+                1,
+            )
             .await
             .unwrap();
         let result = AggregateWriter::append_window(
@@ -936,11 +1204,20 @@ async fn run_inspection_distinguishes_the_rolled_back_to_run_from_the_rolled_bac
         )
         .await
         .unwrap();
-        publications.record_append("run-1", result.snapshot_id).await.unwrap();
+        publications
+            .record_append("run-1", result.snapshot_id)
+            .await
+            .unwrap();
         publications.publish("run-1", None).await.unwrap();
 
         publications
-            .claim_run(CUBE_ID, &window_id, "run-2", WindowRevision::new(2).unwrap(), 2)
+            .claim_run(
+                CUBE_ID,
+                &window_id,
+                "run-2",
+                WindowRevision::new(2).unwrap(),
+                2,
+            )
             .await
             .unwrap();
         let result2 = AggregateWriter::append_window(
@@ -956,23 +1233,40 @@ async fn run_inspection_distinguishes_the_rolled_back_to_run_from_the_rolled_bac
         )
         .await
         .unwrap();
-        publications.record_append("run-2", result2.snapshot_id).await.unwrap();
-        publications.publish("run-2", Some(WindowRevision::new(1).unwrap())).await.unwrap();
+        publications
+            .record_append("run-2", result2.snapshot_id)
+            .await
+            .unwrap();
+        publications
+            .publish("run-2", Some(WindowRevision::new(1).unwrap()))
+            .await
+            .unwrap();
 
-        publications.publish("run-1", Some(WindowRevision::new(2).unwrap())).await.unwrap();
+        publications
+            .publish("run-1", Some(WindowRevision::new(2).unwrap()))
+            .await
+            .unwrap();
     }
 
     // A fresh handle inspects both runs.
     let publications_b = PublicationStore::sqlite(&control_db).await.unwrap();
 
-    let run1 = RunInspection::inspect(&publications_b, CUBE_ID, &window_id, "run-1").await.unwrap();
+    let run1 = RunInspection::inspect(&publications_b, CUBE_ID, &window_id, "run-1")
+        .await
+        .unwrap();
     assert!(matches!(
         run1.record,
         ReconciliationRecord::Published { revision, .. } if revision == WindowRevision::new(1).unwrap()
     ));
-    assert_eq!(run1.revision_status, Some(RevisionStatus::Current), "run-1 was rolled back to; it is current");
+    assert_eq!(
+        run1.revision_status,
+        Some(RevisionStatus::Current),
+        "run-1 was rolled back to; it is current"
+    );
 
-    let run2 = RunInspection::inspect(&publications_b, CUBE_ID, &window_id, "run-2").await.unwrap();
+    let run2 = RunInspection::inspect(&publications_b, CUBE_ID, &window_id, "run-2")
+        .await
+        .unwrap();
     assert!(matches!(
         run2.record,
         ReconciliationRecord::Published { revision, .. } if revision == WindowRevision::new(2).unwrap()
@@ -1021,9 +1315,14 @@ async fn sqlite_control_store_migration_adds_generation_columns_and_preserves_re
         // content shaped like an upgrade-time snapshot: revision 1 live
         // ("run-old"), and one correction parked at AwaitingPublish
         // ("run-legacy", revision 2).
-        let options =
-            SqliteConnectOptions::new().filename(&control_db).create_if_missing(true);
-        let pool = SqlitePoolOptions::new().max_connections(1).connect_with(options).await.unwrap();
+        let options = SqliteConnectOptions::new()
+            .filename(&control_db)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
         sqlx::query(
             "CREATE TABLE control_runs (
                 run_id TEXT PRIMARY KEY,
@@ -1077,7 +1376,13 @@ async fn sqlite_control_store_migration_adds_generation_columns_and_preserves_re
 
     let state = store.run_state("run-legacy").await.unwrap();
     assert!(
-        matches!(&state, Some(RunState::Appended { aggregate_snapshot_id: 101, .. })),
+        matches!(
+            &state,
+            Some(RunState::Appended {
+                aggregate_snapshot_id: 101,
+                ..
+            })
+        ),
         "the pre-migration mid-recovery row must read back unchanged through the migrated schema"
     );
     assert_eq!(
@@ -1088,12 +1393,36 @@ async fn sqlite_control_store_migration_adds_generation_columns_and_preserves_re
     );
 
     // The interrupted run is still recoverable across the upgrade.
-    store.publish("run-legacy", Some(WindowRevision::new(1).unwrap())).await.unwrap();
-    assert_eq!(store.current(CUBE_ID, &window_id).await.unwrap(), Some(WindowRevision::new(2).unwrap()));
-    assert_eq!(store.publication_generation(CUBE_ID, &window_id).await.unwrap(), 1);
+    store
+        .publish("run-legacy", Some(WindowRevision::new(1).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.current(CUBE_ID, &window_id).await.unwrap(),
+        Some(WindowRevision::new(2).unwrap())
+    );
+    assert_eq!(
+        store
+            .publication_generation(CUBE_ID, &window_id)
+            .await
+            .unwrap(),
+        1
+    );
 
     // Claims taken after migration record a real anchor: the generation as
     // of this claim (1, after run-legacy's changing publish above).
-    store.claim_run(CUBE_ID, &window_id, "run-post", WindowRevision::new(3).unwrap(), 1).await.unwrap();
-    assert_eq!(store.run_observed_generation("run-post").await.unwrap(), Some(1));
+    store
+        .claim_run(
+            CUBE_ID,
+            &window_id,
+            "run-post",
+            WindowRevision::new(3).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.run_observed_generation("run-post").await.unwrap(),
+        Some(1)
+    );
 }

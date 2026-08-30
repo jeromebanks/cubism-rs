@@ -154,8 +154,30 @@ vectorized group accumulators, the CLI, and the Python bindings. Not yet:
 quantiles, published packages (crates.io / PyPI), streaming ingestion.
 
 ```
-cargo test          # 75 tests incl. property tests + legacy parity fixtures
+cargo test          # 250 tests incl. property tests + legacy parity fixtures
 cargo run -p cubism-cli -- validate examples/web_events.yaml
+```
+
+## Development
+
+`rust-toolchain.toml` pins the toolchain `cargo`/`rustup` use automatically.
+Required PR checks (`.github/workflows/ci.yml`) reproduce locally as:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
+cd bindings/cubism-py && maturin build --out dist   # python bindings build smoke
+```
+
+Nightly-only checks (`.github/workflows/nightly.yml`, not required for
+merge — see `deny.toml` for the license/advisory remediation policy):
+
+```bash
+cargo deny check                                                # licenses/advisories/bans/sources
+cargo test -p cubism-timeseries-bench --lib -- --ignored golden_digest_sparse_1m
+cd spark-adapter && sbt test                                     # optional Scala adapter, see #43
 ```
 
 ## License

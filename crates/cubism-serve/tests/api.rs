@@ -48,7 +48,9 @@ async fn cube_file(dir: &tempfile::TempDir) -> String {
     let batch = RecordBatch::try_new(
         schema,
         vec![
-            Arc::new(StringArray::from(vec!["Bash", "Bash", "Bash", "Read", "Read"])),
+            Arc::new(StringArray::from(vec![
+                "Bash", "Bash", "Bash", "Read", "Read",
+            ])),
             Arc::new(StringArray::from(vec!["ok", "error", "ok", "ok", "error"])),
             Arc::new(Int64Array::from(vec![10, 20, 30, 40, 50])),
             Arc::new(StringArray::from(vec!["s1", "s1", "s2", "s2", "s3"])),
@@ -60,8 +62,15 @@ async fn cube_file(dir: &tempfile::TempDir) -> String {
     ctx.register_batch("events", batch).unwrap();
     let spec = CubeSpec::from_yaml(SPEC).unwrap();
     let (df, _dict) = build_cube(&ctx, &spec, "events").await.unwrap();
-    let path = dir.path().join("cube.parquet").to_str().unwrap().to_string();
-    df.write_parquet(&path, DataFrameWriteOptions::new(), None).await.unwrap();
+    let path = dir
+        .path()
+        .join("cube.parquet")
+        .to_str()
+        .unwrap()
+        .to_string();
+    df.write_parquet(&path, DataFrameWriteOptions::new(), None)
+        .await
+        .unwrap();
     path
 }
 
@@ -70,7 +79,9 @@ async fn get(base: &str, path: &str) -> (u16, Value) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(base).await.unwrap();
     stream
-        .write_all(format!("GET {path} HTTP/1.1\r\nHost: {base}\r\nConnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: {base}\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
         .await
         .unwrap();
     let mut buf = Vec::new();
@@ -116,8 +127,11 @@ async fn api_end_to_end() {
 
     // set ops: sessions(Bash) = {s1,s2}, sessions(error) = {s1,s3};
     // exact while under-full: |A∩B| = 1, |A∪B| = 3
-    let (status, ops) =
-        get(&base, "/api/setops?a=/tool/tool=Bash&b=/outcome/outcome=error").await;
+    let (status, ops) = get(
+        &base,
+        "/api/setops?a=/tool/tool=Bash&b=/outcome/outcome=error",
+    )
+    .await;
     assert_eq!(status, 200);
     assert_eq!(ops["measure"], "sessions");
     assert_eq!(ops["a"]["estimate"], 2.0);
@@ -145,7 +159,13 @@ async fn api_end_to_end() {
     // panel exists in the served page, not that the JS renders.
     let (status, page) = get_text(&base, "/").await;
     assert_eq!(status, 200);
-    for token in ["id=\"tsPanel\"", "id=\"tsChart\"", "/api/series", "bucket_start", "is_exact"] {
+    for token in [
+        "id=\"tsPanel\"",
+        "id=\"tsChart\"",
+        "/api/series",
+        "bucket_start",
+        "is_exact",
+    ] {
         assert!(page.contains(token), "dashboard must contain {token}");
     }
 }
@@ -156,12 +176,17 @@ async fn get_text(base: &str, path: &str) -> (u16, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(base).await.unwrap();
     stream
-        .write_all(format!("GET {path} HTTP/1.1\r\nHost: {base}\r\nConnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: {base}\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
         .await
         .unwrap();
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await.unwrap();
     let text = String::from_utf8(buf).unwrap();
     let status: u16 = text.split_whitespace().nth(1).unwrap().parse().unwrap();
-    (status, text.split("\r\n\r\n").nth(1).unwrap_or("").to_string())
+    (
+        status,
+        text.split("\r\n\r\n").nth(1).unwrap_or("").to_string(),
+    )
 }

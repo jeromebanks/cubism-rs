@@ -6,13 +6,13 @@
 //! aggregated together.
 
 use crate::store::{CubeStore, SketchKind};
+use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use cubism_core::sketch::KmvSketch;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub struct ApiError {
@@ -22,13 +22,19 @@ pub struct ApiError {
 
 impl ApiError {
     fn not_found(message: impl Into<String>) -> Self {
-        ApiError { status: StatusCode::NOT_FOUND, message: message.into() }
+        ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
     }
     // `pub(crate)`: reused by `crate::series`'s handler so `/api/series`
     // reports errors in the same `{"error": "..."}` envelope as the
     // static-cube endpoints above, rather than inventing a second shape.
     pub(crate) fn bad_request(message: impl Into<String>) -> Self {
-        ApiError { status: StatusCode::BAD_REQUEST, message: message.into() }
+        ApiError {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
     }
 }
 
@@ -81,9 +87,13 @@ pub async fn cells(
             store.dimensions.join(", ")
         )));
     }
-    let sort = p.sort.unwrap_or_else(|| store.measures.first().cloned().unwrap_or_default());
+    let sort = p
+        .sort
+        .unwrap_or_else(|| store.measures.first().cloned().unwrap_or_default());
     if !store.measures.contains(&sort) {
-        return Err(ApiError::bad_request(format!("unknown sort measure '{sort}'")));
+        return Err(ApiError::bad_request(format!(
+            "unknown sort measure '{sort}'"
+        )));
     }
 
     let mut rows = store.slice(&p.dim, p.depth);
@@ -104,7 +114,9 @@ pub async fn cells(
             })
         })
         .collect();
-    Ok(Json(json!({"dim": p.dim, "depth": p.depth, "sort": sort, "cells": cells})))
+    Ok(Json(
+        json!({"dim": p.dim, "depth": p.depth, "sort": sort, "cells": cells}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -164,9 +176,9 @@ pub async fn setops(
         let row = store
             .row(xunit)
             .ok_or_else(|| ApiError::not_found(format!("no cell '{xunit}' in this cube")))?;
-        let blob = store
-            .blob(&measure, row)
-            .ok_or_else(|| ApiError::not_found(format!("cell '{xunit}' has no '{measure}' sketch")))?;
+        let blob = store.blob(&measure, row).ok_or_else(|| {
+            ApiError::not_found(format!("cell '{xunit}' has no '{measure}' sketch"))
+        })?;
         KmvSketch::from_bytes(blob)
             .map_err(|e| ApiError::bad_request(format!("cannot decode sketch: {e}")))
     };
@@ -179,7 +191,11 @@ pub async fn setops(
         .and_then(|blob| KmvSketch::from_bytes(blob).ok())
         .map(|g| {
             let inter = a.intersection_estimate(&b);
-            if inter == 0.0 { 0.0 } else { inter * g.estimate() / (a.estimate() * b.estimate()) }
+            if inter == 0.0 {
+                0.0
+            } else {
+                inter * g.estimate() / (a.estimate() * b.estimate())
+            }
         });
 
     Ok(Json(json!({

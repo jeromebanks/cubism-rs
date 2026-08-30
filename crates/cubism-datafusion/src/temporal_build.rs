@@ -4,14 +4,14 @@
 //! group -> present) but:
 //!
 //! 1. evaluates the spec's `temporal.eventTime` expression and assigns each
-//!    row to one half-open UTC bucket via [`cubism_bucket_start`], reusing
+//!    row to one half-open UTC bucket via `cubism_bucket_start`, reusing
 //!    `cubism_core::temporal::FixedResolution::bucket`'s exact math (the same
 //!    euclidean-division code the pre-origin/boundary tests in
 //!    `cubism-core` already cover) instead of re-deriving bucket arithmetic
 //!    in SQL or in this crate;
 //! 2. generates the *same* row-local XUnits the static path would (same
 //!    `level_columns`/`cubism_xunit_keys` UDF, same lattice/rules code in
-//!    `cubism-core` — see [`crate::build::level_columns`]);
+//!    `cubism-core` — see `crate::build::level_columns`);
 //! 3. appends bucket identity to the `GROUP BY` key as an ordinary extra
 //!    column, never as another XUnit dimension — a temporal build's cells
 //!    are keyed by `(bucket, xunit)`, and the lattice itself never sees time;
@@ -42,11 +42,11 @@
 use crate::build::level_columns;
 use crate::state_udaf::{quantile_state_udaf_name, quantile_state_udafs, state_udafs};
 use crate::udaf::sketch_udfs;
-use crate::udf::{cube_udfs, SharedDictionary};
+use crate::udf::{SharedDictionary, cube_udfs};
 use cubism_core::encoding::{canonical_xunit_content_id, decode_xunit, encode_canonical_xunit};
 use cubism_core::spec::API_VERSION_V2_ALPHA1;
 use cubism_core::{
-    AggKind, BucketOrigin, CanonicalXUnit, Coverage, CubeSpec, Exactness, EventTime,
+    AggKind, BucketOrigin, CanonicalXUnit, Coverage, CubeSpec, EventTime, Exactness,
     FixedResolution, MeasureSpec, Resolution, TemporalSpec, TimeRange, WindowId,
 };
 use datafusion::arrow::array::{
@@ -56,7 +56,7 @@ use datafusion::arrow::datatypes::{
     DataType, Field, Schema, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
     TimestampNanosecondType, TimestampSecondType,
 };
-use datafusion::common::{plan_err, DataFusionError, Result};
+use datafusion::common::{DataFusionError, Result, plan_err};
 use datafusion::dataframe::{DataFrame, DataFrameWriteOptions};
 use datafusion::execution::context::SessionContext;
 use datafusion::functions_aggregate::expr_fn::{max, min};
@@ -204,9 +204,10 @@ fn extract_timestamp_micros(array: &ArrayRef, unit: TimeUnit) -> Result<Vec<Opti
             .iter()
             .map(|v| v.map(|v| scale_up(v, 1_000)).transpose())
             .collect(),
-        TimeUnit::Microsecond => {
-            Ok(array.as_primitive::<TimestampMicrosecondType>().iter().collect())
-        }
+        TimeUnit::Microsecond => Ok(array
+            .as_primitive::<TimestampMicrosecondType>()
+            .iter()
+            .collect()),
         // Sub-microsecond precision is discarded, not rounded: bucket
         // boundaries are never finer than microseconds, so floor-toward
         // negative-infinity (not truncation) keeps pre-epoch timestamps
@@ -229,7 +230,10 @@ impl ScalarUDFImpl for BucketStartUdf {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())))
+        Ok(DataType::Timestamp(
+            TimeUnit::Microsecond,
+            Some("+00:00".into()),
+        ))
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
@@ -251,7 +255,9 @@ impl ScalarUDFImpl for BucketStartUdf {
                 Some(us) => Some(
                     self.resolution
                         .bucket(EventTime::from_unix_micros(us), self.origin)
-                        .map_err(|e| DataFusionError::Execution(format!("cubism_bucket_start: {e}")))?
+                        .map_err(|e| {
+                            DataFusionError::Execution(format!("cubism_bucket_start: {e}"))
+                        })?
                         .start
                         .unix_micros(),
                 ),
@@ -377,8 +383,14 @@ impl ScalarUDFImpl for XUnitCanonicalBytesUdf {
 fn xunit_identity_udfs(dict: SharedDictionary) -> (ScalarUDF, ScalarUDF) {
     let binary_arg = || Signature::exact(vec![DataType::Binary], Volatility::Immutable);
     (
-        ScalarUDF::from(XUnitContentIdUdf { dict: Arc::clone(&dict), signature: binary_arg() }),
-        ScalarUDF::from(XUnitCanonicalBytesUdf { dict, signature: binary_arg() }),
+        ScalarUDF::from(XUnitContentIdUdf {
+            dict: Arc::clone(&dict),
+            signature: binary_arg(),
+        }),
+        ScalarUDF::from(XUnitCanonicalBytesUdf {
+            dict,
+            signature: binary_arg(),
+        }),
     )
 }
 
@@ -396,7 +408,9 @@ fn rfc3339_micros(event_time: EventTime) -> Result<String> {
 }
 
 fn window_filter_sql(temporal: &TemporalSpec, window: Option<TimeRange>) -> Result<Option<String>> {
-    let Some(window) = window else { return Ok(None) };
+    let Some(window) = window else {
+        return Ok(None);
+    };
     let start = rfc3339_micros(window.start())?;
     let end = rfc3339_micros(window.end())?;
     Ok(Some(format!(
@@ -421,7 +435,12 @@ fn measure_sql(spec: &CubeSpec) -> Result<MeasureSql> {
     for (i, measure) in spec.measures.iter().enumerate() {
         let alias = format!("__m{i}");
         let out_col = measure_column_name(measure);
-        let input = || measure.input.as_ref().expect("validated: agg requires input");
+        let input = || {
+            measure
+                .input
+                .as_ref()
+                .expect("validated: agg requires input")
+        };
         match measure.agg {
             AggKind::Sum | AggKind::Min | AggKind::Max => {
                 let f = match measure.agg {
@@ -486,7 +505,12 @@ fn measure_sql(spec: &CubeSpec) -> Result<MeasureSql> {
     if agg_selects.is_empty() {
         return plan_err!("cube spec has no measures");
     }
-    Ok(MeasureSql { measure_selects, passthrough, agg_selects, final_cols })
+    Ok(MeasureSql {
+        measure_selects,
+        passthrough,
+        agg_selects,
+        final_cols,
+    })
 }
 
 /// Everything [`pipeline_ctes`] needs beyond `(temporal, source, window,
@@ -510,8 +534,12 @@ fn pipeline_ctes(
     null_policy: NullEventTimePolicy,
     columns: PipelineColumns<'_>,
 ) -> Result<String> {
-    let PipelineColumns { measure_selects, level_selects, level_args, measure_passthrough } =
-        columns;
+    let PipelineColumns {
+        measure_selects,
+        level_selects,
+        level_args,
+        measure_passthrough,
+    } = columns;
     let event_expr = &temporal.event_time;
     let window_clause = match window_filter_sql(temporal, window)? {
         Some(clause) => format!("\n  WHERE {clause}"),
@@ -526,10 +554,15 @@ fn pipeline_ctes(
         .chain(level_selects.iter().cloned())
         .chain(measure_selects.iter().cloned())
         .collect();
-    let bucketed_passthrough: String =
-        level_args.iter().chain(measure_passthrough).map(|a| format!(", {a}")).collect();
-    let exploded_passthrough: String =
-        measure_passthrough.iter().map(|a| format!(", {a}")).collect();
+    let bucketed_passthrough: String = level_args
+        .iter()
+        .chain(measure_passthrough)
+        .map(|a| format!(", {a}"))
+        .collect();
+    let exploded_passthrough: String = measure_passthrough
+        .iter()
+        .map(|a| format!(", {a}"))
+        .collect();
 
     Ok(format!(
         "__cubism_time AS (\n  SELECT {input}\n  FROM {source}{window_clause}\n),\n\
@@ -602,16 +635,26 @@ fn exploded_only_sql(
             measure_passthrough: &measures.passthrough,
         },
     )?;
-    Ok(format!("WITH {ctes}\nSELECT __bucket_start, __xunit_key FROM __cubism_exploded"))
+    Ok(format!(
+        "WITH {ctes}\nSELECT __bucket_start, __xunit_key FROM __cubism_exploded"
+    ))
 }
 
-async fn null_event_time_count(ctx: &SessionContext, temporal: &TemporalSpec, source: &str) -> Result<u64> {
-    let sql =
-        format!("SELECT COUNT(*) AS n FROM {source} WHERE {event} IS NULL", event = temporal.event_time);
+async fn null_event_time_count(
+    ctx: &SessionContext,
+    temporal: &TemporalSpec,
+    source: &str,
+) -> Result<u64> {
+    let sql = format!(
+        "SELECT COUNT(*) AS n FROM {source} WHERE {event} IS NULL",
+        event = temporal.event_time
+    );
     let batches = ctx.sql(&sql).await?.collect().await?;
     let mut total: i64 = 0;
     for batch in &batches {
-        let col = batch.column(0).as_primitive::<datafusion::arrow::datatypes::Int64Type>();
+        let col = batch
+            .column(0)
+            .as_primitive::<datafusion::arrow::datatypes::Int64Type>();
         for i in 0..col.len() {
             total += col.value(i);
         }
@@ -634,7 +677,7 @@ pub struct TemporalBuildMetadata {
     pub null_event_time_rows: u64,
     /// `None` when no `window` was requested — [`Coverage::requested`] needs
     /// a [`TimeRange`] to assess coverage against, and an unbounded build
-    /// has none. `Some` otherwise, computed by [`compute_coverage`]: a cheap
+    /// has none. `Some` otherwise, computed by `compute_coverage`: a cheap
     /// `MIN`/`MAX(bucket_start)` scan, *not* a per-bucket occupancy check.
     /// **`Exactness::Exact` means the observed data reaches both edges of
     /// the requested window — it is not a claim that every bucket in
@@ -684,7 +727,8 @@ pub async fn build_temporal(
     window_id: Option<WindowId>,
     null_policy: NullEventTimePolicy,
 ) -> Result<TemporalBuildOutput> {
-    spec.validate().map_err(|e| DataFusionError::Plan(e.to_string()))?;
+    spec.validate()
+        .map_err(|e| DataFusionError::Plan(e.to_string()))?;
     let temporal = temporal_spec(spec)?;
     let resolution = fixed_resolution(temporal)?;
 
@@ -763,7 +807,12 @@ pub async fn build_temporal(
         states,
         registry,
         dictionary: dict,
-        metadata: TemporalBuildMetadata { window, window_id, null_event_time_rows: null_count, coverage },
+        metadata: TemporalBuildMetadata {
+            window,
+            window_id,
+            null_event_time_rows: null_count,
+            coverage,
+        },
     })
 }
 
@@ -778,7 +827,10 @@ async fn compute_coverage(
 ) -> Result<Coverage> {
     let bounds = cached.clone().aggregate(
         vec![],
-        vec![min(col("bucket_start")).alias("min_bucket"), max(col("bucket_start")).alias("max_bucket")],
+        vec![
+            min(col("bucket_start")).alias("min_bucket"),
+            max(col("bucket_start")).alias("max_bucket"),
+        ],
     )?;
     let batches = bounds.collect().await?;
     let batch = &batches[0];
@@ -799,9 +851,12 @@ async fn compute_coverage(
     // *event time*, not bucket bounds). Clamping to `requested` keeps
     // `covered` from claiming coverage of time the filter guaranteed has
     // zero rows.
-    let observed_end_micros = max_col.value(0).checked_add(resolution.micros()).ok_or_else(|| {
-        DataFusionError::Execution("covered bucket end overflows i64 microseconds".into())
-    })?;
+    let observed_end_micros = max_col
+        .value(0)
+        .checked_add(resolution.micros())
+        .ok_or_else(|| {
+            DataFusionError::Execution("covered bucket end overflows i64 microseconds".into())
+        })?;
     let covered_start_micros = min_col.value(0).max(requested.start().unix_micros());
     let covered_end_micros = observed_end_micros.min(requested.end().unix_micros());
     let covered = TimeRange::new(
@@ -827,7 +882,11 @@ async fn compute_coverage(
         ))
     };
 
-    Ok(Coverage { requested, covered: vec![covered], exactness })
+    Ok(Coverage {
+        requested,
+        covered: vec![covered],
+        exactness,
+    })
 }
 
 /// Write a build's two tables to local Parquet fixtures (no Iceberg
@@ -840,8 +899,16 @@ pub async fn write_temporal_fixtures(
     registry_path: &str,
 ) -> Result<()> {
     let single_file = || DataFrameWriteOptions::new().with_single_file_output(true);
-    output.states.clone().write_parquet(states_path, single_file(), None).await?;
-    output.registry.clone().write_parquet(registry_path, single_file(), None).await?;
+    output
+        .states
+        .clone()
+        .write_parquet(states_path, single_file(), None)
+        .await?;
+    output
+        .registry
+        .clone()
+        .write_parquet(registry_path, single_file(), None)
+        .await?;
     Ok(())
 }
 
@@ -870,7 +937,9 @@ pub async fn explain_temporal_build(
     let output_rows: usize = states_batches.iter().map(|b| b.num_rows()).sum();
     let mut buckets = std::collections::BTreeSet::new();
     for batch in &states_batches {
-        let col = batch.column(0).as_primitive::<datafusion::arrow::datatypes::TimestampMicrosecondType>();
+        let col = batch
+            .column(0)
+            .as_primitive::<datafusion::arrow::datatypes::TimestampMicrosecondType>();
         for i in 0..col.len() {
             buckets.insert(col.value(i));
         }
@@ -884,8 +953,11 @@ pub async fn explain_temporal_build(
     let source_rows = scalar_count(ctx, &source_rows_sql).await?;
 
     let exploded_sql = exploded_only_sql(spec, source, window, null_policy)?;
-    let generated_xunits =
-        scalar_count(ctx, &format!("SELECT COUNT(*) AS n FROM ({exploded_sql}) AS t")).await?;
+    let generated_xunits = scalar_count(
+        ctx,
+        &format!("SELECT COUNT(*) AS n FROM ({exploded_sql}) AS t"),
+    )
+    .await?;
 
     Ok(TemporalBuildExplain {
         source_rows,
@@ -900,7 +972,9 @@ async fn scalar_count(ctx: &SessionContext, sql: &str) -> Result<usize> {
     let batches = ctx.sql(sql).await?.collect().await?;
     let mut total: i64 = 0;
     for batch in &batches {
-        let col = batch.column(0).as_primitive::<datafusion::arrow::datatypes::Int64Type>();
+        let col = batch
+            .column(0)
+            .as_primitive::<datafusion::arrow::datatypes::Int64Type>();
         for i in 0..col.len() {
             total += col.value(i);
         }
@@ -969,7 +1043,16 @@ temporal:
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(
             names,
-            vec!["bucket_start", "xunit_id", "total_v1", "events_v1", "mean_v1", "spread_v1", "p50_v1", "reach_v1"]
+            vec![
+                "bucket_start",
+                "xunit_id",
+                "total_v1",
+                "events_v1",
+                "mean_v1",
+                "spread_v1",
+                "p50_v1",
+                "reach_v1"
+            ]
         );
         let types: Vec<&DataType> = schema.fields().iter().map(|f| f.data_type()).collect();
         assert_eq!(
@@ -1009,7 +1092,11 @@ temporal:
         // top_k is already rejected at spec validation time for temporal
         // specs (see cubism-core's spec.rs); this asserts that contract
         // still holds rather than re-testing it here.
-        assert!(spec.unwrap_err().to_string().contains("top_k is not supported"));
+        assert!(
+            spec.unwrap_err()
+                .to_string()
+                .contains("top_k is not supported")
+        );
     }
 
     // -- end-to-end hand-computed cells --------------------------------------
@@ -1056,7 +1143,9 @@ includeGlobal: true
                     TimestampMicrosecondArray::from(vec![0i64, 1_000, HOUR_US, HOUR_US + 500])
                         .with_timezone("+00:00"),
                 ),
-                Arc::new(StringArray::from(vec!["mobile", "mobile", "desktop", "mobile"])),
+                Arc::new(StringArray::from(vec![
+                    "mobile", "mobile", "desktop", "mobile",
+                ])),
                 Arc::new(Int64Array::from(vec![10, 20, 40, 80])),
                 Arc::new(StringArray::from(vec!["u1", "u2", "u1", "u3"])),
             ],
@@ -1069,8 +1158,16 @@ includeGlobal: true
         let spec = CubeSpec::from_yaml(E2E_TEMPORAL_SPEC).unwrap();
         let ctx = SessionContext::new();
         ctx.register_batch("events", e2e_batch()).unwrap();
-        let output =
-            build_temporal(&ctx, &spec, "events", None, None, NullEventTimePolicy::Reject).await.unwrap();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            None,
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
 
         // The DataFrame's actual Arrow schema must equal the declared
         // authority exactly — name, type, *and* nullability.
@@ -1098,7 +1195,11 @@ includeGlobal: true
         let mut cells: HashMap<(i64, [u8; 32]), Cell> = HashMap::new();
         for batch in &batches {
             let bucket = batch.column(0).as_primitive::<TimestampMicrosecondType>();
-            let ids = batch.column(1).as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+            let ids = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
             let sum = batch.column(2).as_primitive::<Float64Type>();
             let count = batch.column(3).as_primitive::<Int64Type>();
             let avg_blob = batch.column(4).as_binary::<i32>();
@@ -1119,8 +1220,15 @@ includeGlobal: true
         }
         let mut sorted_order = order.clone();
         sorted_order.sort();
-        assert_eq!(order, sorted_order, "states must be sorted by (bucket_start, xunit_id)");
-        assert_eq!(cells.len(), 5, "bucket0: {{/G, mobile}}, bucket1: {{/G, mobile, desktop}}");
+        assert_eq!(
+            order, sorted_order,
+            "states must be sorted by (bucket_start, xunit_id)"
+        );
+        assert_eq!(
+            cells.len(),
+            5,
+            "bucket0: {{/G, mobile}}, bucket1: {{/G, mobile, desktop}}"
+        );
 
         let global_id = content_id_of("/G");
         let mobile_id = content_id_of("/device/device=mobile");
@@ -1128,16 +1236,32 @@ includeGlobal: true
 
         let (sum, count, avg, reach) = &cells[&(0, global_id)];
         assert_eq!((*sum, *count), (30.0, 2));
-        assert_eq!(cubism_core::AverageState::decode(avg).unwrap().present(), Some(15.0));
-        assert_eq!(cubism_core::KmvSketch::from_bytes(reach).unwrap().estimate(), 2.0);
+        assert_eq!(
+            cubism_core::AverageState::decode(avg).unwrap().present(),
+            Some(15.0)
+        );
+        assert_eq!(
+            cubism_core::KmvSketch::from_bytes(reach)
+                .unwrap()
+                .estimate(),
+            2.0
+        );
 
         let (sum, count, _, _) = &cells[&(0, mobile_id)];
         assert_eq!((*sum, *count), (30.0, 2));
 
         let (sum, count, avg, reach) = &cells[&(HOUR_US, global_id)];
         assert_eq!((*sum, *count), (120.0, 2));
-        assert_eq!(cubism_core::AverageState::decode(avg).unwrap().present(), Some(60.0));
-        assert_eq!(cubism_core::KmvSketch::from_bytes(reach).unwrap().estimate(), 2.0);
+        assert_eq!(
+            cubism_core::AverageState::decode(avg).unwrap().present(),
+            Some(60.0)
+        );
+        assert_eq!(
+            cubism_core::KmvSketch::from_bytes(reach)
+                .unwrap()
+                .estimate(),
+            2.0
+        );
 
         let (sum, count, _, _) = &cells[&(HOUR_US, desktop_id)];
         assert_eq!((*sum, *count), (40.0, 1));
@@ -1147,12 +1271,19 @@ includeGlobal: true
         let registry_batches = output.registry.collect().await.unwrap();
         let mut registry_ids: HashSet<[u8; 32]> = HashSet::new();
         for batch in &registry_batches {
-            let ids = batch.column(0).as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
             for i in 0..batch.num_rows() {
                 registry_ids.insert(ids.value(i).try_into().unwrap());
             }
         }
-        assert_eq!(registry_ids, HashSet::from([global_id, mobile_id, desktop_id]));
+        assert_eq!(
+            registry_ids,
+            HashSet::from([global_id, mobile_id, desktop_id])
+        );
     }
 
     #[tokio::test]
@@ -1162,16 +1293,32 @@ includeGlobal: true
         async fn run(spec: &CubeSpec) -> Vec<(i64, [u8; 32], i64)> {
             let ctx = SessionContext::new();
             ctx.register_batch("events", e2e_batch()).unwrap();
-            let output =
-                build_temporal(&ctx, spec, "events", None, None, NullEventTimePolicy::Reject).await.unwrap();
+            let output = build_temporal(
+                &ctx,
+                spec,
+                "events",
+                None,
+                None,
+                NullEventTimePolicy::Reject,
+            )
+            .await
+            .unwrap();
             let batches = output.states.collect().await.unwrap();
             let mut out = Vec::new();
             for batch in &batches {
                 let bucket = batch.column(0).as_primitive::<TimestampMicrosecondType>();
-                let ids = batch.column(1).as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+                let ids = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .unwrap();
                 let count = batch.column(3).as_primitive::<Int64Type>();
                 for i in 0..batch.num_rows() {
-                    out.push((bucket.value(i), ids.value(i).try_into().unwrap(), count.value(i)));
+                    out.push((
+                        bucket.value(i),
+                        ids.value(i).try_into().unwrap(),
+                        count.value(i),
+                    ));
                 }
             }
             out
@@ -1187,8 +1334,16 @@ includeGlobal: true
         let spec = CubeSpec::from_yaml(E2E_TEMPORAL_SPEC).unwrap();
         let ctx = SessionContext::new();
         ctx.register_batch("events", e2e_batch()).unwrap();
-        let output =
-            build_temporal(&ctx, &spec, "events", None, None, NullEventTimePolicy::Reject).await.unwrap();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            None,
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
         assert!(output.metadata.coverage.is_none());
     }
 
@@ -1199,12 +1354,21 @@ includeGlobal: true
         ctx.register_batch("events", e2e_batch()).unwrap();
         // Fixture events span [0, HOUR_US + 500), i.e. buckets [0, HOUR_US)
         // and [HOUR_US, 2*HOUR_US) — request exactly that span.
-        let window =
-            TimeRange::new(EventTime::from_unix_micros(0), EventTime::from_unix_micros(2 * HOUR_US))
-                .unwrap();
-        let output = build_temporal(&ctx, &spec, "events", Some(window), None, NullEventTimePolicy::Reject)
-            .await
-            .unwrap();
+        let window = TimeRange::new(
+            EventTime::from_unix_micros(0),
+            EventTime::from_unix_micros(2 * HOUR_US),
+        )
+        .unwrap();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            Some(window),
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
         let coverage = output.metadata.coverage.unwrap();
         assert_eq!(coverage.requested, window);
         assert_eq!(coverage.covered, vec![window]);
@@ -1222,14 +1386,23 @@ includeGlobal: true
             EventTime::from_unix_micros(3 * HOUR_US),
         )
         .unwrap();
-        let output = build_temporal(&ctx, &spec, "events", Some(window), None, NullEventTimePolicy::Reject)
-            .await
-            .unwrap();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            Some(window),
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
         let coverage = output.metadata.coverage.unwrap();
         assert_eq!(coverage.requested, window);
-        let expected_covered =
-            TimeRange::new(EventTime::from_unix_micros(0), EventTime::from_unix_micros(2 * HOUR_US))
-                .unwrap();
+        let expected_covered = TimeRange::new(
+            EventTime::from_unix_micros(0),
+            EventTime::from_unix_micros(2 * HOUR_US),
+        )
+        .unwrap();
         assert_eq!(coverage.covered, vec![expected_covered]);
         assert!(matches!(coverage.exactness, Exactness::Inexact(_)));
     }
@@ -1252,12 +1425,23 @@ includeGlobal: true
             EventTime::from_unix_micros(3 * HOUR_US / 2),
         )
         .unwrap();
-        let output = build_temporal(&ctx, &spec, "events", Some(window), None, NullEventTimePolicy::Reject)
-            .await
-            .unwrap();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            Some(window),
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
         let coverage = output.metadata.coverage.unwrap();
         let covered = coverage.covered[0];
-        assert_eq!(covered.end(), window.end(), "must not overclaim past the requested window's end");
+        assert_eq!(
+            covered.end(),
+            window.end(),
+            "must not overclaim past the requested window's end"
+        );
     }
 
     #[tokio::test]
@@ -1274,9 +1458,16 @@ includeGlobal: true
             EventTime::from_unix_micros(2 * HOUR_US),
         )
         .unwrap();
-        let output = build_temporal(&ctx, &spec, "events", Some(window), None, NullEventTimePolicy::Reject)
-            .await
-            .unwrap();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            Some(window),
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
         let coverage = output.metadata.coverage.unwrap();
         assert_eq!(coverage.covered, vec![window]);
         assert_eq!(coverage.exactness, Exactness::Exact);
@@ -1292,9 +1483,16 @@ includeGlobal: true
             EventTime::from_unix_micros(11 * HOUR_US),
         )
         .unwrap();
-        let output = build_temporal(&ctx, &spec, "events", Some(window), None, NullEventTimePolicy::Reject)
-            .await
-            .unwrap();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            Some(window),
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
         let coverage = output.metadata.coverage.unwrap();
         assert_eq!(coverage.covered, vec![]);
         assert!(matches!(coverage.exactness, Exactness::Inexact(_)));
@@ -1307,19 +1505,33 @@ includeGlobal: true
         let spec = CubeSpec::from_yaml(E2E_TEMPORAL_SPEC).unwrap();
         let ctx = SessionContext::new();
         ctx.register_batch("events", e2e_batch()).unwrap();
-        let output =
-            build_temporal(&ctx, &spec, "events", None, None, NullEventTimePolicy::Reject).await.unwrap();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            None,
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
 
-        let dir = std::env::temp_dir()
-            .join(format!("cubism_temporal_fixture_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "cubism_temporal_fixture_test_{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let states_path = dir.join("registry_states.parquet");
         let registry_path = dir.join("xunit_registry.parquet");
 
-        write_temporal_fixtures(&output, states_path.to_str().unwrap(), registry_path.to_str().unwrap())
-            .await
-            .unwrap();
+        write_temporal_fixtures(
+            &output,
+            states_path.to_str().unwrap(),
+            registry_path.to_str().unwrap(),
+        )
+        .await
+        .unwrap();
 
         // `DataFrame::write_parquet` writes a directory of part files unless
         // single-file output is requested — this is the one thing a unit
@@ -1328,17 +1540,27 @@ includeGlobal: true
         assert!(
             states_path.is_file(),
             "expected a single states file, dir contents: {:?}",
-            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect::<Vec<_>>()
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect::<Vec<_>>()
         );
         assert!(
             registry_path.is_file(),
             "expected a single registry file, dir contents: {:?}",
-            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect::<Vec<_>>()
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect::<Vec<_>>()
         );
 
         let read_ctx = SessionContext::new();
         read_ctx
-            .register_parquet("states_readback", states_path.to_str().unwrap(), ParquetReadOptions::default())
+            .register_parquet(
+                "states_readback",
+                states_path.to_str().unwrap(),
+                ParquetReadOptions::default(),
+            )
             .await
             .unwrap();
         read_ctx
@@ -1349,9 +1571,12 @@ includeGlobal: true
             )
             .await
             .unwrap();
-        let states_rows = scalar_count(&read_ctx, "SELECT COUNT(*) AS n FROM states_readback").await.unwrap();
-        let registry_rows =
-            scalar_count(&read_ctx, "SELECT COUNT(*) AS n FROM registry_readback").await.unwrap();
+        let states_rows = scalar_count(&read_ctx, "SELECT COUNT(*) AS n FROM states_readback")
+            .await
+            .unwrap();
+        let registry_rows = scalar_count(&read_ctx, "SELECT COUNT(*) AS n FROM registry_readback")
+            .await
+            .unwrap();
         assert_eq!(states_rows, 5);
         assert_eq!(registry_rows, 3);
 
@@ -1399,7 +1624,15 @@ includeGlobal: true
 
         let ctx_reject = SessionContext::new();
         ctx_reject.register_batch("events", batch.clone()).unwrap();
-        let result = build_temporal(&ctx_reject, &spec, "events", None, None, NullEventTimePolicy::Reject).await;
+        let result = build_temporal(
+            &ctx_reject,
+            &spec,
+            "events",
+            None,
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await;
         let err = match result {
             Err(e) => e,
             Ok(_) => panic!("expected the build to reject a null event time"),
@@ -1419,7 +1652,14 @@ includeGlobal: true
         .await
         .unwrap();
         assert_eq!(output.metadata.null_event_time_rows, 1);
-        let rows: usize = output.states.collect().await.unwrap().iter().map(|b| b.num_rows()).sum();
+        let rows: usize = output
+            .states
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
         // bucket0={mobile}: {/G, mobile}; bucket1={mobile}: {/G, mobile} = 4.
         assert_eq!(rows, 4);
     }
@@ -1454,7 +1694,8 @@ temporal:
             schema,
             vec![
                 Arc::new(
-                    TimestampMicrosecondArray::from(vec![HOUR_US - 1, HOUR_US]).with_timezone("+00:00"),
+                    TimestampMicrosecondArray::from(vec![HOUR_US - 1, HOUR_US])
+                        .with_timezone("+00:00"),
                 ),
                 Arc::new(StringArray::from(vec!["mobile", "mobile"])),
             ],
@@ -1462,8 +1703,16 @@ temporal:
         .unwrap();
         let ctx = SessionContext::new();
         ctx.register_batch("events", batch).unwrap();
-        let output =
-            build_temporal(&ctx, &spec, "events", None, None, NullEventTimePolicy::Reject).await.unwrap();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            None,
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
         let batches = output.states.collect().await.unwrap();
         let mut buckets: Vec<i64> = Vec::new();
         for batch in &batches {
@@ -1502,24 +1751,31 @@ temporal:
         let event_seconds = -90 * 60_i64;
         let event_at_90m_seconds = 90 * 60_i64;
 
-        async fn run_for_unit(
-            spec: &CubeSpec,
-            column: ArrayRef,
-        ) -> Vec<i64> {
+        async fn run_for_unit(spec: &CubeSpec, column: ArrayRef) -> Vec<i64> {
             let schema = Arc::new(Schema::new(vec![
                 Field::new("occurred_at", column.data_type().clone(), false),
                 Field::new("device", DataType::Utf8, false),
             ]));
             let batch = RecordBatch::try_new(
                 schema,
-                vec![column, Arc::new(StringArray::from(vec!["mobile", "mobile"]))],
+                vec![
+                    column,
+                    Arc::new(StringArray::from(vec!["mobile", "mobile"])),
+                ],
             )
             .unwrap();
             let ctx = SessionContext::new();
             ctx.register_batch("events", batch).unwrap();
-            let output = build_temporal(&ctx, spec, "events", None, None, NullEventTimePolicy::Reject)
-                .await
-                .unwrap();
+            let output = build_temporal(
+                &ctx,
+                spec,
+                "events",
+                None,
+                None,
+                NullEventTimePolicy::Reject,
+            )
+            .await
+            .unwrap();
             let batches = output.states.collect().await.unwrap();
             let mut buckets: Vec<i64> = Vec::new();
             for batch in &batches {
@@ -1542,8 +1798,11 @@ temporal:
         assert_eq!(run_for_unit(&spec, seconds).await, expected, "seconds");
 
         let millis: ArrayRef = Arc::new(
-            TimestampMillisecondArray::from(vec![event_seconds * 1_000, event_at_90m_seconds * 1_000])
-                .with_timezone("+00:00"),
+            TimestampMillisecondArray::from(vec![
+                event_seconds * 1_000,
+                event_at_90m_seconds * 1_000,
+            ])
+            .with_timezone("+00:00"),
         );
         assert_eq!(run_for_unit(&spec, millis).await, expected, "milliseconds");
 
@@ -1588,7 +1847,10 @@ temporal:
         ]));
         let batch = RecordBatch::try_new(
             schema,
-            vec![Arc::new(Int64Array::from(vec![0i64])), Arc::new(StringArray::from(vec!["mobile"]))],
+            vec![
+                Arc::new(Int64Array::from(vec![0i64])),
+                Arc::new(StringArray::from(vec!["mobile"])),
+            ],
         )
         .unwrap();
         let ctx = SessionContext::new();
@@ -1596,13 +1858,23 @@ temporal:
         // `build_temporal` only builds the (lazy) logical plan — DataFusion
         // doesn't call a UDF's `invoke_with_args` until physical execution,
         // so the type mismatch only surfaces on `.collect()`.
-        let output = build_temporal(&ctx, &spec, "events", None, None, NullEventTimePolicy::Reject)
-            .await
-            .unwrap();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            None,
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
         let result = output.states.collect().await;
         let err = match result {
             Err(e) => e,
-            Ok(batches) => panic!("expected rejection, got {} batches: {batches:?}", batches.len()),
+            Ok(batches) => panic!(
+                "expected rejection, got {} batches: {batches:?}",
+                batches.len()
+            ),
         };
         assert!(err.to_string().contains("requires a TIMESTAMP column"));
     }
@@ -1670,7 +1942,9 @@ includeGlobal: true
         let static_spec = CubeSpec::from_yaml(STATIC).unwrap();
         let ctx1 = SessionContext::new();
         ctx1.register_batch("events", make_batch()).unwrap();
-        let (df, _dict) = crate::build_cube(&ctx1, &static_spec, "events").await.unwrap();
+        let (df, _dict) = crate::build_cube(&ctx1, &static_spec, "events")
+            .await
+            .unwrap();
         let static_batches = df.collect().await.unwrap();
         let mut static_ids: HashSet<[u8; 32]> = HashSet::new();
         for batch in &static_batches {
@@ -1683,13 +1957,24 @@ includeGlobal: true
         let temporal_spec = CubeSpec::from_yaml(TEMPORAL).unwrap();
         let ctx2 = SessionContext::new();
         ctx2.register_batch("events", make_batch()).unwrap();
-        let output = build_temporal(&ctx2, &temporal_spec, "events", None, None, NullEventTimePolicy::Reject)
-            .await
-            .unwrap();
+        let output = build_temporal(
+            &ctx2,
+            &temporal_spec,
+            "events",
+            None,
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
         let registry_batches = output.registry.collect().await.unwrap();
         let mut temporal_ids: HashSet<[u8; 32]> = HashSet::new();
         for batch in &registry_batches {
-            let ids = batch.column(0).as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
             for i in 0..batch.num_rows() {
                 temporal_ids.insert(ids.value(i).try_into().unwrap());
             }
@@ -1743,8 +2028,11 @@ includeGlobal: true
             let per_dimension: Vec<Vec<cubism_core::YPath>> = dims
                 .iter()
                 .map(|d| {
-                    let value =
-                        if d.name == "device" { devices[i].clone() } else { regions[i].clone() };
+                    let value = if d.name == "device" {
+                        devices[i].clone()
+                    } else {
+                        regions[i].clone()
+                    };
                     d.ypaths_for_values(&[Some(value)])
                 })
                 .collect();
@@ -1788,10 +2076,24 @@ includeGlobal: true
 
         let ctx = SessionContext::new();
         ctx.register_batch("events", batch).unwrap();
-        let output =
-            build_temporal(&ctx, &spec, "events", None, None, NullEventTimePolicy::Reject).await.unwrap();
-        let produced_rows: usize =
-            output.states.collect().await.unwrap().iter().map(|b| b.num_rows()).sum();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            None,
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
+        let produced_rows: usize = output
+            .states
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(|b| b.num_rows())
+            .sum();
         assert_eq!(produced_rows, oracle.len());
     }
 
@@ -1861,15 +2163,23 @@ includeGlobal: true
                     TimestampMicrosecondArray::from(rows.iter().map(|r| r.0).collect::<Vec<_>>())
                         .with_timezone("+00:00"),
                 ),
-                Arc::new(StringArray::from(rows.iter().map(|r| r.1).collect::<Vec<_>>())),
-                Arc::new(StringArray::from(rows.iter().map(|r| r.2).collect::<Vec<_>>())),
-                Arc::new(Int64Array::from(rows.iter().map(|r| r.3).collect::<Vec<_>>())),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int64Array::from(
+                    rows.iter().map(|r| r.3).collect::<Vec<_>>(),
+                )),
             ],
         )
         .unwrap()
     }
 
-    async fn pt_static_totals(rows: &[(i64, &str, &str, i64)]) -> HashMap<[u8; 32], (f64, i64, f64)> {
+    async fn pt_static_totals(
+        rows: &[(i64, &str, &str, i64)],
+    ) -> HashMap<[u8; 32], (f64, i64, f64)> {
         let spec = CubeSpec::from_yaml(PT_STATIC_SPEC).unwrap();
         let ctx = SessionContext::new();
         ctx.register_batch("events", pt_batch(rows)).unwrap();
@@ -1897,12 +2207,24 @@ includeGlobal: true
         let spec = CubeSpec::from_yaml(PT_TEMPORAL_SPEC).unwrap();
         let ctx = SessionContext::new();
         ctx.register_batch("events", pt_batch(rows)).unwrap();
-        let output =
-            build_temporal(&ctx, &spec, "events", None, None, NullEventTimePolicy::Reject).await.unwrap();
+        let output = build_temporal(
+            &ctx,
+            &spec,
+            "events",
+            None,
+            None,
+            NullEventTimePolicy::Reject,
+        )
+        .await
+        .unwrap();
         let batches = output.states.collect().await.unwrap();
         let mut out: HashMap<[u8; 32], (f64, i64, AverageState)> = HashMap::new();
         for batch in &batches {
-            let ids = batch.column(1).as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+            let ids = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
             let total = batch.column(2).as_primitive::<Float64Type>();
             let events = batch.column(3).as_primitive::<Int64Type>();
             let mean_blob = batch.column(4).as_binary::<i32>();
