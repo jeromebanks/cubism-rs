@@ -154,7 +154,7 @@ vectorized group accumulators, the CLI, and the Python bindings. Not yet:
 quantiles, published packages (crates.io / PyPI), streaming ingestion.
 
 ```
-cargo test          # 75 tests incl. property tests + legacy parity fixtures
+cargo test          # 250 tests incl. property tests + legacy parity fixtures
 cargo run -p cubism-cli -- validate examples/web_events.yaml
 ```
 
