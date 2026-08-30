@@ -14,6 +14,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep in sync with ci.yml's RUST_TOOLCHAIN and rust-toolchain.toml.
+  RUST_TOOLCHAIN: "1.96.1"
 
 jobs:
   cargo-deny:
@@ -32,6 +34,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       # Runs the #[ignore]'d 1M-row golden-digest case that ci.yml skips to
       # stay fast. Not a perf-regression *comparison* yet (no baseline
