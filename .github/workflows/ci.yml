@@ -64,6 +64,9 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
+      # --all-targets excludes doctests (a cargo limitation, not a typo);
+      # run them as a separate step so a broken doc example still fails CI.
+      - run: cargo test --workspace --doc
 
   docs:
     name: docs
