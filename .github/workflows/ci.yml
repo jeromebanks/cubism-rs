@@ -2,9 +2,10 @@ name: CI
 
 # Required pre-merge gate for #43: every PR into main, and every push to
 # main (post-merge signal), runs fmt/clippy/test/docs against the pinned
-# toolchain in rust-toolchain.toml, plus a build+import smoke test for the
-# Python bindings. See docs/sdlc-process-notes.md for why fmt/docs are
-# gated with warnings-as-errors from the start rather than added loose and
+# toolchain in rust-toolchain.toml, example-spec validation, an internal
+# markdown link check, and a build+import smoke test for the Python
+# bindings. See docs/sdlc-process-notes.md for why fmt/docs are gated
+# with warnings-as-errors from the start rather than added loose and
 # tightened later.
 #
 # Slow/optional suites (cargo-deny, the Scala Spark adapter, benchmark
@@ -81,6 +82,44 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  spec-validate:
+    name: spec validation (examples)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p cubism-cli
+      - name: validate every example cube spec
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          specs=(examples/*.yaml examples/web_analytics_demo/*.yaml)
+          for spec in "${specs[@]}"; do
+            echo "== $spec =="
+            ./target/debug/cubism validate "$spec"
+          done
+
+  links:
+    name: link check (internal, README + docs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: lychee (offline — internal/relative links + fragments only)
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # --offline: never hits the network, so this stays fast and
+          # deterministic enough to be a required check (external-link
+          # rot goes to nightly.yml instead, per #43's remediation
+          # pattern in deny.toml). --include-fragments catches broken
+          # in-page section links like docs/TIMESERIES_ROADMAP.md's.
+          args: >-
+            --offline --include-fragments --no-progress
+            README.md 'docs/**/*.md'
+          fail: true
+
   python:
     name: python bindings
     runs-on: ubuntu-latest
@@ -111,7 +150,7 @@ jobs:
   ci-required:
     name: CI required checks
     if: always()
-    needs: [fmt, clippy, test, docs, python]
+    needs: [fmt, clippy, test, docs, spec-validate, links, python]
     runs-on: ubuntu-latest
     steps:
       - name: Check all required jobs succeeded
