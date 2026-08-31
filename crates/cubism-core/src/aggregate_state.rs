@@ -239,7 +239,9 @@ fn verify_framing<'a>(bytes: &'a [u8], kind: &str) -> Result<&'a [u8], CubismErr
             let actual = crc32fast::hash(body);
             if stored != actual {
                 return Err(CubismError::AggregateState(format!(
-                    "{kind} state blob failed its checksum: stored {stored:#010x},                      computed {actual:#010x} — the blob is corrupt, not merely                      an unknown version"
+                    "{kind} state blob failed its checksum: stored {stored:#010x}, \
+                     computed {actual:#010x} — the blob is corrupt, not merely \
+                     an unknown version"
                 )));
             }
             Ok(body)
