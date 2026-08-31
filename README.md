@@ -168,6 +168,10 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
+cargo build -p cubism-cli && for f in examples/*.yaml examples/web_analytics_demo/*.yaml; do
+  ./target/debug/cubism validate "$f"
+done                                                 # every example spec still validates
+lychee --offline --include-fragments README.md 'docs/**/*.md'  # internal links + anchors
 cd bindings/cubism-py && maturin build --out dist   # python bindings build smoke
 ```
 

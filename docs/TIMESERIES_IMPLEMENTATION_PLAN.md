@@ -33,8 +33,8 @@ folded into the roadmap's done-fraction.
 
 Depends on: [`TIMESERIES_FEASIBILITY.md`](TIMESERIES_FEASIBILITY.md)
 
-Extends: the workspace-root [`PLAN.md`](../../PLAN.md); it does not overwrite or
-invalidate the existing static-cube plan
+Extends: the workspace-root `PLAN.md` (private planning doc, outside this repo);
+it does not overwrite or invalidate the existing static-cube plan
 
 ## Outcome and delivery principles
 
