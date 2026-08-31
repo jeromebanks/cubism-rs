@@ -6,16 +6,34 @@
 # aren't a required check). A failing advisory or license gets triaged the
 # next business day by whoever is on the #43 rotation at the time; if a
 # finding needs more than a version bump, file a follow-up issue referencing
-# the advisory/license ID and `# allow`-annotate the specific entry below
+# the advisory/license ID and add a documented `ignore`/`allow` entry below
 # with that issue number rather than silently loosening the policy.
-
-[graph]
-all-features = true
+#
+# No `all-features` here (default resolution only, matching what ci.yml
+# actually builds): scanning the graph this repo actually builds is what
+# surfaced the real xxhash-rust/BSL-1.0 gap below, one this repo's own
+# earlier `--all-features` pass (and a `tail`-truncated read of its output)
+# had missed entirely.
 
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # No safe upgrade exists (advisory text itself says so); paste is a
+    # transitive proc-macro dep of datafusion-common 53.1.0
+    # (cubism-iceberg-spike's pin). Nothing to bump here — revisit if/when
+    # datafusion drops it upstream.
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; no safe upgrade path exists per the advisory itself (transitive via datafusion-common 53.1.0)" },
+    # Both fixed by pyo3 >=0.29.0, but arrow-pyarrow 58.3.0 (what this
+    # workspace's datafusion 54.0.0 / arrow 58.3 pin requires — see
+    # cubism-serve/Cargo.toml's comment on that pin) requires pyo3
+    # `^0.28.0`. The real fix is an arrow 58->59 + datafusion major bump
+    # across cubism-datafusion/cubism-iceberg/cubism-serve/cubism-cli, not
+    # a version bump in bindings/cubism-py alone -- tracked in #59, not
+    # done here to satisfy a scanner.
+    { id = "RUSTSEC-2026-0176", reason = "fixed in pyo3 0.29.0; blocked on an arrow 58->59 + datafusion major bump across the workspace, tracked in #59" },
+    { id = "RUSTSEC-2026-0177", reason = "fixed in pyo3 0.29.0; blocked on an arrow 58->59 + datafusion major bump across the workspace, tracked in #59" },
+]
 
 [licenses]
 version = 2
@@ -25,21 +43,16 @@ allow = [
     "MIT",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",       # xxhash-rust (direct dep of cubism-core) — OSI-approved, FSF Free/Libre
+    "bzip2-1.0.6",   # libbz2-rs-sys, via datafusion's async-compression bzip2 codec — a
+                     # real SPDX identifier (cargo-deny resolves it to "bzip2 and
+                     # libbzip2 License v1.0.6"), a 4-clause zlib-style permissive text
     "ISC",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Zlib",
     "CC0-1.0",
-    "MPL-2.0",
-    "OpenSSL",
 ]
 confidence-threshold = 0.8
-
-# libbz2-rs-sys reports its `license` field as the non-SPDX string
-# "bzip2-1.0.6" (a real permissive license, just not expressed as SPDX) —
-# this will likely need a `[[licenses.clarify]]` entry on nightly's first
-# run rather than an `allow` addition. Left for that run to surface rather
-# than guessed at here (see the remediation policy above).
 
 [bans]
 multiple-versions = "warn"

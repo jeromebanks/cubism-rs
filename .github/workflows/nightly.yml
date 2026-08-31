@@ -26,6 +26,10 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+          # Action defaults `arguments` to `--all-features`; override to
+          # scan the graph this workspace actually builds (default
+          # features only), matching deny.toml having no [graph] override.
+          arguments: ""
 
   bench-smoke:
     name: benchmark regression smoke
