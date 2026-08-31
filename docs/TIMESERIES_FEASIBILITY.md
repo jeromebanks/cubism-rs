@@ -4,8 +4,8 @@ Status: design proposal, not implemented
 
 Evaluated: 2026-07-28
 
-Extends: the workspace-root [`PLAN.md`](../../PLAN.md); it does not replace that
-plan
+Extends: the workspace-root `PLAN.md` (private planning doc, outside this repo);
+it does not replace that plan
 
 ## Executive conclusion
 
