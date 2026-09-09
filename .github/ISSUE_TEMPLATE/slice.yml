@@ -1,0 +1,63 @@
+name: Delivery slice
+description: One independently testable unit that fits a single agent session
+title: ""
+labels: ["type:slice", "status:ready"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What observable capability or correction exists when this closes?
+    validations:
+      required: true
+  - type: input
+    id: parent
+    attributes:
+      label: Parent epic
+      description: "Exactly one issue reference, for example: Parent epic: #42"
+      placeholder: "Parent epic: #"
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Boundaries and likely files/components. Keep it to one session.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use checkboxes for observable pass/fail conditions.
+      value: "- [ ] "
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: Exact focused tests, commands, fixtures, or behaviors.
+    validations:
+      required: true
+  - type: textarea
+    id: demo
+    attributes:
+      label: Demo / human-visible effect
+      description: What changes in the milestone demo? Say "none" and why if internal only.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: Adjacent work this session must not absorb.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Minimum exact docs, ADRs, code paths, or prior issues a fresh session must read.
+    validations:
+      required: true

@@ -1,5 +1,10 @@
 # Time-Series Roadmap: Phase 4-5 Session-Slice Milestones
 
+> **Historical roadmap (retired):** the shared branch merged in PR #24. Do not
+> select work or sequence sessions from this file. Current work is tracked as
+> GitHub epic/slice issues under [`SDLC.md`](../SDLC.md). A new slice may link
+> here for specific technical evidence.
+
 Date: 2026-08-12 (Phase 5 section added 2026-08-15, see that section's own
 note)
 

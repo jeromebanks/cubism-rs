@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "repository": "jeromebanks/cubism-rs",
+  "default_branch": "main",
+  "labels": {
+    "epic": "type:epic",
+    "slice": "type:slice",
+    "feedback": "type:feedback",
+    "ready": "status:ready",
+    "in_progress": "in-progress",
+    "in_review": "in-review",
+    "blocked": "status:blocked",
+    "needs_slicing": "needs-slicing",
+    "human_review": "gate:human-review",
+    "changes_requested": "gate:changes-requested",
+    "approved": "gate:approved"
+  },
+  "required_slice_sections": [
+    "Outcome",
+    "Parent epic",
+    "Scope",
+    "Acceptance criteria",
+    "Validation",
+    "Demo / human-visible effect",
+    "Non-goals",
+    "Context"
+  ],
+  "required_status_checks": [
+    "CI required checks"
+  ],
+  "review": {
+    "required": ["codex"],
+    "advisor_when_available": true
+  },
+  "merge": {
+    "method": "merge",
+    "delete_branch": true
+  },
+  "status": {
+    "recently_completed": 12,
+    "output": "docs/project-status.html"
+  }
+}

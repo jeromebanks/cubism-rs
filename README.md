@@ -184,6 +184,23 @@ cargo test -p cubism-timeseries-bench --lib -- --ignored golden_digest_sparse_1m
 cd spark-adapter && sbt test                                     # optional Scala adapter, see #43
 ```
 
+### SDLC
+
+[`SDLC.md`](SDLC.md) defines one workflow for every subsystem: bounded GitHub
+slice -> isolated worktree -> PR -> independent Codex review -> automatic merge.
+Humans review coherent milestone outcomes through generated HTML reports and
+demos. Generate the visual roadmap and in-flight view with:
+
+```bash
+rtk python3 scripts/sdlc.py status
+```
+
+Then open [`docs/project-status.html`](docs/project-status.html). The former
+shared-branch time-series process is retired; its handoffs remain historical
+evidence only. New human operators can start with the
+[`SDLC tutorial`](docs/sdlc/HUMAN_TUTORIAL.md) or present the self-contained
+[`overview slide deck`](docs/sdlc/overview-slides.html).
+
 ## License
 
 Apache-2.0

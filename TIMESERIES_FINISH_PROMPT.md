@@ -1,4 +1,8 @@
-# Prompt: finish the timeseries implementation (fresh session)
+# Prompt: finish the timeseries implementation (historical)
+
+> **Retired:** PR #24 merged this branch. Do not execute this prompt or resume
+> the shared-branch workflow. Use [`SDLC.md`](SDLC.md) and a bounded
+> `work-slice` issue for future time-series changes.
 
 You are continuing the time-series implementation of **cubism**
 (`/Users/jeromebanks/dev/cubism_saas/cubism`, branch
