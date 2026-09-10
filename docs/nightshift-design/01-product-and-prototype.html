@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Nightshift — Product, prototype assessment, and principles — complete design draft, with source and section navigation.">
+  <meta name="source-sha256" content="ce932fc7c3f2dac3a24311fcfdb15756c25fac032bc308df93981be2ba0d9385">
+  <title>Nightshift — Product, prototype assessment, and principles</title>
+  <link rel="stylesheet" href="reader.css">
+  <script type="module" src="reader.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to document</a>
+  <header class="masthead"><a href="index.html">NIGHTSHIFT / Design notebook</a><span>Draft for review · Proposed architecture, not an implemented platform</span></header>
+  <div class="layout">
+    <aside aria-label="Document navigation"><div>
+      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html" aria-current="page">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Durable events and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and adversarial review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestone contracts and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Migration roadmap, risks, and architectural decisions</a></li></ol></nav>
+      <details open><summary>On this page</summary><nav aria-label="Page sections"><div class="toc">
+<ul>
+<li><a href="#1-executive-thesis-and-product-definition">1. Executive thesis and product definition</a><ul>
+<li><a href="#ownership-boundary">Ownership boundary</a></li>
+</ul>
+</li>
+<li><a href="#2-evidence-grounded-assessment-of-the-prototype">2. Evidence-grounded assessment of the prototype</a><ul>
+<li><a href="#confirmed-findings">Confirmed findings</a></li>
+<li><a href="#validation-performed-and-its-limits">Validation performed and its limits</a></li>
+<li><a href="#historical-lessons">Historical lessons</a></li>
+</ul>
+</li>
+<li><a href="#3-retain-repair-replace-add">3. Retain / repair / replace / add</a></li>
+<li><a href="#4-product-principles-and-invariants">4. Product principles and invariants</a></li>
+</ul>
+</div>
+</nav></details>
+    </div></aside>
+    <main id="content">
+      <div class="source-bar"><a href="index.html">← TL;DR overview</a><a href="01-product-and-prototype.md" download>Markdown source ↓</a><span>Full text · Generated from preserved Markdown</span></div>
+      <article><h1 id="nightshift-product-prototype-assessment-and-principles">Nightshift — Product, prototype assessment, and principles<a class="headerlink" href="#nightshift-product-prototype-assessment-and-principles" title="Permanent link">§</a></h1>
+<p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="02-architecture-and-work-model.html">Next</a></p>
+<blockquote>
+<p>Design proposal · Packaged 2026-09-09 · Original sections 1–4 preserved below. Repository findings refer to the inspected checkpoint, not live project state.</p>
+</blockquote>
+<p>This design recommends a service that owns the execution of software programs from agreed intent through verified delivery and human milestone acceptance. Its central product is <strong>reliable delegation with inspectable evidence</strong>: a technical leader can authorize an outcome, let bounded work proceed across sessions and agents, and review coherent results without supervising every pull request.</p>
+<p>The Cubism prototype provides a useful operating model and reusable product assets. It does not yet provide the identity, concurrency, recovery, or authorization guarantees required for unattended operation across customers.</p>
+<p>I read <code>astra-sdlc.txt</code> completely, inspected the specified branch and its changes against <code>main</code>, examined the requested workflow materials and selected historical evidence, and ran non-mutating diagnostics. No repository files, issues, comments, branches, or GitHub settings were changed.</p>
+<h2 id="1-executive-thesis-and-product-definition">1. Executive thesis and product definition<a class="headerlink" href="#1-executive-thesis-and-product-definition" title="Permanent link">§</a></h2>
+<p>Nightshift is a <strong>governed software delivery service</strong> for programs that exceed the capacity of one coding session. Humans establish outcomes, constraints, budgets, and acceptance contracts. Nightshift plans and executes bounded slices, commissions independent reviews, coordinates integration, maintains evidence, and presents milestones for human acceptance.</p>
+<p>“Autonomous” means the service can select and complete authorized work, recover from routine failures, and continue across sessions without new human instructions. This authority is limited by an explicit execution envelope:</p>
+<ul>
+<li>Allowed repositories, environments, tools, networks, and secrets.</li>
+<li>Approved outcome and scope.</li>
+<li>Risk limits and required verification.</li>
+<li>Time, spend, concurrency, and retry budgets.</li>
+<li>Milestone boundaries and exception authority.</li>
+</ul>
+<p>“Dark” means ordinary delivery does not require a human operator. Every material action remains attributable and observable. A stopped factory must explain whether it is waiting for capacity, evidence, access, a dependency, or a human decision.</p>
+<p>The initial customer is a small engineering organization with maintained repositories, functioning CI, and a technical leader willing to delegate a bounded backlog. Start with internal tools, developer infrastructure, and well-tested backend changes. Do not initially promise unattended operation on arbitrary legacy systems or safety-critical software.</p>
+<h3 id="ownership-boundary">Ownership boundary<a class="headerlink" href="#ownership-boundary" title="Permanent link">§</a></h3>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Party</th>
+<th>Owns</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Customer</td>
+<td>Product direction, repository contents, acceptance authority, risk appetite, credentials granted, deployment ownership, IP</td>
+</tr>
+<tr>
+<td>Nightshift</td>
+<td>Contracts, scheduling, execution coordination, policy enforcement, agent identities, review assignment, evidence, recovery, spend accounting</td>
+</tr>
+<tr>
+<td>Source host</td>
+<td>Git objects, refs, PR records, source-host permissions and enforcement</td>
+</tr>
+<tr>
+<td>Tracker</td>
+<td>Customer-facing planning records; synchronized views of factory work</td>
+</tr>
+<tr>
+<td>CI/build system</td>
+<td>Execution of identified verification/build jobs and their native records</td>
+</tr>
+<tr>
+<td>Model provider</td>
+<td>Model inference and provider-side processing under the customer’s permitted terms</td>
+</tr>
+<tr>
+<td>Human approver</td>
+<td>Acceptance, rejection, risk acceptance, policy exceptions within assigned authority</td>
+</tr>
+</tbody>
+</table></div>
+<p>Nightshift does not infer production deployment authority from permission to implement or merge. Milestone acceptance, source integration, release creation, and deployment are separate actions.</p>
+<p>Initial assumptions: GitHub is the first source adapter; Linux is the first runner platform; customers permit selected external model providers; production deployment requires an explicit environment policy. These assumptions support a complete first design and remain revisable.</p>
+<h2 id="2-evidence-grounded-assessment-of-the-prototype">2. Evidence-grounded assessment of the prototype<a class="headerlink" href="#2-evidence-grounded-assessment-of-the-prototype" title="Permanent link">§</a></h2>
+<p>The checked-out branch is <code>chore/checkpoint-sdlc-worktree-state</code>, at <code>0cbaf2d3c92ea30eafe507a5460894f5322ccc69</code>. Local <code>main</code> is <code>1ae95dd9fdfb56febf463c3fd5601ddafbeac4d0</code>, matching the brief.</p>
+<p>The checkpoint changes 32 files, with 2,726 insertions and 441 deletions. The substantive transition is from the large historical time-series skill to portable instructions, deterministic Python tooling, issue templates, and human-facing HTML.</p>
+<p>The only untracked file before and after inspection was <code>astra-sdlc.txt</code>.</p>
+<h3 id="confirmed-findings">Confirmed findings<a class="headerlink" href="#confirmed-findings" title="Permanent link">§</a></h3>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Finding</th>
+<th>Classification and evidence</th>
+<th>Consequence</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Applied merge raises <code>NameError</code></td>
+<td><strong>Confirmed defect.</strong> <code>command_merge</code> references <code>add</code> and <code>remove</code>, which are local to another function. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L675">scripts/sdlc.py:675</a></td>
+<td>An otherwise eligible applied merge crashes before invoking the merge command.</td>
+</tr>
+<tr>
+<td>Implementer can manufacture an acceptable receipt</td>
+<td><strong>Confirmed authorization defect.</strong> Receipt parsing obtains the comment author, but eligibility requires only nonempty author and reviewer fields. No independent execution identity is authenticated. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L393">scripts/sdlc.py:393</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L467">eligibility:467</a></td>
+<td>A comment written by the implementer can satisfy the review gate.</td>
+</tr>
+<tr>
+<td>A later failed review does not invalidate an earlier pass</td>
+<td><strong>Confirmed defect.</strong> Eligibility searches for any matching passing receipt; it does not resolve subsequent failures or outstanding findings. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L467">scripts/sdlc.py:467</a></td>
+<td>Review history can contain an unresolved failure while the gate passes.</td>
+</tr>
+<tr>
+<td>Receipt submission can bind an old report to a new head</td>
+<td><strong>Confirmed binding gap.</strong> The submission command fetches the current PR head and attaches it to the supplied report, without requiring the report’s reviewed SHA. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L637">scripts/sdlc.py:637</a></td>
+<td>A head change between review and submission can produce misleading provenance.</td>
+</tr>
+<tr>
+<td><code>issue/N</code> creation is not an exclusive distributed claim</td>
+<td><strong>Confirmed protocol flaw by interleaving analysis.</strong> A separate absence check precedes an ordinary push of the default-branch SHA. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L582">scripts/sdlc.py:582</a></td>
+<td>Two workers may both report successful ownership.</td>
+</tr>
+<tr>
+<td>Claims lack identity and recovery fencing</td>
+<td><strong>Architectural gap.</strong> Claim/resume uses branch presence and worktree existence, without owner, generation, heartbeat, expiry, or downstream fence. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L566">scripts/sdlc.py:566</a></td>
+<td>Safe automated abandonment recovery is undefined.</td>
+</tr>
+<tr>
+<td>Merge evaluation and mutation are detached</td>
+<td><strong>Confirmed construction gap, currently masked by the <code>NameError</code>.</strong> The merge command does not carry the evaluated SHA or a base expectation. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L656">scripts/sdlc.py:656</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L675">merge:675</a></td>
+<td>Repairing the exception alone would leave time-of-check/time-of-use exposure.</td>
+</tr>
+<tr>
+<td>Check names overwrite one another</td>
+<td><strong>Confirmed defect.</strong> Check outcomes are stored in a dictionary keyed only by display name; the last entry wins. Issuer identity is not checked. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L410">scripts/sdlc.py:410</a></td>
+<td>Conflicting or differently issued checks can be collapsed into success.</td>
+</tr>
+<tr>
+<td>Human gates are not revalidated at merge</td>
+<td><strong>Confirmed enforcement gap.</strong> Merge eligibility checks the linked issue’s labels but does not load its parent or rerun readiness validation. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L437">scripts/sdlc.py:437</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L656">inputs:656</a></td>
+<td>A slice already in flight can remain eligible after its parent pauses.</td>
+</tr>
+<tr>
+<td>Feedback exemption is broader than written policy</td>
+<td><strong>Confirmed defect.</strong> Feedback-labeled issues bypass both parent gate checks, including <code>gate:human-review</code>; a specific feedback decision link is not validated. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L372">scripts/sdlc.py:372</a>. Written policy limits the exception to linked feedback during changes requested. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/AGENTS.md#L21">AGENTS.md:21</a></td>
+<td>A label can bypass the intended milestone pause.</td>
+</tr>
+<tr>
+<td>Readiness is structural, not executable readiness</td>
+<td><strong>Architectural gap.</strong> Validation checks sections, parent, labels, and a checklist. It does not prove dependency completion, bounded effort, meaningful criteria, or even require <code>status:ready</code> in the direct claim path. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L350">scripts/sdlc.py:350</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L572">claim:572</a></td>
+<td>The UI’s “ready” language is stronger than the enforced contract.</td>
+</tr>
+<tr>
+<td>Approval is a label/comment operation</td>
+<td><strong>Architectural gap.</strong> Any authorized invocation can apply approval labels and then post text. There is no bundle digest, authenticated human decision, or atomic relationship between the two operations. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L715">scripts/sdlc.py:715</a></td>
+<td>Partial failure and fabricated approval remain possible.</td>
+</tr>
+<tr>
+<td>Milestone evidence is issue membership</td>
+<td><strong>Confirmed evidence limit.</strong> The renderer checks required keys, epic identity, closed issues, and parent membership. It does not verify commits, merges, tests, artifacts, or demos. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L692">scripts/sdlc.py:692</a></td>
+<td>“Closed” is insufficient evidence that the claimed outcome exists.</td>
+</tr>
+<tr>
+<td>Policy and enforcement come from the executing checkout</td>
+<td><strong>Architectural trust gap.</strong> Default configuration is relative to the script; an arbitrary config path is accepted. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L24">scripts/sdlc.py:24</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L826">CLI:826</a></td>
+<td>The tool does not establish a trusted policy origin independent of the candidate change.</td>
+</tr>
+<tr>
+<td>Status is a bounded snapshot</td>
+<td><strong>Confirmed limitation.</strong> Fetches stop at 500 issues and 200 open PRs. The committed page records <code>2026-09-05T00:24:30+00:00</code>. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/sdlc.py#L86">scripts/sdlc.py:86</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/project-status.html#L15">docs/project-status.html:15</a></td>
+<td>Staleness and incomplete membership can mislead operators at scale.</td>
+</tr>
+</tbody>
+</table></div>
+<p>The claim race does not require two simultaneous server-side ref creations:</p>
+<ol>
+<li>A and B each observe the branch absent.</li>
+<li>A pushes base SHA <code>X</code>, creating the branch.</li>
+<li>B begins its push after that creation and observes the remote already at <code>X</code>.</li>
+<li>B’s push succeeds as an up-to-date operation.</li>
+<li>Both continue and announce ownership.</li>
+</ol>
+<p>Git distinguishes an already-up-to-date ref from a newly created ref; the script accepts command success without checking exclusive acquisition. This conclusion follows from the code and documented push semantics; I did not perform a remote race experiment. <a href="https://git-scm.com/docs/git-push">Git push documentation</a></p>
+<h3 id="validation-performed-and-its-limits">Validation performed and its limits<a class="headerlink" href="#validation-performed-and-its-limits" title="Permanent link">§</a></h3>
+<p>All eight existing SDLC unit tests passed. Additional in-memory checks produced:</p>
+<pre><code class="language-text">self-authored receipt gate errors: []
+pass then fail gate errors: []
+duplicate check names gate errors: []
+feedback during human-review readiness errors: []
+applied merge: NameError name 'add' is not defined
+external mutations attempted: 0
+</code></pre>
+<p>The tests cover useful parsing and rendering behavior, but no applied merge or concurrent claim scenario. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/tests/test_sdlc.py#L46">scripts/tests/test_sdlc.py:46</a></p>
+<p>The required CI workflow aggregates Rust, documentation, schema, link, and binding checks; it does not include these Python SDLC tests. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/.github/workflows/ci.yml#L150">ci.yml:150</a></p>
+<p>The local quality script can report success while skipping unavailable link and binding tools; it builds the Python binding but does not perform CI’s install/import check. That is acceptable as a local preflight if reported accurately, but cannot be treated as equivalent evidence. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/quality-gate.sh#L47">quality-gate.sh:47</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/.github/workflows/ci.yml#L141">ci.yml:141</a></p>
+<p>Live branch protections, installed Apps, provider availability, actual independent-review sessions, hosted demo behavior, and production deployment were not verified.</p>
+<h3 id="historical-lessons">Historical lessons<a class="headerlink" href="#historical-lessons" title="Permanent link">§</a></h3>
+<p>The PostScript workflow already has explicit local claim recovery with heartbeats and discussion of ABA races. It is richer than the Cubism branch claim in this respect, but remains a shared-filesystem protocol rather than a distributed lease service. Its cold-review workflow also documents stale output, wrong-worktree review, and fix-before-re-review pitfalls. <a href="https://github.com/jeromebanks/postscript_interpreter/blob/1a5bb6520dfb9fea54a0a4fe34930e9dafa5d5e7/.claude/skills/work-issue/SKILL.md#L82">PostScript work-issue:82</a>, <a href="https://github.com/jeromebanks/postscript_interpreter/blob/1a5bb6520dfb9fea54a0a4fe34930e9dafa5d5e7/.claude/skills/work-issue/SKILL.md#L553">review:553</a></p>
+<p>The historical Cubism process contributed especially valuable evidence discipline: distinguish what a test proves, what it does not prove, and what was deferred. The selected Phase 20 handoff demonstrates this concretely, including its distinction between confirmed and unexplained formatting behavior. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/TIMESERIES_PHASE_20_HANDOFF.md#L195">Phase 20:195</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/TIMESERIES_PHASE_20_HANDOFF.md#L240">limitations:240</a></p>
+<p>The roadmap also distinguishes completed tracked milestones from completion of the broader specification. Preserve that distinction in the product. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/TIMESERIES_ROADMAP.md#L38">TIMESERIES_ROADMAP.md:38</a></p>
+<p>The retrospective documents the earlier absence of cold review on every slice; it is historical evidence, not proof of the current review posture. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/sdlc-process-notes.md#L173">sdlc-process-notes.md:173</a></p>
+<h2 id="3-retain-repair-replace-add">3. Retain / repair / replace / add<a class="headerlink" href="#3-retain-repair-replace-add" title="Permanent link">§</a></h2>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Existing component</th>
+<th>Decision</th>
+<th>Product treatment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Epic → bounded slice → milestone model</td>
+<td>Retain</td>
+<td>Extend into versioned contracts and dependency graphs</td>
+</tr>
+<tr>
+<td>Scope, non-goals, acceptance, validation, context fields</td>
+<td>Retain</td>
+<td>Convert templates into schema-backed contracts</td>
+</tr>
+<tr>
+<td>Portable agent instructions and thin harness entry points</td>
+<td>Retain</td>
+<td>Package as versioned execution guidance; never as authority</td>
+</tr>
+<tr>
+<td>“Does not prove” evidence discipline</td>
+<td>Retain</td>
+<td>Required verification limitation fields</td>
+</tr>
+<tr>
+<td>Quality-gate command catalog</td>
+<td>Retain and wrap</td>
+<td>Run inside isolated runners with structured results and provenance</td>
+</tr>
+<tr>
+<td>Current merge and receipt logic</td>
+<td>Repair for dogfood, then replace</td>
+<td>External admission and authenticated attestations</td>
+</tr>
+<tr>
+<td>Remote branch as claim</td>
+<td>Replace</td>
+<td>Transactional lease service; branch becomes an output</td>
+</tr>
+<tr>
+<td>Markdown/labels as workflow state</td>
+<td>Replace</td>
+<td>Durable domain state; tracker records become synchronized projections</td>
+</tr>
+<tr>
+<td>Milestone manifest and report renderer</td>
+<td>Retain and extend</td>
+<td>Render from an immutable evidence bundle</td>
+</tr>
+<tr>
+<td>Cockpit layout and planning warnings</td>
+<td>Retain</td>
+<td>Live projection with freshness and completeness indicators</td>
+</tr>
+<tr>
+<td>Repository-relative policy loading</td>
+<td>Replace</td>
+<td>Signed policy versions from an independent authority</td>
+</tr>
+<tr>
+<td>Shared writable build cache</td>
+<td>Replace for hosted execution</td>
+<td>Tenant- and trust-scoped caches with verified keys</td>
+</tr>
+<tr>
+<td>Historical handoff chain</td>
+<td>Retire operationally</td>
+<td>Searchable historical evidence; structured checkpoints for continuation</td>
+</tr>
+<tr>
+<td>Source-host configuration reconciliation</td>
+<td>Retain concept</td>
+<td>Adapter detects desired/actual protection drift</td>
+</tr>
+<tr>
+<td>Tenant isolation, identity, accounting, incident handling</td>
+<td>Add</td>
+<td>First-class platform responsibilities</td>
+</tr>
+</tbody>
+</table></div>
+<p>The relevant template foundations are already present in the <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/.github/ISSUE_TEMPLATE/slice.yml#L1">slice form</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/.github/ISSUE_TEMPLATE/feedback.yml#L1">feedback form</a>, and <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/sdlc/milestone-manifest.example.json#L1">milestone manifest</a>.</p>
+<h2 id="4-product-principles-and-invariants">4. Product principles and invariants<a class="headerlink" href="#4-product-principles-and-invariants" title="Permanent link">§</a></h2>
+<p>These are platform requirements, not instructions entrusted to an LLM:</p>
+<ol>
+<li>Every executable action belongs to a tenant, contract revision, attempt, and authorization.</li>
+<li>At most one implementation lease is authoritative for a slice at a time.</li>
+<li>An expired or superseded lease cannot authorize new effects.</li>
+<li>Agents cannot issue their own identities, approve themselves, activate policy, or grant additional permissions.</li>
+<li>Review and verification apply to immutable source and input identities.</li>
+<li>Every blocking finding remains unresolved until an authorized disposition addresses it.</li>
+<li>A PR cannot weaken the policy used to approve itself.</li>
+<li>Missing, ambiguous, stale, or untrusted evidence cannot become success.</li>
+<li>Human acceptance refers to one exact bundle and one contract revision.</li>
+<li>A milestone gate controls admission and promotion, not merely issue selection.</li>
+<li>External side effects have durable intent, reconciliation, and an explicit ambiguity state.</li>
+<li>Budgets include retries, reviews, abandoned attempts, and infrastructure.</li>
+<li>Cancellation never implies that an already-admitted external operation was undone.</li>
+<li>Merge, release, deployment, and product acceptance remain distinct facts.</li>
+<li>Scope changes create a new contract or plan revision; earlier commitments remain inspectable.</li>
+<li>Cross-tenant authorization never depends solely on application filtering or prompt instructions.</li>
+<li>An agent’s claim of progress is not progress evidence.</li>
+<li>Audit records distinguish observation, inference, assertion, and verified result.</li>
+</ol>
+<p>A model may propose a transition. Deterministic services decide whether it is permitted.</p>
+<hr />
+<p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="02-architecture-and-work-model.html">Next</a></p></article>
+      <nav class="bottom-nav" aria-label="Reading shortcuts"><a href="README.html">Reading guide</a><a href="#content">Back to top ↑</a></nav>
+      <footer>Nightshift design draft. Sources and qualifications are retained in the text. HTML is a reading edition, not a new design revision. Diagram visuals load Mermaid 11.12.0 from jsDelivr; text, tables, code, and diagram sources work without it.</footer>
+    </main>
+  </div>
+</body>
+</html>

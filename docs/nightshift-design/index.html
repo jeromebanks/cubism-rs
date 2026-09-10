@@ -113,7 +113,7 @@
       <div class="mast"><div class="brand"><span class="mark" aria-hidden="true"></span>Nightshift</div><div class="stamp">Design brief · 09 September 2026<br>Proposed architecture</div></div>
       <div class="hero">
         <div><p class="eyebrow">The software factory, under your direction</p><h1>Nightshift.</h1><p class="tagline">Big plans. Small slices.<br>Verified delivery.</p></div>
-        <div class="hero-note"><p><strong>You define the outcome.</strong> The factory carries the work across sessions, agents, and repositories. You return for a coherent demonstration and an explicit acceptance decision.</p><a class="button" href="README.md">Explore the full design ↗</a></div>
+        <div class="hero-note"><p><strong>You define the outcome.</strong> The factory carries the work across sessions, agents, and repositories. You return for a coherent demonstration and an explicit acceptance decision.</p><a class="button" href="README.html">Explore the full design ↗</a></div>
       </div>
     </div>
   </header>
@@ -140,7 +140,7 @@
       <p class="lede">The Cubism checkpoint was inspected as code and as a diff. Eight existing SDLC tests passed; isolated diagnostics exposed gaps those tests do not cover.</p>
       <div class="assessment">
         <div class="keep"><span class="label">Retain</span><h3>The useful foundations</h3><ul><li>Bounded vertical slices and explicit non-goals.</li><li>Independent review and milestone-level human governance.</li><li>Portable instructions, quality checks, and reporting.</li><li>Evidence that states what it does and does not prove.</li></ul></div>
-        <div class="repair"><span class="badge">Confirmed in the inspected checkpoint</span><h3>The prototype is not yet a secure workflow engine</h3><ul><li>Applied merge raises a <code>NameError</code>.</li><li>Self-authored review receipts and pass-then-fail histories can satisfy the gate.</li><li>Conflicting check names collapse to the last result.</li><li>Human-gate and feedback exceptions are incompletely enforced.</li><li>Branch-based claims lack exclusive ownership, leases, and fencing.</li></ul><a href="01-product-and-prototype.md">Read all findings, evidence links, and verification limits →</a></div>
+        <div class="repair"><span class="badge">Confirmed in the inspected checkpoint</span><h3>The prototype is not yet a secure workflow engine</h3><ul><li>Applied merge raises a <code>NameError</code>.</li><li>Self-authored review receipts and pass-then-fail histories can satisfy the gate.</li><li>Conflicting check names collapse to the last result.</li><li>Human-gate and feedback exceptions are incompletely enforced.</li><li>Branch-based claims lack exclusive ownership, leases, and fencing.</li></ul><a href="01-product-and-prototype.html">Read all findings, evidence links, and verification limits →</a></div>
       </div>
       <p class="note" style="margin-top:14px">Repository findings refer to commit <code>0cbaf2d3</code>. The claim race is a code/interleaving analysis; no remote race experiment was performed. This is a design proposal, not a shipped platform.</p>
     </section>
@@ -156,7 +156,7 @@
         <p class="boundary"><strong>Privileged boundary:</strong> policy activation, signing, source writes, and deployment run through separately authorized services. Coding agents receive scoped capabilities.</p>
         <div class="stack" aria-label="Recommended technologies"><span>Python services</span><span>PostgreSQL authority</span><span>Temporal orchestration</span><span>OPA policy</span><span>Object storage + KMS</span><span>Ephemeral VMs</span><span>GitHub first</span><span>OpenTelemetry</span></div>
       </div>
-      <p class="note" style="margin-top:14px">Hosted SaaS first; hybrid and customer-VPC modes share the kernel. Kubernetes, a graph database, and multi-cloud operation are not prerequisites. <a href="02-architecture-and-work-model.md">Architecture and diagrams →</a></p>
+      <p class="note" style="margin-top:14px">Hosted SaaS first; hybrid and customer-VPC modes share the kernel. Kubernetes, a graph database, and multi-cloud operation are not prerequisites. <a href="02-architecture-and-work-model.html">Architecture and diagrams →</a></p>
     </section>
     <section id="trust" aria-labelledby="trust-title">
       <p class="eyebrow">The non-negotiable controls</p><h2 id="trust-title">Trust is earned at each transition.</h2>
@@ -168,12 +168,12 @@
         <li><strong>Ambiguity remains visible</strong><span>External effects have durable intent and reconciliation. Unknown merge or deployment outcomes block unsafe retries.</span></li>
         <li><strong>Budgets include failed work</strong><span>Reserve before launch; account for review, retries, abandoned attempts, CI, infrastructure, and outstanding exposure.</span></li>
       </ul>
-      <p class="note" style="margin-top:16px">The complete model defines seven lifecycle families, transition actors, authorization, idempotency, timeout behavior, recovery, and evidence. <a href="03-durable-state-machines.md">State machines →</a> · <a href="04-execution-scheduling-review.md">Review protocol →</a> · <a href="05-trust-policy-evidence.md">Trust and evidence →</a></p>
+      <p class="note" style="margin-top:16px">The complete model defines seven lifecycle families, transition actors, authorization, idempotency, timeout behavior, recovery, and evidence. <a href="03-durable-state-machines.html">State machines →</a> · <a href="04-execution-scheduling-review.html">Review protocol →</a> · <a href="05-trust-policy-evidence.html">Trust and evidence →</a></p>
     </section>
     <section id="milestones" aria-labelledby="milestone-title">
       <p class="eyebrow">The human milestone contract</p><h2 id="milestone-title">An acceptance decision you can defend.</h2>
       <div class="human"><p>The factory presents exactly what was included, what was excluded, what passed, what remains uncertain, and what your decision authorizes next. Your sign-off is bound to the evidence bundle you reviewed.</p><div class="deliverables"><span>Executive narrative</span><span>Presentation</span><span>Reproducible or live demo</span><span>Evidence appendix</span><span>Risk register</span><span>Sign-off interface</span></div><p class="decisions">Approve · Request changes · Reject · Approve with explicit conditions</p><p style="margin-bottom:0">Changed source, artifacts, material configuration, or acceptance criteria require new evidence and a new bundle. Acceptance never silently transfers to changed work.</p></div>
-      <p class="note" style="margin-top:14px">Gate closure first stops admission, then drains previously admitted operations. A stop request cannot promise that an external merge already executing was undone. <a href="06-milestones-and-product-experience.md">Contract and product experience →</a></p>
+      <p class="note" style="margin-top:14px">Gate closure first stops admission, then drains previously admitted operations. A stop request cannot promise that an external merge already executing was undone. <a href="06-milestones-and-product-experience.html">Contract and product experience →</a></p>
     </section>
     <section aria-labelledby="economics-title">
       <p class="eyebrow">Product and commercial focus</p><h2 id="economics-title">Start where delegation is measurable.</h2>
@@ -182,7 +182,7 @@
         <article class="card"><span class="label">Value and pricing</span><h3>Accepted-outcome economics</h3><p>Capacity subscription plus transparent usage. Measure accepted outcomes, defects, rework, cost, lead time, and unplanned human interruptions.</p></article>
         <article class="card"><span class="label">Defensibility</span><h3>Reliable completion</h3><p>Qualified adapters, recovery knowledge, reviewer evaluation, provenance, and customer workflow integration create value beyond calling coding agents.</p></article>
       </div>
-      <p class="note" style="margin-top:14px">No claim of universal software correctness, arbitrary legacy-system autonomy, or cross-system “exactly once.” <a href="07-reliability-security-economics.md">Reliability, security, economics, and alternatives →</a></p>
+      <p class="note" style="margin-top:14px">No claim of universal software correctness, arbitrary legacy-system autonomy, or cross-system “exactly once.” <a href="07-reliability-security-economics.html">Reliability, security, economics, and alternatives →</a></p>
     </section>
     <section id="roadmap" aria-labelledby="roadmap-title">
       <p class="eyebrow">Five stages, demonstrated at each checkpoint</p><h2 id="roadmap-title">Earn the next level of autonomy.</h2>
@@ -198,19 +198,19 @@
     </section>
     <section id="documents" aria-labelledby="documents-title">
       <p class="eyebrow">The complete design</p><h2 id="documents-title">Eight documents. All 21 sections.</h2>
-      <p class="lede">The overview is intentionally brief. The linked files preserve the full analysis, tables, diagrams, examples, primary sources, and recommendations.</p>
+      <p class="lede">The overview is intentionally brief. Open the HTML reading editions below for the full analysis, tables, diagrams, examples, primary sources, and recommendations. Each reading edition also links to its preserved Markdown source.</p>
       <div class="grid two">
-        <a class="doc" href="01-product-and-prototype.md"><small>01 · Sections 1–4</small><strong>Product and prototype</strong><span>Ownership, findings, retained assets, and invariants.</span></a>
-        <a class="doc" href="02-architecture-and-work-model.md"><small>02 · Sections 5–6</small><strong>Architecture and work model</strong><span>Components, trust boundaries, hierarchy, and slice contract.</span></a>
-        <a class="doc" href="03-durable-state-machines.md"><small>03 · Section 7</small><strong>Durable state machines</strong><span>Events, transitions, authorization, timeouts, and recovery.</span></a>
-        <a class="doc" href="04-execution-scheduling-review.md"><small>04 · Sections 8–9</small><strong>Execution and adversarial review</strong><span>Leases, scheduling, harness adapters, and review protocol.</span></a>
-        <a class="doc" href="05-trust-policy-evidence.md"><small>05 · Sections 10–12</small><strong>Trust, policy, and evidence</strong><span>Threat controls, policy compilation, provenance, and attestations.</span></a>
-        <a class="doc" href="06-milestones-and-product-experience.md"><small>06 · Sections 13–14</small><strong>Milestones and product experience</strong><span>Acceptance contracts, bundles, decisions, UI, API, and CLI.</span></a>
-        <a class="doc" href="07-reliability-security-economics.md"><small>07 · Sections 15–18</small><strong>Reliability, security, and economics</strong><span>Failure guarantees, isolation, observability, pricing, and alternatives.</span></a>
-        <a class="doc" href="08-roadmap-and-decisions.md"><small>08 · Sections 19–21</small><strong>Roadmap and architectural decisions</strong><span>Staged slices, checkpoints, risks, open questions, and 20 ADR proposals.</span></a>
+        <a class="doc" href="01-product-and-prototype.html"><small>01 · Sections 1–4</small><strong>Product and prototype</strong><span>Ownership, findings, retained assets, and invariants.</span></a>
+        <a class="doc" href="02-architecture-and-work-model.html"><small>02 · Sections 5–6</small><strong>Architecture and work model</strong><span>Components, trust boundaries, hierarchy, and slice contract.</span></a>
+        <a class="doc" href="03-durable-state-machines.html"><small>03 · Section 7</small><strong>Durable state machines</strong><span>Events, transitions, authorization, timeouts, and recovery.</span></a>
+        <a class="doc" href="04-execution-scheduling-review.html"><small>04 · Sections 8–9</small><strong>Execution and adversarial review</strong><span>Leases, scheduling, harness adapters, and review protocol.</span></a>
+        <a class="doc" href="05-trust-policy-evidence.html"><small>05 · Sections 10–12</small><strong>Trust, policy, and evidence</strong><span>Threat controls, policy compilation, provenance, and attestations.</span></a>
+        <a class="doc" href="06-milestones-and-product-experience.html"><small>06 · Sections 13–14</small><strong>Milestones and product experience</strong><span>Acceptance contracts, bundles, decisions, UI, API, and CLI.</span></a>
+        <a class="doc" href="07-reliability-security-economics.html"><small>07 · Sections 15–18</small><strong>Reliability, security, and economics</strong><span>Failure guarantees, isolation, observability, pricing, and alternatives.</span></a>
+        <a class="doc" href="08-roadmap-and-decisions.html"><small>08 · Sections 19–21</small><strong>Roadmap and architectural decisions</strong><span>Staged slices, checkpoints, risks, open questions, and 20 ADR proposals.</span></a>
       </div>
     </section>
   </main>
-  <footer><div class="wrap"><p><strong>Nightshift</strong> · A governed autonomous software factory · Design package, 2026-09-09</p><p>Proposed product and architecture. Repository evidence reflects the inspected checkpoint; migration entries are proposed work, not created issues. Astra remains a model name.</p><p><a href="README.md">Reading guide and evidence baseline</a> · Self-contained HTML; no external assets or network requests.</p></div></footer>
+  <footer><div class="wrap"><p><strong>Nightshift</strong> · A governed autonomous software factory · Design package, 2026-09-09</p><p>Proposed product and architecture. Repository evidence reflects the inspected checkpoint; migration entries are proposed work, not created issues. Astra remains a model name.</p><p><a href="README.html">Reading guide and evidence baseline</a> · Self-contained HTML; no external assets or network requests.</p></div></footer>
 </body>
 </html>
