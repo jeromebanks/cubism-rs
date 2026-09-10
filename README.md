@@ -76,3 +76,30 @@ Eight existing SDLC unit tests passed during the earlier assessment. In-memory d
 The migration entries are proposed work, not existing GitHub issues. Illustrative identifiers, digests, prices, availability targets, and CLI commands are design examples. Markdown Mermaid blocks require a Mermaid-capable viewer; the HTML overview needs no renderer, scripts, fonts, or network resources.
 
 External primary-source links are preserved beside their claims throughout the full documents. They support the original design assessment; this packaging pass did not refresh external platform research.
+
+## HTML reading editions and publication
+
+Every Markdown document, including this guide, has a same-name HTML reading edition. Start at [the overview](index.html) or [the HTML reading guide](README.html). HTML navigation stays in HTML; each page also offers the unchanged Markdown source for agents. The overview remains self-contained. Full reading editions use local `reader.css` and `reader.js`; only diagram rendering loads an external dependency (Mermaid 11.12.0 from jsDelivr). All prose, tables, examples, and diagram source remain readable without JavaScript or network access. Diagram sources collapse only after successful rendering.
+
+The publication target is [GitHub Pages](https://jeromebanks.github.io/cubism-rs/). Source documents and generated HTML live on `docs/nightshift-design-draft`. A dedicated `nightshift-pages` branch contains only this folder, extracted with Git subtree. Pages publishes that branch's root, with `.nojekyll` preventing Markdown rewriting. Nothing is merged into `main`. This uses the repository's single Pages site; a future broader documentation site will need an explicit integration decision.
+
+To rebuild, use an isolated Python environment with the pinned renderer. From the repository root (replace the example temporary environment path with your own):
+
+```bash
+rtk python3 -m venv /private/tmp/nightshift-docs-venv
+rtk /private/tmp/nightshift-docs-venv/bin/pip install -r scripts/nightshift-docs-requirements.txt
+rtk /private/tmp/nightshift-docs-venv/bin/python scripts/render-nightshift-docs.py
+rtk /private/tmp/nightshift-docs-venv/bin/python scripts/render-nightshift-docs.py --check
+```
+
+The checker verifies byte-for-byte reproducibility and all local HTML links, anchors, and assets. Each reading edition embeds the SHA-256 digest of its Markdown source. `--patch` emits an `apply_patch` payload instead of writing files directly. Review and commit the generated HTML alongside source edits.
+
+After the reviewed source changes are committed on `docs/nightshift-design-draft`, publish updates without a main-branch merge:
+
+```bash
+rtk git push origin docs/nightshift-design-draft
+rtk git subtree split --prefix=docs/nightshift-design -b nightshift-pages
+rtk git push origin nightshift-pages
+```
+
+The subtree command advances the local publication branch when its history is compatible; do not force-push if it reports divergence. Pages must be configured once to publish `nightshift-pages` at `/`. Check the Pages build and live URLs after every publication. Build and publishing operations do not validate or implement the proposed software-factory architecture.

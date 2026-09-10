@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Nightshift — Scheduling, execution, and adversarial review — complete design draft, with source and section navigation.">
+  <meta name="source-sha256" content="6f43f78ef6f6c095decb4851e38a6a9f2af3a396cd9633f360d1bc2b3339f242">
+  <title>Nightshift — Scheduling, execution, and adversarial review</title>
+  <link rel="stylesheet" href="reader.css">
+  <script type="module" src="reader.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to document</a>
+  <header class="masthead"><a href="index.html">NIGHTSHIFT / Design notebook</a><span>Draft for review · Proposed architecture, not an implemented platform</span></header>
+  <div class="layout">
+    <aside aria-label="Document navigation"><div>
+      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Durable events and state machines</a></li><li><a href="04-execution-scheduling-review.html" aria-current="page">Scheduling, execution, and adversarial review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestone contracts and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Migration roadmap, risks, and architectural decisions</a></li></ol></nav>
+      <details open><summary>On this page</summary><nav aria-label="Page sections"><div class="toc">
+<ul>
+<li><a href="#8-scheduling-and-lease-protocol">8. Scheduling and lease protocol</a><ul>
+<li><a href="#scheduling-policy">Scheduling policy</a></li>
+<li><a href="#multi-repository-semantics">Multi-repository semantics</a></li>
+</ul>
+</li>
+<li><a href="#9-provider-neutral-execution-and-adversarial-review">9. Provider-neutral execution and adversarial review</a><ul>
+<li><a href="#harness-adapter-contract">Harness adapter contract</a></li>
+<li><a href="#progress-detection">Progress detection</a></li>
+<li><a href="#review-classes">Review classes</a></li>
+<li><a href="#adversarial-protocol">Adversarial protocol</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</nav></details>
+    </div></aside>
+    <main id="content">
+      <div class="source-bar"><a href="index.html">← TL;DR overview</a><a href="04-execution-scheduling-review.md" download>Markdown source ↓</a><span>Full text · Generated from preserved Markdown</span></div>
+      <article><h1 id="nightshift-scheduling-execution-and-adversarial-review">Nightshift — Scheduling, execution, and adversarial review<a class="headerlink" href="#nightshift-scheduling-execution-and-adversarial-review" title="Permanent link">§</a></h1>
+<p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="03-durable-state-machines.html">Previous</a> · <a href="05-trust-policy-evidence.html">Next</a></p>
+<blockquote>
+<p>Design proposal · Packaged 2026-09-09 · Original sections 8–9 preserved below. Repository findings refer to the inspected checkpoint, not live project state.</p>
+</blockquote>
+<h2 id="8-scheduling-and-lease-protocol">8. Scheduling and lease protocol<a class="headerlink" href="#8-scheduling-and-lease-protocol" title="Permanent link">§</a></h2>
+<p>The scheduling unit is a slice attempt. The authoritative lease record is keyed by <code>(tenant, slice, role)</code>; implementation permits one active owner. Review assignments use separate keys.</p>
+<p>Acquisition uses a short PostgreSQL transaction that locks the lease and budget rows in deterministic order, verifies readiness, advances the generation, reserves resources, and records the assignment. PostgreSQL’s row-lock semantics provide the required serialization inside that database transaction. <a href="https://www.postgresql.org/docs/current/explicit-locking.html">PostgreSQL locking documentation</a></p>
+<pre><code class="language-json">{
+  &quot;schema&quot;: &quot;factory.lease/v1&quot;,
+  &quot;tenant&quot;: &quot;acme&quot;,
+  &quot;slice&quot;: &quot;slice-104&quot;,
+  &quot;attempt&quot;: &quot;attempt-9&quot;,
+  &quot;role&quot;: &quot;implementer&quot;,
+  &quot;owner&quot;: &quot;spiffe://runners.nightshift.example/acme/attempt-9&quot;,
+  &quot;authority_epoch&quot;: 12,
+  &quot;generation&quot;: 8,
+  &quot;fencing_token&quot;: &quot;12:8&quot;,
+  &quot;issued_at&quot;: &quot;2026-09-09T01:00:00Z&quot;,
+  &quot;expires_at&quot;: &quot;2026-09-09T01:01:30Z&quot;,
+  &quot;heartbeat_sequence&quot;: 0,
+  &quot;capability_digest&quot;: &quot;sha256:cap8&quot;
+}
+</code></pre>
+<p>The fence is an ordering token, not a secret. Identity and authorization are separate.</p>
+<p>Protocol:</p>
+<ol>
+<li>Scheduler acquires and commits the lease before dispatch.</li>
+<li>Supervisor renews it every 20 seconds using owner identity, epoch, generation, and increasing sequence.</li>
+<li>Database time determines expiry.</li>
+<li>Renewal cannot revive an expired generation.</li>
+<li>Expiry fences new effects before replacement work is admitted.</li>
+<li>Replacement receives a new generation and normally a new attempt.</li>
+<li>Old results may be retained as historical evidence but cannot update the current candidate.</li>
+<li>Cleanup acts on exact attempt resources after checking active references.</li>
+</ol>
+<p>A stale agent can still <em>believe</em> it owns work. A distributed system cannot erase that belief. The enforceable guarantee is that only the current owner can obtain acceptance of new authoritative actions.</p>
+<p>Runners receive no reusable GitHub write token. They submit exact operations to the effect broker, which validates the current lease and consumes an operation authorization. For an already-admitted operation, the broker completes or reconciles that immutable operation; reassignment does not authorize a conflicting replacement while its outcome is unknown.</p>
+<h3 id="scheduling-policy">Scheduling policy<a class="headerlink" href="#scheduling-policy" title="Permanent link">§</a></h3>
+<ul>
+<li>Weighted fair scheduling across tenants, with priority aging.</li>
+<li>Separate pools for implementation, review, verification, and recovery to prevent implementation from starving its own reviewers.</li>
+<li>Capability matching for OS, architecture, network, data classification, model provider, tool controls, and attestation class.</li>
+<li>Critical-path preference within each program.</li>
+<li>Hard tenant concurrency and spend reservations.</li>
+<li>Preemption only at safe checkpoints; never abandon an uncertain merge.</li>
+<li>Cancellation revokes new admissions, requests process termination, reconciles effects, and releases unused budget.</li>
+<li>Branches include slice and attempt identity, such as <code>factory/slice-104/attempt-9</code>.</li>
+<li>Each attempt receives an isolated clone/workspace. Hosted tenants do not share a writable checkout.</li>
+</ul>
+<h3 id="multi-repository-semantics">Multi-repository semantics<a class="headerlink" href="#multi-repository-semantics" title="Permanent link">§</a></h3>
+<p>There is no atomic transaction across repositories.</p>
+<p>A program release is an immutable vector:</p>
+<pre><code class="language-text">service-A@SHA1 + client-B@SHA2 + schema-C@SHA3 + artifacts/configuration
+</code></pre>
+<p>Use backward-compatible interfaces, expand/contract migrations, feature flags, and staged releases. A partial integration is visible as partial. Compensation is a new revert or forward fix, not deletion of history.</p>
+<p>Acquire any coordination locks in canonical repository order, and hold them only for bounded integration operations. Never hold cross-repository locks while waiting for model inference or human approval.</p>
+<h2 id="9-provider-neutral-execution-and-adversarial-review">9. Provider-neutral execution and adversarial review<a class="headerlink" href="#9-provider-neutral-execution-and-adversarial-review" title="Permanent link">§</a></h2>
+<h3 id="harness-adapter-contract">Harness adapter contract<a class="headerlink" href="#harness-adapter-contract" title="Permanent link">§</a></h3>
+<p>Claude Code, Codex, Meta Muse, OpenCode, and future harnesses implement the same interface. Astra is a model option represented in the execution manifest, not the product name or an assumed standalone harness:</p>
+<pre><code class="language-text">describe_capabilities()
+qualify(runtime_manifest, policy)
+start(execution_manifest, context_manifest, capability)
+observe(cursor)
+checkpoint(reason)
+resume(checkpoint, execution_manifest)
+cancel(reason)
+collect_result()
+collect_usage()
+</code></pre>
+<p>Each adapter declares:</p>
+<ul>
+<li>Supported model identifiers and provider routing.</li>
+<li>Headless operation, structured outputs, tool interception, and cancellation support.</li>
+<li>Filesystem/network controls it can honor.</li>
+<li>Native session continuation and export format.</li>
+<li>Token accounting fidelity.</li>
+<li>Runtime and harness version identity.</li>
+<li>Limits or unavailable capabilities.</li>
+</ul>
+<p>A product name is not evidence that these capabilities exist. Meta Muse integration and model availability, including Astra, remain qualification targets until their actual runtime interfaces are tested. Unsupported capabilities cause routing rejection or a visibly weaker assurance class.</p>
+<p>Context packages contain the contract, accepted ADRs, pinned source, required references, environment instructions, and typed prior findings. Every retrieved object has a digest and access classification. Repository instructions and retrieved content remain untrusted data unless separately promoted through the policy authority.</p>
+<p>A portable checkpoint contains source state, patch digest, completed criteria, unresolved findings, observed failures, pending operation IDs, remaining budget, and artifact references. Native session state is optional, encrypted, and harness-specific.</p>
+<p>Replay reproduces recorded orchestration decisions and inputs. It does not promise identical model outputs.</p>
+<p>Model routing chooses from a customer-approved set. Provider failure may select an approved alternative without human interruption; it cannot silently change residency, data retention, trust class, or review-depth requirements.</p>
+<h3 id="progress-detection">Progress detection<a class="headerlink" href="#progress-detection" title="Permanent link">§</a></h3>
+<p>A heartbeat proves liveness only. Progress uses observable changes:</p>
+<ul>
+<li>New valid candidate or checkpoint.</li>
+<li>Acceptance criterion supported by new evidence.</li>
+<li>A failing test explained or resolved.</li>
+<li>A finding reproduced or dispositioned.</li>
+<li>A necessary investigation completed with a bounded conclusion.</li>
+</ul>
+<p>Repeated identical commands, repeated patch reversals, repeated errors, growing cost without new evidence, and circular review disagreement trigger a stall classification.</p>
+<p>Default response: ask the agent for a structured checkpoint, run a bounded diagnostic/advisor pass, then reroute or block after the contract’s stall budget. Long-running builds use their own progress signals so quiet compilation is not mistaken for agent failure.</p>
+<h3 id="review-classes">Review classes<a class="headerlink" href="#review-classes" title="Permanent link">§</a></h3>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Class</th>
+<th>Purpose</th>
+<th>Counts as independent approval?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Self-review</td>
+<td>Catch local omissions</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Contextual advisor</td>
+<td>Challenge plan and reasoning with implementation context</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Independent cold review</td>
+<td>Assess actual candidate without implementation narrative</td>
+<td>Yes, if identity and isolation requirements pass</td>
+</tr>
+<tr>
+<td>Security specialist</td>
+<td>Evaluate attack surface and abuse cases</td>
+<td>Additional required class for selected risks</td>
+</tr>
+<tr>
+<td>Deterministic verification</td>
+<td>Tests, static analysis, compatibility, benchmarks</td>
+<td>Required evidence, not a substitute for product judgment</td>
+</tr>
+<tr>
+<td>Human product review</td>
+<td>Accept integrated usefulness, limitations, and direction</td>
+<td>Milestone acceptance</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="adversarial-protocol">Adversarial protocol<a class="headerlink" href="#adversarial-protocol" title="Permanent link">§</a></h3>
+<ol>
+<li><strong>Freeze the candidate.</strong> Record repository identity, head, base, tree, contract, policy, and verification inputs.</li>
+<li><strong>Assign independently.</strong> The review service selects the reviewer. The implementer cannot select a favorable reviewer, mint its identity, or submit on its behalf.</li>
+<li><strong>Create a clean environment.</strong> Separate VM, credentials, session, scratch space, and memory namespace.</li>
+<li><strong>Blind the initial pass.</strong> Provide acceptance criteria, accepted ADRs, source, and diff. Withhold implementation transcript, self-review conclusion, and other reviewers’ conclusions.</li>
+<li><strong>Require coverage.</strong> Correctness, acceptance, threat model, security, performance, maintainability, and test adequacy each receive a result or an explicit justified non-applicability.</li>
+<li><strong>Seek counterexamples.</strong> Reviewers identify invariants and attempt concrete failures, including negative tests where useful.</li>
+<li><strong>Submit structured findings.</strong> Each finding includes severity, confidence, affected SHA/path, violated criterion, reproduction, impact, and suggested verification.</li>
+<li><strong>Reveal selectively.</strong> After the initial report is sealed, implementation rationale or peer findings may be disclosed for adjudication.</li>
+<li><strong>Fix and re-review.</strong> A changed head creates a new candidate and round; prior findings remain linked.</li>
+<li><strong>Resolve disagreements.</strong> A judge evaluates competing evidence. Reproduced violations cannot be waived by majority vote. Residual risk beyond delegated authority goes to the named human.</li>
+<li><strong>Close deterministically.</strong> Required classes complete, findings dispositioned, evidence current, and policy satisfied.</li>
+</ol>
+<p>Different models can reduce correlated errors, but independence comes from separate execution identity, controlled information access, and separation of authority. The platform can attest which context it supplied and which tools accessed data. It cannot prove that model training, provider internals, or every repository comment was free of shared influence.</p>
+<p>Default review depth:</p>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Change risk</th>
+<th>Required review</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Low</td>
+<td>One cold reviewer plus deterministic verification</td>
+</tr>
+<tr>
+<td>Medium</td>
+<td>One cold reviewer from a different model family where approved; targeted integration checks</td>
+</tr>
+<tr>
+<td>High</td>
+<td>Two independently assigned reviews with different perspectives, including relevant specialist; stronger integration/failure tests</td>
+</tr>
+<tr>
+<td>Critical authority, tenant isolation, release control</td>
+<td>Two reviews, specialist verification, and the contract’s explicit governance boundary</td>
+</tr>
+</tbody>
+</table></div>
+<p>Same-model cold review is permitted for low-risk work under policy. Higher-risk substitution requires a preapproved fallback; outages never silently weaken review requirements.</p>
+<p>Reviewer rotation, randomized assignment within qualified pools, held-out seeded defects, independent evaluation datasets, and restricted shared memory reduce persistent collusion and correlated blind spots. Do not reward reviewers for raw finding count or implementers for merely obtaining a pass.</p>
+<hr />
+<p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="03-durable-state-machines.html">Previous</a> · <a href="05-trust-policy-evidence.html">Next</a></p></article>
+      <nav class="bottom-nav" aria-label="Reading shortcuts"><a href="README.html">Reading guide</a><a href="#content">Back to top ↑</a></nav>
+      <footer>Nightshift design draft. Sources and qualifications are retained in the text. HTML is a reading edition, not a new design revision. Diagram visuals load Mermaid 11.12.0 from jsDelivr; text, tables, code, and diagram sources work without it.</footer>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Nightshift — Migration roadmap, risks, and architectural decisions — complete design draft, with source and section navigation.">
+  <meta name="source-sha256" content="63e4f4da13c944449f6dcd49b0264635c6c8eeaa7930bf5ab97a81df0ef87ed1">
+  <title>Nightshift — Migration roadmap, risks, and architectural decisions</title>
+  <link rel="stylesheet" href="reader.css">
+  <script type="module" src="reader.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to document</a>
+  <header class="masthead"><a href="index.html">NIGHTSHIFT / Design notebook</a><span>Draft for review · Proposed architecture, not an implemented platform</span></header>
+  <div class="layout">
+    <aside aria-label="Document navigation"><div>
+      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Durable events and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and adversarial review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestone contracts and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html" aria-current="page">Migration roadmap, risks, and architectural decisions</a></li></ol></nav>
+      <details open><summary>On this page</summary><nav aria-label="Page sections"><div class="toc">
+<ul>
+<li><a href="#19-migration-roadmap-and-independently-reviewable-slices">19. Migration roadmap and independently reviewable slices</a><ul>
+<li><a href="#stage-0-trustworthy-cubism-dogfood">Stage 0 — Trustworthy Cubism dogfood</a></li>
+<li><a href="#stage-1-single-repository-control-plane-kernel">Stage 1 — Single-repository control-plane kernel</a></li>
+<li><a href="#stage-2-hosted-multi-runner-pilot">Stage 2 — Hosted multi-runner pilot</a></li>
+<li><a href="#stage-3-multi-tenant-beta">Stage 3 — Multi-tenant beta</a></li>
+<li><a href="#stage-4-enterprise-ready-platform">Stage 4 — Enterprise-ready platform</a></li>
+</ul>
+</li>
+<li><a href="#20-top-risks-prioritized-questions-and-what-not-to-build">20. Top risks, prioritized questions, and what not to build</a><ul>
+<li><a href="#top-risks">Top risks</a></li>
+<li><a href="#prioritized-unresolved-questions">Prioritized unresolved questions</a></li>
+<li><a href="#what-not-to-build">What not to build</a></li>
+</ul>
+</li>
+<li><a href="#21-recommended-architectural-decisions">21. Recommended architectural decisions</a></li>
+</ul>
+</div>
+</nav></details>
+    </div></aside>
+    <main id="content">
+      <div class="source-bar"><a href="index.html">← TL;DR overview</a><a href="08-roadmap-and-decisions.md" download>Markdown source ↓</a><span>Full text · Generated from preserved Markdown</span></div>
+      <article><h1 id="nightshift-migration-roadmap-risks-and-architectural-decisions">Nightshift — Migration roadmap, risks, and architectural decisions<a class="headerlink" href="#nightshift-migration-roadmap-risks-and-architectural-decisions" title="Permanent link">§</a></h1>
+<p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="07-reliability-security-economics.html">Previous</a></p>
+<blockquote>
+<p>Design proposal · Packaged 2026-09-09 · Original sections 19–21 preserved below. Repository findings refer to the inspected checkpoint, not live project state.</p>
+</blockquote>
+<h2 id="19-migration-roadmap-and-independently-reviewable-slices">19. Migration roadmap and independently reviewable slices<a class="headerlink" href="#19-migration-roadmap-and-independently-reviewable-slices" title="Permanent link">§</a></h2>
+<p>The stages below are design proposals, not created issues. Each proposed slice must receive its own contract and implementation session when authorized.</p>
+<h3 id="stage-0-trustworthy-cubism-dogfood">Stage 0 — Trustworthy Cubism dogfood<a class="headerlink" href="#stage-0-trustworthy-cubism-dogfood" title="Permanent link">§</a></h3>
+<p><strong>Scope:</strong> Repair known gate failures and establish honest, single-host operating limits.</p>
+<p><strong>Boundary:</strong> Existing scripts remain the user interface; one trusted dispatcher owns execution. Explicitly disable claims of safe multi-host scheduling.</p>
+<p>Ordered vertical slices:</p>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Slice</th>
+<th>Outcome and acceptance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0.1</td>
+<td>Applied merge works; mock-based tests exercise the actual command construction and exact expected head</td>
+</tr>
+<tr>
+<td>0.2</td>
+<td>Unauthenticated and contradictory review receipts cannot satisfy the gate; trusted review execution publishes evidence independently</td>
+</tr>
+<tr>
+<td>0.3</td>
+<td>Claim and merge both enforce readiness, parent gates, and linked feedback exceptions</td>
+</tr>
+<tr>
+<td>0.4</td>
+<td>One dispatcher owns local claims through a transactional registry; abandoned work is reconciled before reassignment</td>
+</tr>
+<tr>
+<td>0.5</td>
+<td>Milestone approval identifies source/PR/test/demo evidence and exact bundle digest; status displays freshness</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Demonstration:</strong> Deliver a small Cubism correction through implementation, independent review, merge, generated evidence, and explicit milestone acceptance; replay the known adversarial fixtures.</p>
+<p><strong>Human checkpoint:</strong> Accept that the repaired workflow is safe enough for bounded dogfood under its stated trust assumptions.</p>
+<p><strong>Risks:</strong> Shared host administration remains trusted; local identity separation is weaker than hosted isolation.</p>
+<p><strong>Non-goals:</strong> Hostile tenants, arbitrary remote runners, production deployment automation.</p>
+<p><strong>Exit:</strong> Known gate cases fail closed, the delivery loop succeeds, and interruption recovery preserves evidence.</p>
+<p><strong>Kill/pause:</strong> Any unexplained accepted forged receipt, bypassed human gate, or uncertain merge treated as success.</p>
+<h3 id="stage-1-single-repository-control-plane-kernel">Stage 1 — Single-repository control-plane kernel<a class="headerlink" href="#stage-1-single-repository-control-plane-kernel" title="Permanent link">§</a></h3>
+<p><strong>Scope:</strong> Extract domain commands, leases, evidence, and orchestration without rebuilding the whole UI.</p>
+<p><strong>Boundary:</strong> PostgreSQL becomes workflow authority. The script becomes a client; tracker labels become projections.</p>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Slice</th>
+<th>Outcome and acceptance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1.1</td>
+<td>One slice contract can be created, validated, and inspected through API/CLI with version checks</td>
+</tr>
+<tr>
+<td>1.2</td>
+<td>Two competing runners yield one authoritative lease; stale publication is rejected</td>
+</tr>
+<tr>
+<td>1.3</td>
+<td>One attempt survives orchestrator restart and resumes from a sealed checkpoint</td>
+</tr>
+<tr>
+<td>1.4</td>
+<td>One cold review produces an authenticated attestation accepted only for its assigned candidate</td>
+</tr>
+<tr>
+<td>1.5</td>
+<td>One milestone bundle is sealed and accepted idempotently through the decision service</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Demonstration:</strong> Kill the orchestrator between candidate publication and result recording; restart and finish without duplicate PRs or lost state.</p>
+<p><strong>Human checkpoint:</strong> Accept the domain model, evidence contract, and operational experience.</p>
+<p><strong>Risks:</strong> Dual-state migration and workflow versioning.</p>
+<p><strong>Non-goals:</strong> Full multi-tenancy, multiple trackers, generalized production release management.</p>
+<p><strong>Exit:</strong> Complete restart/replay qualification and one full program milestone through the kernel.</p>
+<p><strong>Kill/pause:</strong> The kernel requires manual database repair for routine crashes or costs more operationally than its demonstrated value.</p>
+<h3 id="stage-2-hosted-multi-runner-pilot">Stage 2 — Hosted multi-runner pilot<a class="headerlink" href="#stage-2-hosted-multi-runner-pilot" title="Permanent link">§</a></h3>
+<p><strong>Scope:</strong> Hosted control plane, multiple isolated runners, two qualified harnesses, independent review pool.</p>
+<p><strong>Boundary:</strong> Privileged source effects and signing move outside all coding runners.</p>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Slice</th>
+<th>Outcome and acceptance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2.1</td>
+<td>A hosted runner completes one contracted slice with no source-write credential in its environment</td>
+</tr>
+<tr>
+<td>2.2</td>
+<td>A second harness resumes a portable checkpoint under a new attempt with complete provenance</td>
+</tr>
+<tr>
+<td>2.3</td>
+<td>A two-runner contention/failure scenario preserves exclusive authority and budget</td>
+</tr>
+<tr>
+<td>2.4</td>
+<td>Native queue or serialized integration handles a moving base and ambiguous response correctly</td>
+</tr>
+<tr>
+<td>2.5</td>
+<td>A hosted demo and presentation bind to an accepted bundle</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Demonstration:</strong> Run a short dependency DAG with concurrent independent slices, kill one runner, fail a provider, and complete the milestone.</p>
+<p><strong>Human checkpoint:</strong> Pilot customer accepts usefulness, evidence clarity, cost, and interruption rate.</p>
+<p><strong>Risks:</strong> Adapter instability, review cost, infrastructure overhead, incomplete model accounting.</p>
+<p><strong>Non-goals:</strong> Broad public signup, regulated certification, unlimited harness support.</p>
+<p><strong>Exit:</strong> Suggested pilot target: at least 20 representative slices, no invariant violations in fault tests, and an agreed majority completed without unplanned human help.</p>
+<p><strong>Kill/pause:</strong> Recovery consumes more human effort than supervised coding, or accepted-outcome cost is commercially unacceptable.</p>
+<h3 id="stage-3-multi-tenant-beta">Stage 3 — Multi-tenant beta<a class="headerlink" href="#stage-3-multi-tenant-beta" title="Permanent link">§</a></h3>
+<p><strong>Scope:</strong> Tenant isolation, quotas, billing, privacy controls, customer onboarding, reliable cockpit.</p>
+<p><strong>Boundary:</strong> Every authorization, storage, execution, and accounting path is tenant-scoped.</p>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Slice</th>
+<th>Outcome and acceptance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>3.1</td>
+<td>Two tenants execute identical slice IDs without data or authority crossover</td>
+</tr>
+<tr>
+<td>3.2</td>
+<td>Object access and evidence export reject cross-tenant references</td>
+</tr>
+<tr>
+<td>3.3</td>
+<td>Concurrent attempts obey reserved budget and tenant fairness</td>
+</tr>
+<tr>
+<td>3.4</td>
+<td>A customer revokes access mid-run and the factory safely contains/reconciles work</td>
+</tr>
+<tr>
+<td>3.5</td>
+<td>A tenant completes export and retention/deletion workflows with verifiable scope</td>
+</tr>
+<tr>
+<td>3.6</td>
+<td>Restore drill fences old authority and reconstructs external outcomes</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Demonstration:</strong> Two customer programs run concurrently; one is stopped and one continues. Demonstrate unauthorized access rejection and restore.</p>
+<p><strong>Human checkpoint:</strong> Security and product acceptance for limited beta.</p>
+<p><strong>Risks:</strong> Cross-tenant exposure, noisy neighbors, accounting disputes, support load.</p>
+<p><strong>Non-goals:</strong> Active-active writes, every enterprise deployment mode, fully automatic policy learning.</p>
+<p><strong>Exit:</strong> Independent isolation assessment, successful disaster drill, stable cost reconciliation, and repeat customer use.</p>
+<p><strong>Kill/pause:</strong> Any unexplained tenant boundary failure or inability to identify affected evidence.</p>
+<h3 id="stage-4-enterprise-ready-platform">Stage 4 — Enterprise-ready platform<a class="headerlink" href="#stage-4-enterprise-ready-platform" title="Permanent link">§</a></h3>
+<p><strong>Scope:</strong> Customer VPC/hybrid deployments, delegated authorities, multi-repository release vectors, stronger audit, enterprise support.</p>
+<p><strong>Boundary:</strong> Customer-controlled trust roots, data locality, and external governance integrate with the same kernel.</p>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Slice</th>
+<th>Outcome and acceptance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>4.1</td>
+<td>Customer runner completes work while code/artifacts remain in the selected boundary</td>
+</tr>
+<tr>
+<td>4.2</td>
+<td>Customer key revocation prevents new execution and decryptions as specified</td>
+</tr>
+<tr>
+<td>4.3</td>
+<td>Two-repository compatible release handles partial integration and recovery</td>
+</tr>
+<tr>
+<td>4.4</td>
+<td>Multi-approver milestone contract rejects unauthorized, duplicate, and obsolete decisions</td>
+</tr>
+<tr>
+<td>4.5</td>
+<td>Regional failover demonstrates epoch fencing and stated RPO/RTO</td>
+</tr>
+<tr>
+<td>4.6</td>
+<td>Independent auditor verifies an exported outcome using retained trust/evidence material</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Demonstration:</strong> Execute and accept a multi-repository milestone with a partial deployment failure and governed recovery.</p>
+<p><strong>Human checkpoint:</strong> Enterprise operational-readiness and contract acceptance.</p>
+<p><strong>Risks:</strong> Deployment fragmentation, support economics, customer-runner trust ambiguity, compliance scope creep.</p>
+<p><strong>Non-goals:</strong> Universal legal acceptance, arbitrary safety-critical autonomy, invisible administrative bypasses.</p>
+<p><strong>Exit:</strong> Contracted SLO evidence, documented shared responsibility, support runbooks, security assessment, and paying reference customers.</p>
+<p><strong>Kill/pause:</strong> Customer-specific forks dominate development or required guarantees cannot be enforced by the selected external systems.</p>
+<h2 id="20-top-risks-prioritized-questions-and-what-not-to-build">20. Top risks, prioritized questions, and what not to build<a class="headerlink" href="#20-top-risks-prioritized-questions-and-what-not-to-build" title="Permanent link">§</a></h2>
+<h3 id="top-risks">Top risks<a class="headerlink" href="#top-risks" title="Permanent link">§</a></h3>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Risk</th>
+<th>Response</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Review appears independent but shares compromised authority</td>
+<td>Separate assignment, execution, signing, and source mutation privileges</td>
+</tr>
+<tr>
+<td>Correct local work fails after integration</td>
+<td>Test actual integration candidates and immutable release vectors</td>
+</tr>
+<tr>
+<td>State exists in several systems with inconsistent outcomes</td>
+<td>Authoritative domain journal, idempotency, outbox, reconciliation</td>
+</tr>
+<tr>
+<td>Milestone presentation overstates evidence</td>
+<td>Criterion-to-evidence mapping and explicit limitations</td>
+</tr>
+<tr>
+<td>Models optimize for passing gates rather than solving the problem</td>
+<td>Independent hidden verification, outcome metrics, human milestone review</td>
+</tr>
+<tr>
+<td>Costs grow through rework and stalled attempts</td>
+<td>Reservations, bounded retries, progress detection, accepted-outcome accounting</td>
+</tr>
+<tr>
+<td>Prompt injection causes permitted but harmful actions</td>
+<td>Narrow operation grants and independent acceptance verification</td>
+</tr>
+<tr>
+<td>Enterprise requests fragment the architecture</td>
+<td>One kernel, qualified deployment profiles, explicit unsupported capabilities</td>
+</tr>
+<tr>
+<td>A compromised root invalidates signed evidence</td>
+<td>Separate roots, external archives, revocation and descendant invalidation</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="prioritized-unresolved-questions">Prioritized unresolved questions<a class="headerlink" href="#prioritized-unresolved-questions" title="Permanent link">§</a></h3>
+<p>These do not prevent the first design.</p>
+<ol>
+<li><strong>Initial authority envelope:</strong> Does the first pilot end at merge, staging deployment, or production deployment?</li>
+<li><strong>Initial customer:</strong> Solo developer dogfood, a small internal engineering team, or a design-partner organization?</li>
+<li><strong>Data boundary:</strong> Which repositories may be sent to which model providers, and in which regions?</li>
+<li><strong>Integration capability:</strong> Which source-host plans and branch protections must the first pilot support?</li>
+<li><strong>Human acceptance authority:</strong> Single program owner, delegated technical owner, or multiple approvers?</li>
+<li><strong>Economics:</strong> What cost and interruption rate would make a completed milestone worth buying?</li>
+<li><strong>Harness qualification:</strong> What are the actual executable/API interfaces for Meta Muse, and how are model options such as Astra exposed by each qualified harness?</li>
+<li><strong>Evidence retention:</strong> Which artifacts must survive offboarding, and which raw content must never be stored?</li>
+<li><strong>Deployment support:</strong> Is customer-runner support needed for the pilot or only after hosted value is demonstrated?</li>
+<li><strong>Regulated scope:</strong> Which concrete control requirements matter, rather than a generic “enterprise compliant” label?</li>
+</ol>
+<h3 id="what-not-to-build">What not to build<a class="headerlink" href="#what-not-to-build" title="Permanent link">§</a></h3>
+<ul>
+<li>A replacement source host, tracker, CI system, or identity provider.</li>
+<li>A universal autonomous agent with unrestricted tools.</li>
+<li>A proprietary workflow engine before proving Temporal unsuitable.</li>
+<li>A graph database merely because evidence forms a graph.</li>
+<li>A multi-cloud control plane at launch.</li>
+<li>A marketplace of unqualified harnesses.</li>
+<li>A model leaderboard based on unadjusted pass rates.</li>
+<li>Automatic policy relaxation driven by agent success metrics.</li>
+<li>A chat transcript presented as an audit trail.</li>
+<li>“Exactly once” claims spanning GitHub, providers, and deployment systems.</li>
+<li>A mandatory human approval for every slice.</li>
+<li>A production correctness guarantee based on a clean model review.</li>
+<li>A rewrite that discards the prototype’s contracts, evidence discipline, and human-facing reporting.</li>
+</ul>
+<h2 id="21-recommended-architectural-decisions">21. Recommended architectural decisions<a class="headerlink" href="#21-recommended-architectural-decisions" title="Permanent link">§</a></h2>
+<p>These are suitable ADR starting points:</p>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>ADR</th>
+<th>Decision</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ADR-001</td>
+<td>Nightshift owns durable workflow authority; source hosts own Git facts and trackers expose synchronized planning views</td>
+</tr>
+<tr>
+<td>ADR-002</td>
+<td>Contracts, plans, candidates, evidence bundles, and human decisions are immutable versions</td>
+</tr>
+<tr>
+<td>ADR-003</td>
+<td>PostgreSQL provides transactional domain state, lease ownership, budgets, and inbox/outbox</td>
+</tr>
+<tr>
+<td>ADR-004</td>
+<td>Temporal coordinates long-running work; domain commands remain idempotent and independently authoritative</td>
+</tr>
+<tr>
+<td>ADR-005</td>
+<td>Lease generations and authority epochs fence every new privileged effect</td>
+</tr>
+<tr>
+<td>ADR-006</td>
+<td>Untrusted runners never hold source-merge, policy-signing, or human-approval credentials</td>
+</tr>
+<tr>
+<td>ADR-007</td>
+<td>Independent review requires separate assigned identity and controlled context, with model diversity as an additional policy</td>
+</tr>
+<tr>
+<td>ADR-008</td>
+<td>Blocking findings persist across rounds until explicit authorized disposition</td>
+</tr>
+<tr>
+<td>ADR-009</td>
+<td>Policy is signed, activated independently, and cannot be weakened by the candidate it evaluates</td>
+</tr>
+<tr>
+<td>ADR-010</td>
+<td>Merge assurance combines exact-head preconditions, qualified integration checks, host enforcement, and reconciliation</td>
+</tr>
+<tr>
+<td>ADR-011</td>
+<td>Multi-repository programs use explicit non-transactional release vectors and compatible staged changes</td>
+</tr>
+<tr>
+<td>ADR-012</td>
+<td>Evidence uses content addressing and in-toto/SLSA-compatible attestations with role-specific trust</td>
+</tr>
+<tr>
+<td>ADR-013</td>
+<td>Human acceptance binds an exact bundle and grants explicit next actions</td>
+</tr>
+<tr>
+<td>ADR-014</td>
+<td>Gate closure has admission and drain phases; uncertain external effects block progression</td>
+</tr>
+<tr>
+<td>ADR-015</td>
+<td>Hosted untrusted execution begins with ephemeral VMs; Kubernetes and microVM density are later operational choices</td>
+</tr>
+<tr>
+<td>ADR-016</td>
+<td>Telemetry excludes raw sensitive content by default and remains separate from audit evidence</td>
+</tr>
+<tr>
+<td>ADR-017</td>
+<td>Pricing and optimization use capacity and accepted-outcome economics, including failed work</td>
+</tr>
+<tr>
+<td>ADR-018</td>
+<td>Learning proposes versioned improvements; it never silently changes customer policy</td>
+</tr>
+<tr>
+<td>ADR-019</td>
+<td>Disaster recovery changes authority epoch and reconciles external state before resuming</td>
+</tr>
+<tr>
+<td>ADR-020</td>
+<td>Migration retains useful repository assets and advances only through demonstrated, human-accepted stages</td>
+</tr>
+</tbody>
+</table></div>
+<p>The recommended implementation path is <strong>repair the Cubism gate under an explicit single-host trust boundary, extract a PostgreSQL/Temporal kernel, then introduce hosted isolated runners and authenticated evidence before opening multi-tenant access</strong>. The first product demonstration should be one complete delegated milestone—including an injected failure, independent review, verified demo, and digest-bound human acceptance.</p>
+<hr />
+<p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="07-reliability-security-economics.html">Previous</a></p></article>
+      <nav class="bottom-nav" aria-label="Reading shortcuts"><a href="README.html">Reading guide</a><a href="#content">Back to top ↑</a></nav>
+      <footer>Nightshift design draft. Sources and qualifications are retained in the text. HTML is a reading edition, not a new design revision. Diagram visuals load Mermaid 11.12.0 from jsDelivr; text, tables, code, and diagram sources work without it.</footer>
+    </main>
+  </div>
+</body>
+</html>
