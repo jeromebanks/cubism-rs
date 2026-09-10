@@ -4,7 +4,7 @@
 
 A governed autonomous software factory: humans define outcomes and milestone contracts; agents execute bounded slices; independent review and deterministic controls establish evidence; humans accept integrated results.
 
-Start with the [TL;DR HTML overview](index.html). It is self-contained, works offline, and links to the full design below.
+Start with the [TL;DR HTML overview on GitHub Pages](https://jeromebanks.github.io/cubism-rs/). It links to the complete HTML reading editions. The [local HTML overview](index.html) remains available for offline use.
 
 ## Brand
 
