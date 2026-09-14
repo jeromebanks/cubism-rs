@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Nightshift — Reliability, security, economics, and platform choices — complete design draft, with source and section navigation.">
-  <meta name="source-sha256" content="12d638e30daf6d5526f0967334402f1b2cf8e9a05d1f50485242898fd38c8794">
+  <meta name="source-sha256" content="9a2bfc6ac9125477f4cb1fd45f9fab9ff087575f53aa9d126ce7890bc3b7f248">
   <title>Nightshift — Reliability, security, economics, and platform choices</title>
   <link rel="stylesheet" href="reader.css">
   <script type="module" src="reader.js"></script>
@@ -14,25 +14,18 @@
   <header class="masthead"><a href="index.html">NIGHTSHIFT / Design notebook</a><span>Draft for review · Proposed architecture, not an implemented platform</span></header>
   <div class="layout">
     <aside aria-label="Document navigation"><div>
-      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Durable events and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and adversarial review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestone contracts and product experience</a></li><li><a href="07-reliability-security-economics.html" aria-current="page">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Migration roadmap, risks, and architectural decisions</a></li></ol></nav>
+      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Attempt journal and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and independent review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestones and product experience</a></li><li><a href="07-reliability-security-economics.html" aria-current="page">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Roadmap, risks, and architectural decisions</a></li></ol></nav>
       <details open><summary>On this page</summary><nav aria-label="Page sections"><div class="toc">
 <ul>
-<li><a href="#15-reliability-integration-and-disaster-recovery">15. Reliability, integration, and disaster recovery</a><ul>
-<li><a href="#source-integration-protocol">Source integration protocol</a></li>
-<li><a href="#failure-behavior">Failure behavior</a></li>
-<li><a href="#delivery-guarantees">Delivery guarantees</a></li>
-<li><a href="#disaster-recovery">Disaster recovery</a></li>
+<li><a href="#15-reconciliation-and-protected-integration">15. Reconciliation and protected integration</a><ul>
+<li><a href="#restart-procedure">Restart procedure</a></li>
+<li><a href="#merge-and-integration">Merge and integration</a></li>
+<li><a href="#pause-and-failure-behavior">Pause and failure behavior</a></li>
 </ul>
 </li>
-<li><a href="#16-security-and-multi-tenancy">16. Security and multi-tenancy</a></li>
-<li><a href="#17-observability-evaluation-economics-and-commercial-model">17. Observability, evaluation, economics, and commercial model</a><ul>
-<li><a href="#telemetry">Telemetry</a></li>
-<li><a href="#metrics">Metrics</a></li>
-<li><a href="#cost-accounting">Cost accounting</a></li>
-<li><a href="#commercial-productization">Commercial productization</a></li>
-</ul>
-</li>
-<li><a href="#18-build-versus-buy-decisions">18. Build-versus-buy decisions</a></li>
+<li><a href="#16-security-and-retention-boundary">16. Security and retention boundary</a></li>
+<li><a href="#17-cost-telemetry-and-cubism">17. Cost, telemetry and Cubism</a></li>
+<li><a href="#18-build-versus-buy-and-explicit-infrastructure-dispositions">18. Build-versus-buy and explicit infrastructure dispositions</a></li>
 </ul>
 </div>
 </nav></details>
@@ -42,445 +35,209 @@
       <article><h1 id="nightshift-reliability-security-economics-and-platform-choices">Nightshift — Reliability, security, economics, and platform choices<a class="headerlink" href="#nightshift-reliability-security-economics-and-platform-choices" title="Permanent link">§</a></h1>
 <p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="06-milestones-and-product-experience.html">Previous</a> · <a href="08-roadmap-and-decisions.html">Next</a></p>
 <blockquote>
-<p>Design proposal · Packaged 2026-09-09 · Original sections 15–18 preserved below. Repository findings refer to the inspected checkpoint, not live project state.</p>
+<p>Revised design proposal · 2026-09-13 · GitHub-native, single-dispatcher profile. No Nightshift implementation is included.</p>
 </blockquote>
-<h2 id="15-reliability-integration-and-disaster-recovery">15. Reliability, integration, and disaster recovery<a class="headerlink" href="#15-reliability-integration-and-disaster-recovery" title="Permanent link">§</a></h2>
-<h3 id="source-integration-protocol">Source integration protocol<a class="headerlink" href="#source-integration-protocol" title="Permanent link">§</a></h3>
-<p>For GitHub, prefer native merge queues where the repository’s plan and ownership support them. Required CI must handle <code>merge_group</code>, and Nightshift must verify the actual integration candidate. GitHub documents that merge queues test changes against the latest target branch and queued predecessors; availability is not universal. <a href="https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue">GitHub merge queue documentation</a></p>
-<p>For repositories without queues:</p>
-<ul>
-<li>Serialize factory merges per target branch.</li>
-<li>Require source-host up-to-date protections and qualified checks.</li>
-<li>Submit the exact expected head SHA.</li>
-<li>Revalidate after base changes.</li>
-<li>Exclude uncontrolled bypass actors from the claimed assurance boundary.</li>
-</ul>
-<p>GitHub’s merge API accepts a head <code>sha</code> and rejects a mismatch. It does not supply a transaction with Nightshift’s database or a general expected-base parameter. <a href="https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request">GitHub merge API</a></p>
-<p>High-assurance repositories that require exact reviewed base identity must use an integration mode that enforces it, such as a qualified serialized integration branch or queue policy. They cannot receive that assurance from a head-only API call.</p>
-<figure class="diagram"><figcaption>Design diagram</figcaption><div class="diagram-view" role="region" aria-label="Scrollable design diagram" tabindex="0"></div><p class="diagram-status">Diagram source below; visual rendering requires JavaScript and network access.</p><details open><summary>Diagram source</summary><pre><code class="language-mermaid">sequenceDiagram
-  participant S as Scheduler
-  participant DB as State and lease store
-  participant A as Implementation runner
-  participant R as Review service
-  participant B as Effect broker
-  participant G as Source host / CI
-
-  S-&gt;&gt;DB: Acquire lease + reserve budget transaction
-  DB--&gt;&gt;S: Attempt, generation, capability
-  S-&gt;&gt;A: Signed execution manifest
-  A-&gt;&gt;DB: Heartbeats and checkpoints
-  A-&gt;&gt;B: Publish exact candidate under current fence
-  B-&gt;&gt;G: Create/update attempt branch and PR
-  G--&gt;&gt;B: Observed head SHA
-  B-&gt;&gt;DB: Candidate published
-  R-&gt;&gt;G: Fetch immutable candidate
-  R-&gt;&gt;DB: Signed independent review results
-  B-&gt;&gt;DB: Check policy, findings, gate and operation authorization
-  B-&gt;&gt;G: Queue or merge exact expected head
-  G-&gt;&gt;G: Verify integration candidate and source protections
-  alt Merge confirmed
-    G--&gt;&gt;B: Merge SHA
-    B-&gt;&gt;DB: MergeConfirmed
-  else Response ambiguous
-    B-&gt;&gt;DB: MergeOutcomeUnknown
-    B-&gt;&gt;G: Reconcile PR, refs and operation identity
-    G--&gt;&gt;B: Authoritative observed result
-    B-&gt;&gt;DB: MergeReconciled
-  end
-</code></pre></details></figure>
-<p>A gate closes in two stages: <strong>admission closed</strong>, then <strong>drained</strong> after earlier admitted effects settle. This establishes an honest operation boundary. A database update cannot instantaneously cancel a source-host merge already executing.</p>
-<p>Emergency stop immediately blocks new admissions and revokes credentials where possible. Any already-admitted operations are shown explicitly until reconciled. Native queued operations must be removed or settled before declaring the gate drained.</p>
-<h3 id="failure-behavior">Failure behavior<a class="headerlink" href="#failure-behavior" title="Permanent link">§</a></h3>
+<h2 id="15-reconciliation-and-protected-integration">15. Reconciliation and protected integration<a class="headerlink" href="#15-reconciliation-and-protected-integration" title="Permanent link">§</a></h2>
+<h3 id="restart-procedure">Restart procedure<a class="headerlink" href="#restart-procedure" title="Permanent link">§</a></h3>
+<p>Start with no executor authorized to perform effects. Acquire the local process lock and establish that this is the only dispatcher. Load protected policy and trusted broker identity; do not continue from a candidate checkout's policy or a stale local cache.</p>
+<ol>
+<li>Enumerate selected milestone issues, native dependencies and all attempt/plan-change/decision comments with pagination. Validate schema, broker authorship, IDs, fixed inputs, explicit corrections and current gates. Duplicate/conflicting records cannot be resolved by “last comment wins.”</li>
+<li>Reconstruct incomplete attempts and prepared/submitted/uncertain effects, including attempts with no candidate or session reference. Read executor-native sessions using known references and attempt correlation keys where supported. Missing correlation is uncertainty, not proof nothing ran.</li>
+<li>Inspect attempt branches and commits, open/closed/merged PRs, workflow runs/run attempts, Checks/statuses and recorded effect identifiers. Match repository, exact source, role and trusted issuer; a similarly named branch/session is insufficient.</li>
+<li>Reconcile pending protected effects before authorizing replacement effects. A merge already observed is recorded as merged even if the old comment says running. An unknown merge remains blocked, never automatically reissued.</li>
+<li>Classify each incomplete attempt using the table below; durably record the decision and any known/unknown usage. Revalidate fixed inputs and current policy before resumption or adoption of completed results.</li>
+<li>Rebuild the in-memory assignment/limit view and repair UI labels from confirmed facts. Reopen scheduling only for unaffected, fully reconciled work. Complete partial replanning or gate mutations before using the affected graph.</li>
+</ol>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Classification</th>
+<th>Required evidence</th>
+<th>Recovery</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Resumable</td>
+<td>Native session/checkpoint identified, fixed inputs still valid, no conflicting effect</td>
+<td>Confirm resume intent; issue fresh process-local capability; retain ID for the same assignment</td>
+</tr>
+<tr>
+<td>Completed-but-unrecorded</td>
+<td>Native result or GitHub effect identifiable for exact attempt/input</td>
+<td>Validate result, record recovered outcome; schedule missing review/verification rather than implementation</td>
+</tr>
+<tr>
+<td>Abandoned</td>
+<td>Execution is lost/terminated/unrecoverable and protected effects are settled</td>
+<td>Revoke old authority, record limitations and possible usage; new attempt only within limits</td>
+</tr>
+<tr>
+<td>Requires human inspection</td>
+<td>Conflicting records, unknown live execution, inaccessible evidence or unresolved protected effect</td>
+<td>Preserve references and block affected scope; no optimistic success or duplicate mutation</td>
+</tr>
+</tbody>
+</table></div>
+<p>A running executor without a session reference may be discoverable by its launch key. If not, it can continue wasting compute after a crash, but cannot access broker credentials or use an old capability. The operator may need to locate/stop it. Only after effect uncertainty is settled may recovery mark it abandoned and permit bounded duplicate computation. This narrow crash window is accepted for the local profile. No PostgreSQL-level transactions, launch exactly-once, immutable event replay or lossless audit guarantee is claimed.</p>
+<h3 id="merge-and-integration">Merge and integration<a class="headerlink" href="#merge-and-integration" title="Permanent link">§</a></h3>
+<p>Independent review approves the exact candidate head and applicable base/contract/policy. Before merge, the broker rereads current head/base, parent gates, blocking findings, trusted required checks and policy. A changed head invalidates review. A changed base invalidates integration evidence and any base-sensitive review.</p>
+<p>Use <a href="https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue">GitHub merge queue</a> where already available and qualified, including <code>merge_group</code> checks. Otherwise serialize Nightshift merges to the target branch, require host-enforced up-to-date checks, and verify the current integration subject. The <a href="https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request">merge REST API</a> accepts expected head <code>sha</code>; it does not provide an expected-base precondition. A local reread alone cannot prevent another actor moving the base. Without suitable host enforcement, stop before unattended merge rather than claim exact-base safety. The initial design does not build a replacement merge queue.</p>
+<p>Record intent before the call and confirm actual PR merge state/result SHA afterward. An ambiguous response produces <code>uncertain</code>; query PR, branch and commit facts until settled or require inspection. Do not retry merely because a request timed out. Reconcile issue closure separately. After all component slices merge, run milestone integration on the actual assembled source; individual PR checks do not prove combined acceptance.</p>
+<p>Merge, release creation, deployment and acceptance have separate predicates. A merged PR does not authorize a release, and a published release does not prove a healthy deployment. Future multi-repository work must expose partial results and use explicit source vectors and forward fixes/reverts, never claim atomic integration across repositories.</p>
+<h3 id="pause-and-failure-behavior">Pause and failure behavior<a class="headerlink" href="#pause-and-failure-behavior" title="Permanent link">§</a></h3>
+<p>A pause first prevents new broker admissions, then waits for previously submitted effects to settle. Only then is the gate drained. Broker-mediated pause is serialized with its effects; a direct GitHub edit is observed by polling/revalidation and may race an already admitted call. Show that distinction and pending operations. Cancelling an executor or removing a label cannot undo a queued/ongoing merge.</p>
 <div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
 <thead>
 <tr>
 <th>Failure</th>
-<th>Required behavior</th>
+<th>Behavior</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Orchestrator restart</td>
-<td>Replay orchestration; consult committed domain state; retry commands with original keys</td>
+<td>GitHub unavailable/rate limited</td>
+<td>Back off per API hints, prioritize reconciliation, stop new launches/effects requiring durable writes; bounded compute may finish</td>
 </tr>
 <tr>
-<td>Runner death</td>
-<td>Expire lease, fence, reconcile effects, restart from verified checkpoint in a new attempt</td>
+<td>Allocation POST lost</td>
+<td>Search paginated trusted markers; no launch until record confirmed</td>
 </tr>
 <tr>
-<td>Model timeout</td>
-<td>Preserve request identity and partial evidence; bounded retry; charge possible duplicate usage</td>
+<td>Executor exits before commit</td>
+<td>Record failed attempt without candidate, preserve session/failure/usage summary</td>
 </tr>
 <tr>
-<td>Provider outage</td>
-<td>Circuit breaker; route only to approved alternatives; preserve assurance class</td>
+<td>Session lost or provider timeout</td>
+<td>Bounded retry only after reconciliation; preserve unknown/duplicate usage</td>
 </tr>
 <tr>
-<td>Lost webhook</td>
-<td>Periodic reconciliation from source-host/CI APIs</td>
+<td>CI missing/hung/expired</td>
+<td>Timeout or rerun under limits; inconclusive is not success</td>
 </tr>
 <tr>
-<td>Duplicate webhook</td>
-<td>Durable inbox deduplication</td>
+<td>Head/base/policy moves</td>
+<td>Invalidate affected authorization and evidence, re-evaluate inputs</td>
 </tr>
 <tr>
-<td>Reordered webhook</td>
-<td>Treat as a signal to fetch current state; never apply arrival order as authority</td>
+<td>Comment edited/deleted or inaccessible</td>
+<td>Block affected reconstruction; no fabricated history or zero-cost assumption</td>
 </tr>
 <tr>
-<td>Git host rate limit</td>
-<td>Respect backoff/reset hints; share tenant installation budget; prioritize safety reconciliation</td>
+<td>Human approval stale/duplicated</td>
+<td>Reject stale subject; repeated processing yields no extra grant</td>
 </tr>
 <tr>
-<td>CI hangs</td>
-<td>Job deadline; cancel if possible; mark inconclusive/failed and block promotion</td>
+<td>Cubism or OTel unavailable</td>
+<td>Continue all scheduling, review, integration and completion; expose analytics gaps</td>
 </tr>
 <tr>
-<td>Base moves during review</td>
-<td>Preserve head review as historical evidence; rerun integration validation and risk-required base-sensitive review</td>
-</tr>
-<tr>
-<td>Partial merge failure</td>
-<td>Enter uncertain until remote state proves merged or absent</td>
-</tr>
-<tr>
-<td>Partial deployment</td>
-<td>Record per-component state; maintain compatibility; rollback or forward-fix by policy</td>
-</tr>
-<tr>
-<td>Duplicate human approval</td>
-<td>Same idempotent result; no duplicate grants or release</td>
-</tr>
-<tr>
-<td>Approval of obsolete bundle</td>
-<td>Reject as stale; retain attempted decision in audit</td>
-</tr>
-<tr>
-<td>Region outage</td>
-<td>Fence old regional authority before promoting standby; reconcile external operations</td>
-</tr>
-<tr>
-<td>Database restore</td>
-<td>New authority epoch; revoke old grants; reconcile external reality before scheduling</td>
-</tr>
-<tr>
-<td>Customer revokes access</td>
-<td>Stop admission and credential refresh; preserve evidence; mark unresolved external state explicitly</td>
+<td>Host lost</td>
+<td>GitHub summaries survive; local native sessions may not; reconcile and abandon/inspect as necessary</td>
 </tr>
 </tbody>
 </table></div>
-<h3 id="delivery-guarantees">Delivery guarantees<a class="headerlink" href="#delivery-guarantees" title="Permanent link">§</a></h3>
+<p>Polling is sufficient initially; no webhook service is required. If later added, duplicate/lost/reordered webhook notifications only trigger rereads of current source state. They are never an authoritative ordered journal. No uptime, zero-loss RPO or automatic cross-region recovery promises accompany a foreground local tool.</p>
+<h2 id="16-security-and-retention-boundary">16. Security and retention boundary<a class="headerlink" href="#16-security-and-retention-boundary" title="Permanent link">§</a></h2>
+<p>The threat boundary is untrusted model/tool execution versus a trusted local operator, broker and protected GitHub configuration. Restrict credentials and executable trust as described in <a href="05-trust-policy-evidence.html">section 10</a>. Candidate tests are arbitrary code and run only within the executor/CI sandbox. <a href="https://docs.github.com/en/actions/reference/security/secure-use">GitHub Actions security guidance</a> is relevant particularly to privileged workflows processing untrusted candidate code. Never execute a PR's scripts in a token-bearing broker step.</p>
+<p>Record denial, pause, interruption and human intervention summaries without secrets. Missing protections or unsupported sandbox controls fail qualification. Host compromise and privileged GitHub administrators can defeat this profile; enterprise tenant isolation, external attestations, WORM evidence and cross-region failover are deferred, not implied guarantees.</p>
+<p>GitHub and executor retention govern default recovery. Backing up the developer's machine is ordinary operator practice; Nightshift does not provision backup infrastructure. Stronger archival evidence is a later explicit retention requirement, not a hidden object-store prerequisite.</p>
+<h2 id="17-cost-telemetry-and-cubism">17. Cost, telemetry and Cubism<a class="headerlink" href="#17-cost-telemetry-and-cubism" title="Permanent link">§</a></h2>
+<p>Before each launch the dispatcher reads prior attempts' confirmed/estimated usage, conservative outstanding exposure, retry counts and limits. With serial attempts it can stop further starts when a limit is reached. Use native per-request/session token/runtime caps where supported. Spend limits are admission thresholds with best-effort stopping, not strict transactional global reservations: provider reporting lag, interruption latency and unknown duplicate inference can exceed estimates. Never sell them as hard monetary caps. Unknown usage blocks further spending by default until bounded conservatively or acknowledged by the owner.</p>
+<p>Record measured tokens, provider currency/credits, model/executor version, pricing basis/time, estimate versus reported amount, and missing fields. Native session lifetime totals must be differenced against a recorded baseline for successive attempts; forked histories are not charged twice. Subscription usage is not automatically zero and token counts do not imply an actual dollar bill. Final accounting includes failed, abandoned, review, repair and integration work. CI/compute costs can be unknown explicitly.</p>
+<p>Asynchronously emit normalized, schema-versioned events with <code>event_id</code>, attempt/slice/milestone references, role, executor/model, event type, occurred/observed time, sequence when available, outcome/failure class, usage basis and human intervention. The adapter owns provider-specific metadata. Do not emit raw prompts, code or tool arguments by default.</p>
+<p>Cubism computes cost per attempt, slice and milestone; retries and review cycles; executor/model effectiveness; cycle time; failure classes; and planned versus unplanned human intervention. Report merged, accepted and deployed outcomes separately. Include failed work and task/risk mix rather than rewarding pass rate or finding count alone. Price per PR/task/milestone becomes measurable without deciding a commercial billing model in the initial architecture.</p>
+<p>Export through an optional in-memory bounded queue with timeout/drop behavior. Cubism acknowledgement is never awaited by control decisions. Restart may backfill compact lifecycle/outcome events from attempt comments using stable IDs and correction revisions; consumers deduplicate/upsert instead of counting repeated snapshots as new spend. Detailed tool events may be lost; expose completeness and observation times. A durable event delivery pipeline is deferred until measured analytics requirements justify it.</p>
+<p>Optional <a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/">OpenTelemetry GenAI conventions</a> can carry execution telemetry; pin convention versions and exclude sensitive content. IDs belong on structured events/traces rather than unbounded metric-label dimensions. Telemetry is never acceptance evidence or a condition for completion.</p>
+<h2 id="18-build-versus-buy-and-explicit-infrastructure-dispositions">18. Build-versus-buy and explicit infrastructure dispositions<a class="headerlink" href="#18-build-versus-buy-and-explicit-infrastructure-dispositions" title="Permanent link">§</a></h2>
 <div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
 <thead>
 <tr>
-<th>Operation</th>
-<th>Guarantee</th>
+<th>Component</th>
+<th>Disposition and trigger</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Domain command/state transition</td>
-<td>Effectively once per idempotency key and expected version</td>
+<td>Mandatory PostgreSQL authority</td>
+<td>DELETE from default; optional runtime coordination only for the future distributed profile</td>
 </tr>
 <tr>
-<td>Event/outbox delivery</td>
-<td>At least once</td>
+<td>SQLite execution ledger</td>
+<td>DELETE from initial architecture</td>
 </tr>
 <tr>
-<td>Webhook processing</td>
-<td>At least once with deduplicated state effects; receipt itself is not guaranteed</td>
-</tr>
-<tr>
-<td>Runner launch</td>
-<td>At least once dispatch; effectively one authoritative attempt through launch IDs and leases</td>
-</tr>
-<tr>
-<td>Model inference</td>
-<td>May execute more than once; one selected result, all observed costs recorded</td>
-</tr>
-<tr>
-<td>Artifact upload</td>
-<td>At least once; content-addressed storage makes identical writes effectively once</td>
-</tr>
-<tr>
-<td>Review acceptance</td>
-<td>Effectively once per assignment/submission; immutable supersession</td>
-</tr>
-<tr>
-<td>PR/issue creation</td>
-<td>Effectively once when stable markers and reconciliation identify an existing object; ambiguity blocks blind retries</td>
-</tr>
-<tr>
-<td>Merge</td>
-<td>Effectively once per immutable integration intent, relying on source-host preconditions and reconciliation</td>
-</tr>
-<tr>
-<td>Deployment</td>
-<td>Effectively once only where the adapter supports identity/preconditions; otherwise uncertain outcomes require investigation</td>
-</tr>
-<tr>
-<td>Human decision</td>
-<td>Effectively once transaction; duplicate authentication responses cannot produce new authority</td>
-</tr>
-<tr>
-<td>Notifications</td>
-<td>At least once; duplicates may occur</td>
-</tr>
-<tr>
-<td>Billing</td>
-<td>Effectively once ledger entries; later corrections are new entries</td>
-</tr>
-<tr>
-<td>Cancellation</td>
-<td>Effectively once admission revocation; external cancellation is best effort</td>
-</tr>
-<tr>
-<td>Unsupported non-idempotent tool action</td>
-<td>At-most-once dispatch, followed by reconciliation; possible omission is preferable to unsafe repetition</td>
-</tr>
-</tbody>
-</table></div>
-<p>No cross-system “exactly once” claim is made.</p>
-<h3 id="disaster-recovery">Disaster recovery<a class="headerlink" href="#disaster-recovery" title="Permanent link">§</a></h3>
-<p>Use one write region per tenant. PostgreSQL has synchronous availability-zone redundancy and point-in-time recovery; evidence archives replicate only within customer-approved regions.</p>
-<p>Proposed initial targets, to validate before contractual commitment:</p>
-<ul>
-<li>Control API availability: 99.9% monthly.</li>
-<li>Safety admission service availability: 99.95%; outage fails closed.</li>
-<li>Within-region committed-state RPO: zero under the configured synchronous failure model.</li>
-<li>Regional disaster RPO: at most five minutes.</li>
-<li>Regional RTO: four hours.</li>
-<li>Normal projection freshness: under 60 seconds; degraded status clearly displayed.</li>
-</ul>
-<p>After restore, an independently controlled authority registry issues a new epoch. Old gateways lose authority; old credentials are revoked or allowed to expire under containment. Never restore the epoch counter solely from the restored database and assume stale workers are fenced.</p>
-<p>Recovery rebuilds external operation records from source-host, deployment, artifact, and independently archived audit evidence. Unknown outcomes remain blocked. Run scheduled restore drills, not just backup-success checks.</p>
-<h2 id="16-security-and-multi-tenancy">16. Security and multi-tenancy<a class="headerlink" href="#16-security-and-multi-tenancy" title="Permanent link">§</a></h2>
-<p>Use ephemeral VMs for untrusted code. Containers inside them provide packaging and additional restrictions; a shared container host is not the initial customer isolation guarantee.</p>
-<p>The first hosted runner can be a full ephemeral VM per attempt. Firecracker is a later density optimization once the runner contract and isolation tests are stable; it provides a microVM building block, not a complete tenant security product. <a href="https://firecracker-microvm.github.io/">Firecracker project</a></p>
-<p>Required controls:</p>
-<ul>
-<li>Read-only base image, isolated writable workspace, no host mounts or Docker socket.</li>
-<li>No inherited developer SSH agent, cloud credentials, or ambient metadata access.</li>
-<li>Deny-by-default egress through a destination-aware proxy.</li>
-<li>Separate package-fetch phase and approved package cache.</li>
-<li>No shared writable cache across tenants or trust classes.</li>
-<li>Secrets issued only for an identified operation and destination.</li>
-<li>Tenant-specific encryption keys and tenant-bound object access.</li>
-<li>Database tenant isolation enforced in the data access layer and database policy; administrative paths separately audited.</li>
-<li>Region-bound code, prompts, artifacts, backups, and model routing.</li>
-<li>Customer-managed keys and runners with an explicit assurance class.</li>
-<li>Short retention for raw diagnostics; longer retention for accepted evidence by contract.</li>
-<li>No customer-code training or cross-tenant learning without explicit consent.</li>
-<li>Sandboxed presentation/demo origins with no control-plane credentials.</li>
-<li>Signed runtime images, pinned dependencies/actions, SBOMs, and vulnerability response.</li>
-<li>Separate append-only audit export with tightly restricted access.</li>
-<li>Tenant-, program-, repository-, provider-, and global-level kill switches.</li>
-<li>Break-glass permissions with named authority, reason, scope, expiration, and mandatory post-incident review.</li>
-</ul>
-<p>Untrusted tests are arbitrary code execution. A test’s passing result does not justify running it in a privileged environment. GitHub’s security guidance specifically warns about privileged workflow triggers checking out untrusted code and about shared caches and credentials. <a href="https://docs.github.com/en/actions/reference/security/secure-use">GitHub Actions secure-use guidance</a></p>
-<p>Evidence immutability and deletion requirements must be reconciled before retention locks are applied. Default to retention classes and minimal sensitive content; use WORM retention for contracted evidence categories. S3 Object Lock offers retention and legal-hold mechanisms, but configuration and authority determine their protection. <a href="https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html">S3 Object Lock</a></p>
-<p>Cryptographic erasure does not remove exported copies or all identifying metadata. The product must report the actual deletion boundary.</p>
-<h2 id="17-observability-evaluation-economics-and-commercial-model">17. Observability, evaluation, economics, and commercial model<a class="headerlink" href="#17-observability-evaluation-economics-and-commercial-model" title="Permanent link">§</a></h2>
-<h3 id="telemetry">Telemetry<a class="headerlink" href="#telemetry" title="Permanent link">§</a></h3>
-<p>Use correlated traces across programs, slices, attempts, sessions, model calls, tools, reviews, CI, integration, deployments, milestones, and decisions.</p>
-<p>Stable identifiers belong on traces and structured events; avoid placing high-cardinality IDs on every metric label. Long-running programs use linked traces rather than one indefinitely open span.</p>
-<p>Use applicable OpenTelemetry conventions for HTTP, RPC, messaging, and model usage, with a versioned <code>factory.*</code> namespace for domain events. Pin the adopted GenAI convention version: its documentation has moved to a separate project, and sensitive message/tool fields require explicit handling. <a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/">OpenTelemetry GenAI conventions</a>, <a href="https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/">GenAI attributes</a></p>
-<p>Raw prompts, code, tool arguments, and outputs are excluded from normal telemetry by default. Store permitted diagnostic content separately, encrypted, access-controlled, and under short retention. Telemetry is not the evidence archive.</p>
-<h3 id="metrics">Metrics<a class="headerlink" href="#metrics" title="Permanent link">§</a></h3>
-<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
-<thead>
-<tr>
-<th>Metric</th>
-<th>Definition</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Lead time</td>
-<td>Contract readiness → merged/accepted/deployed, reported separately</td>
-</tr>
-<tr>
-<td>Autonomous completion rate</td>
-<td>Eligible slices completed without unplanned human intervention</td>
-</tr>
-<tr>
-<td>Rework rate</td>
-<td>Additional implementation effort after independent findings or failed integration</td>
-</tr>
-<tr>
-<td>Review escape rate</td>
-<td>Confirmed post-merge defects attributable to reviewed scope</td>
-</tr>
-<tr>
-<td>Defect/rollback rate</td>
-<td>Defective accepted changes and rollback events per release/outcome</td>
-</tr>
-<tr>
-<td>Cost per accepted outcome</td>
-<td>All program execution, review, CI, infrastructure, and rework cost divided by accepted outcomes</td>
-</tr>
-<tr>
-<td>Review precision proxy</td>
-<td>Adjudicated actionable findings / adjudicated findings</td>
-</tr>
-<tr>
-<td>Review recall proxy</td>
-<td>Seeded defects detected plus independently sampled escapes</td>
-</tr>
-<tr>
-<td>Human interruption rate</td>
-<td>Unplanned human requests per completed slice; scheduled milestones reported separately</td>
-</tr>
-<tr>
-<td>Evidence freshness</td>
-<td>Age and validity of required evidence at admission</td>
-</tr>
-<tr>
-<td>Policy compliance</td>
-<td>Allowed/denied/exception transitions and detected bypasses</td>
-</tr>
-<tr>
-<td>Resource efficiency</td>
-<td>Queue latency, utilization, startup overhead, wasted attempts</td>
-</tr>
-<tr>
-<td>Model effectiveness</td>
-<td>Accepted outcome cost and quality, stratified by task/risk and context</td>
-</tr>
-</tbody>
-</table></div>
-<p>True review recall is unknowable from accepted findings alone. Use mutation/seeded-defect suites, retrospective defect analysis, and blinded sampling. Report confidence intervals and task mix; do not compare models solely on raw pass rate.</p>
-<p>Retrospective learning proposes better decomposition, estimates, routes, and review rules. Changes first run offline, then in shadow mode, then under an authorized configuration version. Learning never silently weakens customer policy.</p>
-<h3 id="cost-accounting">Cost accounting<a class="headerlink" href="#cost-accounting" title="Permanent link">§</a></h3>
-<p>Reserve budgets before launch. Track requested, reserved, estimated incurred, provider-reported, reconciled, and refunded amounts. Version price catalogs by effective date and distinguish cached input, output, reasoning/tool usage where available, compute, CI, storage, and egress.</p>
-<p>Hard caps require bounding concurrent outstanding work. A cancellation cannot undo an inference already billed. The maximum permitted exposure is the sum of outstanding bounded requests and runner allowances; display this separately from confirmed spend.</p>
-<p>Illustrative planning math, not a provider quote:</p>
-<pre><code class="language-text">Implementation:       $8
-Review:               $4
-Verification/compute: $3
-First-attempt total: $15
-
-At 70% success per comparable attempt:
-rough expected cost ≈ $15 / 0.70 = $21.43
-</code></pre>
-<p>That estimate excludes correlated failures and milestone-level integration costs; actual accepted-outcome accounting is the commercial truth.</p>
-<h3 id="commercial-productization">Commercial productization<a class="headerlink" href="#commercial-productization" title="Permanent link">§</a></h3>
-<ul>
-<li><strong>Pricing:</strong> platform subscription based on active autonomous capacity, plus transparent model/runner usage. Avoid charging per PR or finding.</li>
-<li><strong>Model billing:</strong> bring-your-own-provider accounts first; optional bundled usage with explicit rates and approved routing.</li>
-<li><strong>Onboarding:</strong> identity, source App, repository qualification, baseline CI/evidence assessment, policy selection, shadow run, first delegated milestone.</li>
-<li><strong>Qualification:</strong> repository can build/test reproducibly enough, secrets are isolated, protected integration is enforceable, and acceptance can be demonstrated.</li>
-<li><strong>Enterprise:</strong> SSO, SCIM, delegated authorities, audit export, regional controls, private runners, customer keys, support boundaries.</li>
-<li><strong>Ownership:</strong> customer owns source, outputs, and tenant evidence subject to contracted retention; Nightshift owns the platform and generic methods.</li>
-<li><strong>Responsibility:</strong> Nightshift handles control-plane and managed-runner incidents; customers own business decisions and customer-managed infrastructure, with shared runbooks for adapter failures.</li>
-<li><strong>SLA:</strong> promise service availability and response commitments; do not guarantee arbitrary software correctness or delivery dates.</li>
-<li><strong>Moat:</strong> accumulated failure/recovery knowledge, qualified adapters, review evaluation, verified outcome data, evidence interoperability, and customer workflow integration.</li>
-</ul>
-<p>The moat is the ability to complete and defend delegated outcomes under failure, not access to a particular coding model.</p>
-<h2 id="18-build-versus-buy-decisions">18. Build-versus-buy decisions<a class="headerlink" href="#18-build-versus-buy-decisions" title="Permanent link">§</a></h2>
-<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
-<thead>
-<tr>
-<th>Area</th>
-<th>Recommended default</th>
-<th>Strongest alternative</th>
-<th>Why it loses initially</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Durable orchestration</td>
-<td>Managed Temporal</td>
-<td>Custom PostgreSQL worker/timer engine</td>
-<td>Faster local start, but recovery, long waits, retries, and workflow evolution become core maintenance burdens</td>
-</tr>
-<tr>
-<td>Cloud-native orchestration</td>
 <td>Temporal</td>
-<td>AWS Step Functions</td>
-<td>Strong managed alternative; cloud-specific execution model and portability costs are less suitable for hybrid/customer-hosted plans</td>
+<td>DEFER until durable orchestration requirements exceed the bounded poll/reconcile loop</td>
 </tr>
 <tr>
-<td>Domain authority</td>
-<td>PostgreSQL with event journal/outbox</td>
-<td>Workflow history or tracker as sole database</td>
-<td>Poor fit for relational authorization, budgets, joins, and transactional lease updates</td>
+<td>Distributed lease service</td>
+<td>DEFER until multiple active dispatchers/cross-host effects are required</td>
 </tr>
 <tr>
-<td>Policy</td>
-<td>Typed schema compiled to OPA</td>
-<td>Bespoke evaluator or Cedar</td>
-<td>Bespoke rules become hard to explain/test; Cedar is a credible authorization alternative, but OPA better fits the proposed mix of workflow and configuration policy</td>
+<td>Transactional global budget reservation</td>
+<td>DEFER until strict shared budget enforcement is a demonstrated requirement</td>
 </tr>
 <tr>
-<td>Source host</td>
-<td>GitHub first</td>
-<td>GitLab first or simultaneous support</td>
-<td>Prototype and customer wedge favor GitHub; simultaneous parity delays qualification</td>
+<td>Inbox/outbox services</td>
+<td>DEFER until durable delivery/atomic effect-intent requirements are demonstrated</td>
 </tr>
 <tr>
-<td>Integration</td>
-<td>Native queue where supported; qualified serialized fallback</td>
-<td>Build a universal merge queue</td>
-<td>Reimplements source-host semantics and expands risk before demand</td>
+<td>S3-compatible object storage</td>
+<td>DEFER until real artifact retention needs exceed existing systems</td>
 </tr>
 <tr>
-<td>Execution</td>
-<td>Ephemeral full VMs</td>
-<td>Shared Kubernetes jobs</td>
-<td>More efficient orchestration, but namespaces do not supply the chosen hostile-code boundary</td>
+<td>Full event-sourced aggregate framework</td>
+<td>DELETE; simple records and reconciliation</td>
 </tr>
 <tr>
-<td>Runner density</td>
-<td>Later Firecracker</td>
-<td>VM per attempt forever</td>
-<td>Full VMs win initially on operational simplicity; microVMs become worthwhile when measured cost warrants them</td>
+<td>GitHub-native work graph</td>
+<td>KEEP as initial authority</td>
 </tr>
 <tr>
-<td>Evidence</td>
-<td>Object storage + PostgreSQL index</td>
-<td>Graph database</td>
-<td>Graph relationships are initially tractable relationally; a second database adds operational burden</td>
+<td>Beads/Dolt</td>
+<td>OPTIONAL later graph backend; embedded locally, server only for concurrent graph writes</td>
 </tr>
 <tr>
-<td>Attestation</td>
-<td>in-toto/SLSA-compatible formats</td>
-<td>Proprietary evidence format only</td>
-<td>Interoperability and external verification matter from the start</td>
+<td>Compact attempt comments</td>
+<td>KEEP; human-readable modest durability</td>
 </tr>
 <tr>
-<td>Identity</td>
-<td>Managed customer federation + workload identity</td>
-<td>Build an identity provider</td>
-<td>Commodity authentication is not the differentiation</td>
+<td>Executor-native sessions</td>
+<td>KEEP through adapters; no full transcript replication</td>
 </tr>
 <tr>
-<td>Model connectivity</td>
-<td>Direct approved adapters behind gateway</td>
-<td>Universal provider aggregator</td>
-<td>Aggregators may obscure version, privacy, usage, and routing guarantees</td>
+<td>Trusted GitHub effect broker</td>
+<td>KEEP in process</td>
 </tr>
 <tr>
-<td>UI</td>
-<td>Purpose-built cockpit and milestone room</td>
-<td>Tracker-only interface</td>
-<td>Trackers cannot clearly represent evidence validity, runtime authority, or contractual acceptance</td>
+<td>Independent review attempts</td>
+<td>KEEP, separate role/session and exact subject</td>
 </tr>
 <tr>
-<td>Analytics</td>
-<td>PostgreSQL initially; analytical store when justified</td>
-<td>Make Cubism a mandatory platform dependency</td>
-<td>Dogfooding analytics is useful, but orchestration correctness must not depend on a second evolving product</td>
+<td>Content-addressed permanent artifacts</td>
+<td>DEFER until retention requires them; keep ordinary Git SHAs/input digests</td>
 </tr>
 <tr>
-<td>Cloud</td>
-<td>AWS reference deployment</td>
-<td>Multi-cloud from launch</td>
-<td>One operational baseline accelerates qualification; preserve adapter boundaries rather than simultaneous deployments</td>
+<td>OpenTelemetry</td>
+<td>KEEP optional export</td>
+</tr>
+<tr>
+<td>Cubism</td>
+<td>KEEP asynchronous and outside correctness</td>
+</tr>
+<tr>
+<td>Rich operations UI</td>
+<td>DEFER; CLI/GitHub UI first</td>
+</tr>
+<tr>
+<td>Enterprise multi-tenancy, WORM evidence, cross-region failover</td>
+<td>DEFER; no initial requirements or services</td>
 </tr>
 </tbody>
 </table></div>
-<p>Kubernetes may become appropriate for customer installations or a large runner fleet. It is not an architectural prerequisite.</p>
+<p>PostgreSQL is an option only for multiple active dispatchers, cross-host effect fencing, strict transactional global budgets or a durable outbox. A future design must specify the actual atomicity boundary and retain exactly one graph backend; PostgreSQL does not retroactively give GitHub mutations transactional semantics. Beads/Dolt is suitable for work topology and replanning history, not a drop-in implementation of the old lease-and-budget protocol.</p>
+<p>Current <a href="https://github.com/gastownhall/beads/blob/f56632adcfabed7da6ed0aabe4e760066b472c46/README.md">Beads source</a> documents embedded Dolt as default/single-writer and explicit server mode for concurrent writers. Pin and qualify the version: earlier releases changed storage modes. <a href="https://www.dolthub.com/docs/sql-reference/server/">Dolt's server documentation</a> distinguishes serverless <code>dolt sql</code> from MySQL-compatible <code>dolt sql-server</code>; neither makes Dolt a PostgreSQL drop-in. Local Beads adoption is optional and adds persistent graph storage, so it is outside the zero-database initial profile.</p>
 <hr />
 <p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="06-milestones-and-product-experience.html">Previous</a> · <a href="08-roadmap-and-decisions.html">Next</a></p></article>
       <nav class="bottom-nav" aria-label="Reading shortcuts"><a href="README.html">Reading guide</a><a href="#content">Back to top ↑</a></nav>

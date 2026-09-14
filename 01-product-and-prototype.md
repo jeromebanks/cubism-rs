@@ -1,53 +1,47 @@
 # Nightshift — Product, prototype assessment, and principles
 
 [Overview](index.html) · [Document index](README.md) · [Next](02-architecture-and-work-model.md)
-> Design proposal · Packaged 2026-09-09 · Original sections 1–4 preserved below. Repository findings refer to the inspected checkpoint, not live project state.
 
-This design recommends a service that owns the execution of software programs from agreed intent through verified delivery and human milestone acceptance. Its central product is **reliable delegation with inspectable evidence**: a technical leader can authorize an outcome, let bounded work proceed across sessions and agents, and review coherent results without supervising every pull request.
+> Revised design proposal · 2026-09-13 · GitHub-native, single-dispatcher profile. No Nightshift implementation is included.
 
-The Cubism prototype provides a useful operating model and reusable product assets. It does not yet provide the identity, concurrency, recovery, or authorization guarantees required for unattended operation across customers.
+## 1. Product definition and initial boundary
 
-I read `astra-sdlc.txt` completely, inspected the specified branch and its changes against `main`, examined the requested workflow materials and selected historical evidence, and ran non-mutating diagnostics. No repository files, issues, comments, branches, or GitHub settings were changed.
+Nightshift is an open-source orchestration tool for an individual developer or small team. Its first purpose is to unblock Cubism development with a modest improvement over the existing issue/PR SDLC. A milestone can require multiple dependency-aware slices, and each slice can require multiple implementation, review, repair, and integration attempts across sessions. Humans define direction and accept coherent outcomes; they need not supervise each passing PR.
 
-## 1. Executive thesis and product definition
+The default is one foreground dispatcher on an existing developer machine, existing GitHub Issues/PRs/CI, and installed executors. It requires no PostgreSQL service, Dolt server, SQLite database, Temporal cluster, custom distributed control plane, or persistent Nightshift infrastructure. Local workspaces, disposable caches, and executor-owned session files are allowed; they are not an authoritative Nightshift database. The dispatcher need not run while waiting for a human: restart reconstructs work from GitHub and executor records.
 
-Nightshift is a **governed software delivery service** for programs that exceed the capacity of one coding session. Humans establish outcomes, constraints, budgets, and acceptance contracts. Nightshift plans and executes bounded slices, commissions independent reviews, coordinates integration, maintains evidence, and presents milestones for human acceptance.
+The initial authority envelope is one repository, bounded milestone scope, approved executors/models, finite attempt/time/spend limits, independent review, verified integration, merge, and human milestone acceptance. Release and deployment are disabled unless separately authorized by protected policy. Multi-repository releases and hosted enterprise operations are deferred.
 
-“Autonomous” means the service can select and complete authorized work, recover from routine failures, and continue across sessions without new human instructions. This authority is limited by an explicit execution envelope:
-
-- Allowed repositories, environments, tools, networks, and secrets.
-- Approved outcome and scope.
-- Risk limits and required verification.
-- Time, spend, concurrency, and retry budgets.
-- Milestone boundaries and exception authority.
-
-“Dark” means ordinary delivery does not require a human operator. Every material action remains attributable and observable. A stopped factory must explain whether it is waiting for capacity, evidence, access, a dependency, or a human decision.
-
-The initial customer is a small engineering organization with maintained repositories, functioning CI, and a technical leader willing to delegate a bounded backlog. Start with internal tools, developer infrastructure, and well-tested backend changes. Do not initially promise unattended operation on arbitrary legacy systems or safety-critical software.
-
-### Ownership boundary
-
-| Party | Owns |
+| Owner | Responsibility |
 |---|---|
-| Customer | Product direction, repository contents, acceptance authority, risk appetite, credentials granted, deployment ownership, IP |
-| Nightshift | Contracts, scheduling, execution coordination, policy enforcement, agent identities, review assignment, evidence, recovery, spend accounting |
-| Source host | Git objects, refs, PR records, source-host permissions and enforcement |
-| Tracker | Customer-facing planning records; synchronized views of factory work |
-| CI/build system | Execution of identified verification/build jobs and their native records |
-| Model provider | Model inference and provider-side processing under the customer’s permitted terms |
-| Human approver | Acceptance, rejection, risk acceptance, policy exceptions within assigned authority |
-
-Nightshift does not infer production deployment authority from permission to implement or merge. Milestone acceptance, source integration, release creation, and deployment are separate actions.
-
-Initial assumptions: GitHub is the first source adapter; Linux is the first runner platform; customers permit selected external model providers; production deployment requires an explicit environment policy. These assumptions support a complete first design and remain revisable.
+| Human | Intended outcome, scope changes beyond delegation, protected policy, milestone acceptance |
+| GitHub Issues | Authoritative milestone/slice topology, dependencies, assignment, discovered work, replanning and completion |
+| Issue comments | Compact attempt records, decisions, protected-effect intents and outcome summaries |
+| Git and GitHub PRs/Checks/statuses | Candidate identity, commit-specific verification, integration and merge facts |
+| Executor | Native sessions, transcripts, context, checkpoints, permission interaction and detailed tool events |
+| Nightshift process | Readiness, bounded scheduling, adapter coordination, separate review and in-process trusted effects |
+| Cubism | Asynchronous analytics; never scheduling or acceptance authority |
 
 ## 2. Evidence-grounded assessment of the prototype
 
-The checked-out branch is `chore/checkpoint-sdlc-worktree-state`, at `0cbaf2d3c92ea30eafe507a5460894f5322ccc69`. Local `main` is `1ae95dd9fdfb56febf463c3fd5601ddafbeac4d0`, matching the brief.
+### Current design-branch inspection
+
+This revision starts from `docs/nightshift-design-draft` at `231a161f06a354f34b1c6184a66a813f3d84f8c0`. All eight chapters, the guide, overview, generated reading editions, and renderer were inspected. The repository already has portable slice contracts, milestone manifests, labels, `scripts/sdlc.py`, and a static project cockpit. It has no implemented Nightshift kernel requiring a database migration.
+
+Source inspection at this branch confirms the relevant old construction problems remain: `command_merge` references undefined `add`/`remove`; receipts accept any nonempty claimed reviewer/author and any historical pass for the head; check names collapse issuer identity; claim uses absence-then-push; and enforcement/configuration comes from the checkout. These are future repair requirements, not fixes performed here. See [the inspected script](https://github.com/jeromebanks/cubism-rs/blob/231a161f06a354f34b1c6184a66a813f3d84f8c0/scripts/sdlc.py) and [existing SDLC](https://github.com/jeromebanks/cubism-rs/blob/231a161f06a354f34b1c6184a66a813f3d84f8c0/SDLC.md).
+
+The existing SDLC's one-session slice rule is a sizing heuristic to revise during implementation: a retry or exhausted context does not itself create new intended work. Its branch-claim procedure must not become Nightshift's ownership protocol. This documentation revision does not activate or modify that repository delivery policy.
+
+### Preserved historical assessment
+
+The following findings and diagnostic results are from the earlier checkpoint, retained with their original pinned evidence. They are not claims of new runtime testing or live GitHub configuration verification.
+
+
+The earlier assessment inspected `chore/checkpoint-sdlc-worktree-state`, at `0cbaf2d3c92ea30eafe507a5460894f5322ccc69`. Its local `main` was `1ae95dd9fdfb56febf463c3fd5601ddafbeac4d0`, matching the brief.
 
 The checkpoint changes 32 files, with 2,726 insertions and 441 deletions. The substantive transition is from the large historical time-series skill to portable instructions, deterministic Python tooling, issue templates, and human-facing HTML.
 
-The only untracked file before and after inspection was `astra-sdlc.txt`.
+That earlier assessment reported its only untracked file as `astra-sdlc.txt`.
 
 ### Confirmed findings
 
@@ -81,7 +75,7 @@ Git distinguishes an already-up-to-date ref from a newly created ref; the script
 
 ### Validation performed and its limits
 
-All eight existing SDLC unit tests passed. Additional in-memory checks produced:
+During that earlier assessment, all eight existing SDLC unit tests passed. Additional in-memory checks produced:
 
 ```text
 self-authored receipt gate errors: []
@@ -102,7 +96,7 @@ Live branch protections, installed Apps, provider availability, actual independe
 
 ### Historical lessons
 
-The PostScript workflow already has explicit local claim recovery with heartbeats and discussion of ABA races. It is richer than the Cubism branch claim in this respect, but remains a shared-filesystem protocol rather than a distributed lease service. Its cold-review workflow also documents stale output, wrong-worktree review, and fix-before-re-review pitfalls. [PostScript work-issue:82](https://github.com/jeromebanks/postscript_interpreter/blob/1a5bb6520dfb9fea54a0a4fe34930e9dafa5d5e7/.claude/skills/work-issue/SKILL.md#L82), [review:553](https://github.com/jeromebanks/postscript_interpreter/blob/1a5bb6520dfb9fea54a0a4fe34930e9dafa5d5e7/.claude/skills/work-issue/SKILL.md#L553)
+The PostScript workflow already has explicit local claim recovery with heartbeats and discussion of ABA races. It is richer than the Cubism branch claim in this respect, but remains a shared-filesystem protocol without establishing cross-host ownership. Its cold-review workflow also documents stale output, wrong-worktree review, and fix-before-re-review pitfalls. [PostScript work-issue:82](https://github.com/jeromebanks/postscript_interpreter/blob/1a5bb6520dfb9fea54a0a4fe34930e9dafa5d5e7/.claude/skills/work-issue/SKILL.md#L82), [review:553](https://github.com/jeromebanks/postscript_interpreter/blob/1a5bb6520dfb9fea54a0a4fe34930e9dafa5d5e7/.claude/skills/work-issue/SKILL.md#L553)
 
 The historical Cubism process contributed especially valuable evidence discipline: distinguish what a test proves, what it does not prove, and what was deferred. The selected Phase 20 handoff demonstrates this concretely, including its distinction between confirmed and unexplained formatting behavior. [Phase 20:195](https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/TIMESERIES_PHASE_20_HANDOFF.md#L195), [limitations:240](https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/TIMESERIES_PHASE_20_HANDOFF.md#L240)
 
@@ -110,52 +104,45 @@ The roadmap also distinguishes completed tracked milestones from completion of t
 
 The retrospective documents the earlier absence of cold review on every slice; it is historical evidence, not proof of the current review posture. [sdlc-process-notes.md:173](https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/sdlc-process-notes.md#L173)
 
+
 ## 3. Retain / repair / replace / add
 
-| Existing component | Decision | Product treatment |
-|---|---|---|
-| Epic → bounded slice → milestone model | Retain | Extend into versioned contracts and dependency graphs |
-| Scope, non-goals, acceptance, validation, context fields | Retain | Convert templates into schema-backed contracts |
-| Portable agent instructions and thin harness entry points | Retain | Package as versioned execution guidance; never as authority |
-| “Does not prove” evidence discipline | Retain | Required verification limitation fields |
-| Quality-gate command catalog | Retain and wrap | Run inside isolated runners with structured results and provenance |
-| Current merge and receipt logic | Repair for dogfood, then replace | External admission and authenticated attestations |
-| Remote branch as claim | Replace | Transactional lease service; branch becomes an output |
-| Markdown/labels as workflow state | Replace | Durable domain state; tracker records become synchronized projections |
-| Milestone manifest and report renderer | Retain and extend | Render from an immutable evidence bundle |
-| Cockpit layout and planning warnings | Retain | Live projection with freshness and completeness indicators |
-| Repository-relative policy loading | Replace | Signed policy versions from an independent authority |
-| Shared writable build cache | Replace for hosted execution | Tenant- and trust-scoped caches with verified keys |
-| Historical handoff chain | Retire operationally | Searchable historical evidence; structured checkpoints for continuation |
-| Source-host configuration reconciliation | Retain concept | Adapter detects desired/actual protection drift |
-| Tenant isolation, identity, accounting, incident handling | Add | First-class platform responsibilities |
+| Existing asset or assumption | Disposition |
+|---|---|
+| Epic, slice, feedback and milestone contracts | Retain; add native dependencies and multiple attempts per slice |
+| Acceptance criteria, non-goals, validation and “does not prove” fields | Retain |
+| Quality commands and report templates | Reuse behind trusted validation; do not equate issue closure with evidence |
+| Branch-as-claim and ad hoc receipt authorization | Replace with one dispatcher's assignment and broker-validated session/role binding |
+| Candidate-relative policy | Load trusted policy and broker code independently of the candidate |
+| Tracker as a synchronized projection of internal state | Delete; GitHub is the initial authoritative work graph |
+| Full transcript/checkpoint replication | Delegate to executors; retain normalized references and summaries |
+| Hosted service, tenant hierarchy and separate identity/signing systems | Defer; local operator and GitHub identity first |
+| Rich cockpit | Defer; CLI, GitHub UI and optional existing static reports |
 
-The relevant template foundations are already present in the [slice form](https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/.github/ISSUE_TEMPLATE/slice.yml#L1), [feedback form](https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/.github/ISSUE_TEMPLATE/feedback.yml#L1), and [milestone manifest](https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/sdlc/milestone-manifest.example.json#L1).
+Infrastructure dispositions and future triggers are centralized in [section 18](07-reliability-security-economics.md).
 
-## 4. Product principles and invariants
+## 4. Required invariants
 
-These are platform requirements, not instructions entrusted to an LLM:
+1. Exactly one authoritative work-graph backend exists per deployment.
+2. Attempts are execution records, never work items, GitHub Issues or Beads objects.
+3. One dispatcher is the initial concurrency boundary; a second active dispatcher is unsupported.
+4. A slice can have multiple implementation, review, repair and integration attempts.
+5. Every attempt has a globally unique identifier used for idempotency and reconciliation.
+6. Agent progress messages are not acceptance evidence.
+7. Agents do not directly perform protected GitHub effects or hold integration credentials.
+8. Review is separate from implementation and returns a structured verdict bound to exact inputs.
+9. Replanning changes durable topology only when intended work changes; retries do not change the graph.
+10. Cubism and telemetry are never required for correctness.
+11. GitHub comments provide modest durability, weaker than database transactions; ambiguity must remain visible.
+12. PostgreSQL is introduced only for explicit demonstrated scale or safety triggers in the future distributed profile.
+13. A stale or revoked attempt cannot authorize new broker effects; already-submitted effects must be reconciled.
+14. A candidate cannot weaken its own review or merge policy. Missing or stale evidence cannot become success.
+15. Blocking findings remain unresolved until explicitly dispositioned; a later clean review cannot erase them.
+16. Retry/time/spend bounds include reviews and abandoned work; unknown spend is not zero.
+17. Human acceptance identifies exact source, criteria and evidence. Merge, release, deployment and acceptance are distinct facts.
+18. A pause closes admission first, then settles in-flight effects; cancellation never implies rollback.
 
-1. Every executable action belongs to a tenant, contract revision, attempt, and authorization.
-2. At most one implementation lease is authoritative for a slice at a time.
-3. An expired or superseded lease cannot authorize new effects.
-4. Agents cannot issue their own identities, approve themselves, activate policy, or grant additional permissions.
-5. Review and verification apply to immutable source and input identities.
-6. Every blocking finding remains unresolved until an authorized disposition addresses it.
-7. A PR cannot weaken the policy used to approve itself.
-8. Missing, ambiguous, stale, or untrusted evidence cannot become success.
-9. Human acceptance refers to one exact bundle and one contract revision.
-10. A milestone gate controls admission and promotion, not merely issue selection.
-11. External side effects have durable intent, reconciliation, and an explicit ambiguity state.
-12. Budgets include retries, reviews, abandoned attempts, and infrastructure.
-13. Cancellation never implies that an already-admitted external operation was undone.
-14. Merge, release, deployment, and product acceptance remain distinct facts.
-15. Scope changes create a new contract or plan revision; earlier commitments remain inspectable.
-16. Cross-tenant authorization never depends solely on application filtering or prompt instructions.
-17. An agent’s claim of progress is not progress evidence.
-18. Audit records distinguish observation, inference, assertion, and verified result.
-
-A model may propose a transition. Deterministic services decide whether it is permitted.
+These requirements are enforced by trusted code and source-host controls, not entrusted to model instructions.
 
 ---
 

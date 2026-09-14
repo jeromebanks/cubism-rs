@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Nightshift — Durable events and state machines — complete design draft, with source and section navigation.">
-  <meta name="source-sha256" content="9de999a01f59bb99c979b659fd1d1cbae25a2564ef6a8a605d1a4eecd2e58229">
-  <title>Nightshift — Durable events and state machines</title>
+  <meta name="description" content="Nightshift — Attempt journal and state machines — complete design draft, with source and section navigation.">
+  <meta name="source-sha256" content="014215e44e7defcade46b4da9c2fb880ea1be94d8bb26d4a7f1157e0ac6af2c0">
+  <title>Nightshift — Attempt journal and state machines</title>
   <link rel="stylesheet" href="reader.css">
   <script type="module" src="reader.js"></script>
 </head>
@@ -14,18 +14,15 @@
   <header class="masthead"><a href="index.html">NIGHTSHIFT / Design notebook</a><span>Draft for review · Proposed architecture, not an implemented platform</span></header>
   <div class="layout">
     <aside aria-label="Document navigation"><div>
-      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html" aria-current="page">Durable events and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and adversarial review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestone contracts and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Migration roadmap, risks, and architectural decisions</a></li></ol></nav>
+      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html" aria-current="page">Attempt journal and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and independent review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestones and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Roadmap, risks, and architectural decisions</a></li></ol></nav>
       <details open><summary>On this page</summary><nav aria-label="Page sections"><div class="toc">
 <ul>
-<li><a href="#7-durable-event-and-state-model">7. Durable event and state model</a><ul>
-<li><a href="#transition-contract">Transition contract</a></li>
-<li><a href="#slice-lifecycle">Slice lifecycle</a></li>
-<li><a href="#execution-attempt">Execution attempt</a></li>
-<li><a href="#review-round">Review round</a></li>
-<li><a href="#merge-and-release">Merge and release</a></li>
-<li><a href="#milestone-review">Milestone review</a></li>
-<li><a href="#human-feedback">Human feedback</a></li>
-<li><a href="#incident-and-recovery">Incident and recovery</a></li>
+<li><a href="#7-github-native-durability-and-transitions">7. GitHub-native durability and transitions</a><ul>
+<li><a href="#compact-attempt-schema">Compact attempt schema</a></li>
+<li><a href="#durable-launch-and-completion-order">Durable launch and completion order</a></li>
+<li><a href="#slice-state-machine">Slice state machine</a></li>
+<li><a href="#attempt-state-machine">Attempt state machine</a></li>
+<li><a href="#review-and-effect-state">Review and effect state</a></li>
 </ul>
 </li>
 </ul>
@@ -34,765 +31,190 @@
     </div></aside>
     <main id="content">
       <div class="source-bar"><a href="index.html">← TL;DR overview</a><a href="03-durable-state-machines.md" download>Markdown source ↓</a><span>Full text · Generated from preserved Markdown</span></div>
-      <article><h1 id="nightshift-durable-events-and-state-machines">Nightshift — Durable events and state machines<a class="headerlink" href="#nightshift-durable-events-and-state-machines" title="Permanent link">§</a></h1>
+      <article><h1 id="nightshift-attempt-journal-and-state-machines">Nightshift — Attempt journal and state machines<a class="headerlink" href="#nightshift-attempt-journal-and-state-machines" title="Permanent link">§</a></h1>
 <p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="02-architecture-and-work-model.html">Previous</a> · <a href="04-execution-scheduling-review.html">Next</a></p>
 <blockquote>
-<p>Design proposal · Packaged 2026-09-09 · Original sections 7 preserved below. Repository findings refer to the inspected checkpoint, not live project state.</p>
+<p>Revised design proposal · 2026-09-13 · GitHub-native, single-dispatcher profile. No Nightshift implementation is included.</p>
 </blockquote>
-<h2 id="7-durable-event-and-state-model">7. Durable event and state model<a class="headerlink" href="#7-durable-event-and-state-model" title="Permanent link">§</a></h2>
-<p>PostgreSQL is the authority for aggregate transitions. Each command transaction:</p>
+<h2 id="7-github-native-durability-and-transitions">7. GitHub-native durability and transitions<a class="headerlink" href="#7-github-native-durability-and-transitions" title="Permanent link">§</a></h2>
+<p>Issue comments are a modest durability mechanism for a small number of attempts, not a high-throughput event store. No database transaction, unique constraint, compare-and-swap across comments, or immutable history is implied. Human edits/deletions, lost responses, pagination and rate limits are part of the failure model. The broker is the sole writer of machine records; only trusted broker-authored records with valid schema and matching assignments are accepted. A marker copied into an arbitrary user's comment carries no authority.</p>
+<h3 id="compact-attempt-schema">Compact attempt schema<a class="headerlink" href="#compact-attempt-schema" title="Permanent link">§</a></h3>
+<p>Use one primary comment per attempt on its slice. Integration attempts use the relevant implementation slice for pre-merge verification or the milestone integration slice for assembled verification. This illustrative record uses abbreviated SHAs; production records use full IDs.</p>
+<pre><code class="language-markdown">&lt;!-- nightshift-attempt:01994ba0-6a00-7000-8000-000000000123 --&gt;
+### Implementation attempt 3
+```yaml
+schema: nightshift.attempt/v1
+attempt_id: 01994ba0-6a00-7000-8000-000000000123
+revision: 2
+slice: github:OWNER/REPO#123
+role: implementation
+predecessor_attempt: null
+executor: factory-droid
+model: claude-sonnet
+session_ref: {adapter: factory-droid, opaque_id: droid-session-123}
+status: completed
+allocated_at: 2026-09-13T19:23:59Z
+started_at: 2026-09-13T19:24:00Z
+finished_at: 2026-09-13T19:41:00Z
+contract: {revision: 1, digest: 'sha256:contract', summary: 'Implement the specified sparse aggregation behavior'}
+policy: {source_commit: abc123, digest: 'sha256:policy'}
+base_commit: abc123
+candidate_commit: def456
+outcome: candidate-produced
+failure_class: null
+usage: {tokens: 184291, cost: 2.84, currency: USD, basis: executor-reported}
+review: pending
+workflow_checks: []
+artifact_refs: []
+effects: []
+```
+</code></pre>
+<p>A globally unique UUID (for example UUIDv7) or ULID is allocated before any executor launch. The marker and field must agree. Required allocation fields include ID, role, slice, input identities, executor/model selection, limits, allocation time, status and schema. Session, candidate, timestamps and usage can be unknown; null is distinct from zero. Record supported model version and adapter/runtime version when available. Keep secrets and transcripts out. A separate <code>adapter_metadata</code> object may hold provider-specific details, never domain control state.</p>
+<p><code>revision</code> detects unexpected changes in this single writer's own record; it is not atomic concurrency control. Treat terminal outcomes as final in normal operation. Later usage corrections or recovered facts carry a correction reason/time and preserve the previous value, or use a linked correction comment. Duplicate identical markers are reconciled to a canonical comment ID with duplicates referenced; contradictory payloads block the attempt. Unknown schema, missing trusted records or unexplained edits require inspection.</p>
+<h3 id="durable-launch-and-completion-order">Durable launch and completion order<a class="headerlink" href="#durable-launch-and-completion-order" title="Permanent link">§</a></h3>
 <ol>
-<li>Authenticates the actor and tenant.</li>
-<li>Checks aggregate version, current policy, gate generation, and lease where applicable.</li>
-<li>Validates preconditions and budget.</li>
-<li>Appends the domain event.</li>
-<li>Updates state and reservations.</li>
-<li>Writes outbox records.</li>
-<li>Commits before reporting acceptance.</li>
+<li>Reconcile the slice, validate readiness/policy and compute conservative remaining limits in memory.</li>
+<li>Allocate ID; write and confirm an <code>allocated</code> comment before launching. If POST times out, paginate comments and find the marker; never blindly allocate another ID or launch while its durable allocation is uncertain.</li>
+<li>Record <code>starting</code>, stable launch key and intended workspace; launch via adapter using the attempt ID as a correlation/idempotency key where supported. This key does not invent executor-side deduplication.</li>
+<li>Record <code>running</code> and native session reference as soon as observed. Stream detailed events transiently; write only material lifecycle changes, permission waits and summaries to GitHub.</li>
+<li>Validate the returned subject/result; broker publishes permitted candidate objects and records their IDs. Write terminal outcome and observed usage. Executor exit zero alone is not proof of acceptance.</li>
+<li>A failed durable write stops dependent scheduling and protected progression until reconciled. In-flight bounded computation can finish without new effect authority.</li>
 </ol>
-<p>Each event contains:</p>
-<pre><code class="language-text">event_id, tenant_id, aggregate_type, aggregate_id, aggregate_version,
-event_type, actor_identity, command_id, idempotency_key,
-causation_id, correlation_id, occurred_at, recorded_at,
-contract_digest, policy_digest, authority_epoch,
-payload_digest, evidence_refs, schema_version
-</code></pre>
-<p>Unique constraints enforce aggregate sequencing and command deduplication. A reused idempotency key with different input is rejected.</p>
-<h3 id="transition-contract">Transition contract<a class="headerlink" href="#transition-contract" title="Permanent link">§</a></h3>
-<p>The tables below enumerate allowed transitions. Unlisted transitions are rejected.</p>
-<p>For every row, the idempotency key is:</p>
-<pre><code class="language-text">K = H(tenant, aggregate_id, transition_ID, expected_version, command_id)
-</code></pre>
-<p>The first accepted command stores its input digest and result under <code>K</code>; retries return that result. External steps additionally receive a persistent <code>operation_id</code>. Evidence columns are added to the common signed transition receipt containing actor, policy, inputs, and prior/new versions.</p>
-<p>Actor names imply these scoped permissions:</p>
+<p>The launch-to-session-recording gap cannot be eliminated. Restart may find a running executor without a recorded session reference, or a result published without the terminal comment. Recovery can abandon work or occasionally duplicate computation. It cannot blindly repeat a protected effect.</p>
+<h3 id="slice-state-machine">Slice state machine<a class="headerlink" href="#slice-state-machine" title="Permanent link">§</a></h3>
+<p>States are interpreted from issue contract/topology, attempt summaries and native GitHub facts. They are not rows in an event-sourced aggregate framework. The broker updates UI labels after confirming facts; partial label writes are repaired on reread.</p>
 <div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
 <thead>
 <tr>
-<th>Actor</th>
-<th>Authorization</th>
+<th>Transition</th>
+<th>Preconditions / result</th>
+<th>Failure behavior</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Planner</td>
-<td><code>plan.propose</code>, <code>slice.propose</code>; cannot expand approved envelope</td>
+<td>proposed → ready</td>
+<td>Valid bounded contract, satisfied native dependencies, open gate, qualified adapter and limits</td>
+<td>Keep proposed/blocked on missing information</td>
 </tr>
 <tr>
-<td>Validator</td>
-<td><code>contract.validate</code>, <code>slice.ready</code></td>
+<td>ready → active</td>
+<td>Allocation comment confirmed; current in-process assignment</td>
+<td>Reconcile ambiguous allocation before launch</td>
 </tr>
 <tr>
-<td>Scheduler</td>
-<td><code>attempt.allocate</code>, <code>lease.issue</code>, budget reservation</td>
+<td>active → reviewing</td>
+<td>Candidate identified and prerequisite checks valid</td>
+<td>Failure creates retry/repair attempt or blocks</td>
 </tr>
 <tr>
-<td>Runner</td>
-<td>Current attempt’s <code>progress</code>, <code>checkpoint</code>, <code>candidate.submit</code></td>
+<td>reviewing → rework</td>
+<td>Structured blocking findings</td>
+<td>Preserve findings and create bounded repair attempt</td>
 </tr>
 <tr>
-<td>Review service</td>
-<td><code>review.assign</code>, <code>review.aggregate</code>; cannot author implementation</td>
+<td>rework → active</td>
+<td>Same intended scope, limits and gate permit</td>
+<td>Changed scope enters replanning</td>
 </tr>
 <tr>
-<td>Reviewer</td>
-<td>Assigned round’s <code>review.submit</code>; no candidate write</td>
+<td>reviewing → integrating</td>
+<td>Required current reviews pass; no unresolved findings</td>
+<td>Missing/stale result remains nonpassing</td>
 </tr>
 <tr>
-<td>Judge</td>
-<td><code>finding.adjudicate</code> within delegated risk limits</td>
+<td>integrating → complete</td>
+<td>Verification-only slice: exact assembled-source checks/demo satisfy its contract, required review policy is met, no pending effects; no source change or PR required</td>
+<td>Missing/stale evidence blocks; a source change follows the reviewed candidate/merge path</td>
 </tr>
 <tr>
-<td>Effect broker</td>
-<td>Exact signed source/deployment operation</td>
+<td>integrating → merged</td>
+<td>Exact-head merge confirmed by GitHub after required integration verification</td>
+<td>Unknown effect blocks; moved inputs need fresh verification</td>
 </tr>
 <tr>
-<td>Verifier</td>
-<td>Assigned verification/build attestation</td>
+<td>merged → complete</td>
+<td>Slice's explicit completion predicates hold</td>
+<td>Remain merged if further verification is required</td>
 </tr>
 <tr>
-<td>Milestone service</td>
-<td><code>bundle.assemble</code>, <code>bundle.seal</code>, gate coordination</td>
+<td>any unfinished → blocked</td>
+<td>Dependency, pause, limit, access, uncertainty or safety failure</td>
+<td>Revoke new effects and settle admitted effects</td>
 </tr>
 <tr>
-<td>Human</td>
-<td>Current contract’s designated decision authority</td>
+<td>blocked → ready/reviewing/integrating</td>
+<td>Reconciliation and fresh predicates justify the particular next step</td>
+<td>Do not restart implementation if a valid candidate already exists</td>
 </tr>
 <tr>
-<td>Recovery controller</td>
-<td>Reconciliation and preauthorized recovery only</td>
-</tr>
-<tr>
-<td>Incident commander</td>
-<td>Explicit containment, recovery, or exception authority</td>
+<td>unmerged → cancelled/superseded</td>
+<td>Authorized decision, admitted effects settled</td>
+<td>Preserve attempts and replacement links</td>
 </tr>
 </tbody>
 </table></div>
-<p>Timeout profiles apply to every listed transition:</p>
+<p>A merged fact cannot be cancelled retroactively; a revert is new work. A closed issue is insufficient evidence of complete work. Cancelled/superseded issues have explicit outcomes and do not unblock dependents as successful slices.</p>
+<h3 id="attempt-state-machine">Attempt state machine<a class="headerlink" href="#attempt-state-machine" title="Permanent link">§</a></h3>
 <div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
 <thead>
 <tr>
-<th>Profile</th>
-<th>Timeout and retry</th>
-<th>Failure and recovery</th>
+<th>Transition</th>
+<th>Rule</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><strong>C: command</strong></td>
-<td>10-second request deadline; retry transaction conflicts up to three times with jitter</td>
-<td>No partial domain commit; reject or return <code>retryable_conflict</code></td>
+<td>absent → allocated → starting → running</td>
+<td>Each pre-launch durable write confirmed; native session reference recorded when available</td>
 </tr>
 <tr>
-<td><strong>A: execution</strong></td>
-<td>Five-minute startup; contract runtime cap; 20-second heartbeat, 90-second lease</td>
-<td>Expire and fence; preserve evidence; replacement gets a new attempt</td>
+<td>running → waiting_permission → running</td>
+<td>Adapter surfaces request; trusted permission decision recorded; no self-approval</td>
 </tr>
 <tr>
-<td><strong>V: verification/review</strong></td>
-<td>Default 30-minute job deadline, contract override; two infrastructure retries</td>
-<td>Failure remains visible; exhausted execution becomes inconclusive, never passing</td>
+<td>running → suspended</td>
+<td>Executor confirms native checkpoint/stop; pending effects settled</td>
 </tr>
 <tr>
-<td><strong>E: external effect</strong></td>
-<td>30-second request deadline; transport ambiguity triggers reconciliation</td>
-<td>Retry only after proving absence or using native idempotency/CAS; unresolved becomes <code>uncertain</code></td>
+<td>suspended → starting</td>
+<td>Same fixed inputs and authorized assignment; native resume supported; fresh process-local capability</td>
 </tr>
 <tr>
-<td><strong>H: human wait</strong></td>
-<td>Default seven-day decision window; configurable reminders</td>
-<td>Expire or remain waiting by contract; no automatic approval</td>
+<td>running → completed</td>
+<td>Normalized result and summary durably recorded; role-specific evidence evaluated separately</td>
 </tr>
 <tr>
-<td><strong>R: recovery</strong></td>
-<td>Containment target 30 seconds; five-minute reconciliation intervals; escalation after 30 minutes</td>
-<td>Keep affected scope fenced until verified recovery</td>
-</tr>
-</tbody>
-</table></div>
-<p><code>T</code> marks terminal for that entity revision. <code>T/R</code> is a terminal attempt or round from which the parent may create a replacement. <code>N</code> is nonterminal. Terminal history is never rewritten.</p>
-<h3 id="slice-lifecycle">Slice lifecycle<a class="headerlink" href="#slice-lifecycle" title="Permanent link">§</a></h3>
-<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
-<thead>
-<tr>
-<th>ID / transition</th>
-<th>Actor and preconditions</th>
-<th>Durable event</th>
-<th>Profile; recovery</th>
-<th>Evidence / result</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>S1: absent → proposed</td>
-<td>Planner; approved program envelope</td>
-<td><code>SliceProposed</code></td>
-<td>C; reject invalid scope</td>
-<td>Contract proposal; N</td>
+<td>allocated/starting/running/waiting_permission/suspended → failed/cancelled/abandoned</td>
+<td>Reason and known/unknown usage retained; revoke authority before replacement</td>
 </tr>
 <tr>
-<td>S2: proposed → ready</td>
-<td>Validator; valid contract, dependencies, gate, budget feasibility</td>
-<td><code>SliceReadied</code></td>
-<td>C; remain proposed on failure</td>
-<td>Readiness evaluation; N</td>
+<td>any nonterminal → needs_inspection</td>
+<td>Contradictory/missing evidence or ambiguous external action</td>
 </tr>
 <tr>
-<td>S3: ready → active</td>
-<td>Scheduler; capacity and exclusive lease acquired</td>
-<td><code>SliceStarted</code></td>
-<td>C/A; release reservation if launch never occurs</td>
-<td>Attempt and lease IDs; N</td>
-</tr>
-<tr>
-<td>S4: active → reviewing</td>
-<td>Runner submits; candidate sealed, initial verification complete</td>
-<td><code>CandidateAccepted</code></td>
-<td>C; reject stale lease</td>
-<td>Source/context/verification digests; N</td>
-</tr>
-<tr>
-<td>S5: reviewing → rework</td>
-<td>Review service; blocking findings</td>
-<td><code>ReworkRequired</code></td>
-<td>C; retain all findings</td>
-<td>Finding set; N</td>
-</tr>
-<tr>
-<td>S6: rework → active</td>
-<td>Scheduler; fixes within scope, budget and gate permit</td>
-<td><code>ReworkStarted</code></td>
-<td>C/A; new attempt on failure</td>
-<td>Fix contract and prior findings; N</td>
-</tr>
-<tr>
-<td>S7: reviewing → merge_pending</td>
-<td>Review service; all required rounds and checks pass</td>
-<td><code>SliceIntegrationRequested</code></td>
-<td>C/E; wait or supersede stale candidate</td>
-<td>Review and check graph; N</td>
-</tr>
-<tr>
-<td>S8: merge_pending → merged</td>
-<td>Effect broker/reconciler; actual merge confirmed</td>
-<td><code>SliceMerged</code></td>
-<td>E; reconcile issue closure separately</td>
-<td>Merge SHA and parentage; T</td>
-</tr>
-<tr>
-<td>S9: any unmerged state → blocked</td>
-<td>Policy/recovery controller; dependency, access, gate, budget, or safety failure</td>
-<td><code>SliceBlocked</code></td>
-<td>C/R; fence active work, settle effects</td>
-<td>Reason and resume state; N</td>
-</tr>
-<tr>
-<td>S10: blocked → ready</td>
-<td>Validator; blocker resolved, old work reconciled</td>
-<td><code>SliceUnblocked</code></td>
-<td>C; new attempt if needed</td>
-<td>Resolution evidence; N</td>
-</tr>
-<tr>
-<td>S11: unmerged → superseded</td>
-<td>Planner; replacement plan authorized, effects settled</td>
-<td><code>SliceSuperseded</code></td>
-<td>C; retain candidate</td>
-<td>Replacement IDs; T</td>
-</tr>
-<tr>
-<td>S12: unmerged → cancelled/failed</td>
-<td>Authorized customer/controller; cancellation or exhausted policy</td>
-<td><code>SliceCancelled</code> / <code>SliceFailed</code></td>
-<td>C/R; drain in-flight effects first</td>
-<td>Cause, spend, retained artifacts; T</td>
+<td>needs_inspection → supported recovered state or abandoned</td>
+<td>Recorded reconciliation decision, never an invented success</td>
 </tr>
 </tbody>
 </table></div>
-<p>An already merged slice cannot be cancelled retroactively. A revert or correction is new work linked to the original.</p>
-<h3 id="execution-attempt">Execution attempt<a class="headerlink" href="#execution-attempt" title="Permanent link">§</a></h3>
-<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
-<thead>
-<tr>
-<th>ID / transition</th>
-<th>Actor and preconditions</th>
-<th>Durable event</th>
-<th>Profile; recovery</th>
-<th>Evidence / result</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>A1: absent → allocated</td>
-<td>Scheduler; reservation and lease transaction succeeds</td>
-<td><code>AttemptAllocated</code></td>
-<td>C</td>
-<td>Runner class, model route, budget; N</td>
-</tr>
-<tr>
-<td>A2: allocated → starting</td>
-<td>Gateway; signed manifest accepted</td>
-<td><code>AttemptDispatched</code></td>
-<td>A; deduplicate launch ID</td>
-<td>Manifest and runtime image digest; N</td>
-</tr>
-<tr>
-<td>A3: starting → running</td>
-<td>Runner supervisor; identity, workspace, policy verified</td>
-<td><code>AttemptStarted</code></td>
-<td>A; fence failed startup</td>
-<td>Runtime attestation; N</td>
-</tr>
-<tr>
-<td>A4: running → running</td>
-<td>Runner supervisor; valid lease and increasing sequence</td>
-<td><code>AttemptProgressed</code></td>
-<td>A; heartbeat failure expires lease</td>
-<td>Tool/test/artifact progress delta; N</td>
-</tr>
-<tr>
-<td>A5: running → checkpointing</td>
-<td>Runner/controller; context, time, or preemption threshold</td>
-<td><code>CheckpointRequested</code></td>
-<td>A; preserve last durable checkpoint</td>
-<td>Trigger and pending operations; N</td>
-</tr>
-<tr>
-<td>A6: checkpointing → suspended</td>
-<td>Supervisor; checkpoint uploaded, effects reconciled, credentials revoked</td>
-<td><code>AttemptSuspended</code></td>
-<td>A/R</td>
-<td>Checkpoint digest; N</td>
-</tr>
-<tr>
-<td>A7: suspended → starting</td>
-<td>Scheduler; same attempt still permitted, fresh lease generation</td>
-<td><code>AttemptResumed</code></td>
-<td>C/A</td>
-<td>Checkpoint compatibility evaluation; N</td>
-</tr>
-<tr>
-<td>A8: running → completed</td>
-<td>Supervisor; candidate and final usage sealed, no unresolved effects</td>
-<td><code>AttemptCompleted</code></td>
-<td>C</td>
-<td>Execution attestation; T</td>
-</tr>
-<tr>
-<td>A9: allocated/starting/running/checkpointing → failed_retryable</td>
-<td>Controller; infrastructure/provider failure</td>
-<td><code>AttemptFailedRetryable</code></td>
-<td>A/R; new attempt</td>
-<td>Failure and last checkpoint; T/R</td>
-</tr>
-<tr>
-<td>A10: active → abandoned</td>
-<td>Lease service; expiry or owner loss</td>
-<td><code>AttemptAbandoned</code></td>
-<td>R; fence and reconcile before replacement effects</td>
-<td>Lease history and recovery report; T/R</td>
-</tr>
-<tr>
-<td>A11: active/suspended → cancelled/failed_terminal</td>
-<td>Controller; cancellation, policy violation, exhausted limit</td>
-<td><code>AttemptCancelled</code> / <code>AttemptFailedTerminal</code></td>
-<td>R; revoke and retain</td>
-<td>Cause and final accounting; T</td>
-</tr>
-</tbody>
-</table></div>
-<p>A provider failover creates a new attempt when execution semantics or context continuity cannot be preserved. A failed attempt is never renamed into its replacement.</p>
-<h3 id="review-round">Review round<a class="headerlink" href="#review-round" title="Permanent link">§</a></h3>
-<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
-<thead>
-<tr>
-<th>ID / transition</th>
-<th>Actor and preconditions</th>
-<th>Durable event</th>
-<th>Profile; recovery</th>
-<th>Evidence / result</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Q1: absent → planned</td>
-<td>Review service; immutable candidate, risk policy selected</td>
-<td><code>ReviewPlanned</code></td>
-<td>C</td>
-<td>Required classes and review scope; N</td>
-</tr>
-<tr>
-<td>Q2: planned → assigned</td>
-<td>Review service; independent eligible identities available</td>
-<td><code>ReviewAssigned</code></td>
-<td>C/A</td>
-<td>Assignment and separation evidence; N</td>
-</tr>
-<tr>
-<td>Q3: assigned → running</td>
-<td>Reviewer supervisor; verified clean context package</td>
-<td><code>ReviewStarted</code></td>
-<td>V</td>
-<td>Context-access manifest; N</td>
-</tr>
-<tr>
-<td>Q4: running → submitted</td>
-<td>Reviewer; complete structured findings and coverage</td>
-<td><code>ReviewSubmitted</code></td>
-<td>C</td>
-<td>Signed review attestation; N</td>
-</tr>
-<tr>
-<td>Q5: submitted → passed</td>
-<td>Review service; coverage complete, no unresolved blocking findings</td>
-<td><code>ReviewPassed</code></td>
-<td>C</td>
-<td>Aggregated decision; T</td>
-</tr>
-<tr>
-<td>Q6: submitted → changes_required</td>
-<td>Review service; actionable blocking finding</td>
-<td><code>ReviewChangesRequired</code></td>
-<td>C; initiate rework</td>
-<td>Findings and reproduction evidence; T</td>
-</tr>
-<tr>
-<td>Q7: submitted → disputed</td>
-<td>Implementer/reviewer; explicit evidence-backed disagreement</td>
-<td><code>ReviewDisputed</code></td>
-<td>C/V; assign judge</td>
-<td>Competing claims; N</td>
-</tr>
-<tr>
-<td>Q8: disputed → passed/changes_required</td>
-<td>Judge or designated human; authorized disposition</td>
-<td><code>ReviewAdjudicated</code></td>
-<td>V/H</td>
-<td>Ruling per finding; T</td>
-</tr>
-<tr>
-<td>Q9: assigned/running/submitted/disputed → inconclusive</td>
-<td>Controller; missing evidence, timeout, exhausted retries</td>
-<td><code>ReviewInconclusive</code></td>
-<td>V; replacement round</td>
-<td>Failure and uncovered areas; T/R</td>
-</tr>
-<tr>
-<td>Q10: any current round → superseded</td>
-<td>Review service; candidate/contract changes</td>
-<td><code>ReviewSuperseded</code></td>
-<td>C; retain findings in next round</td>
-<td>Old/new digest link; T</td>
-</tr>
-</tbody>
-</table></div>
-<p>A new clean round cannot erase an earlier blocking finding. It must explicitly resolve, invalidate, or carry that finding forward.</p>
-<h3 id="merge-and-release">Merge and release<a class="headerlink" href="#merge-and-release" title="Permanent link">§</a></h3>
-<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
-<thead>
-<tr>
-<th>ID / transition</th>
-<th>Actor and preconditions</th>
-<th>Durable event</th>
-<th>Profile; recovery</th>
-<th>Evidence / result</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>G1: absent → integrating</td>
-<td>Effect broker; slice eligible, branch capability qualified</td>
-<td><code>IntegrationStarted</code></td>
-<td>E/V</td>
-<td>Head, base, policy and gate generations; N</td>
-</tr>
-<tr>
-<td>G2: integrating → eligible</td>
-<td>Verifier; integration candidate checks pass</td>
-<td><code>IntegrationVerified</code></td>
-<td>V</td>
-<td>Tested integration SHA/tree; N</td>
-</tr>
-<tr>
-<td>G3: eligible → submitting</td>
-<td>Effect broker; current policy/gate valid, exact operation admitted</td>
-<td><code>MergeSubmitted</code></td>
-<td>C/E</td>
-<td>Consumed authorization and expected head; N</td>
-</tr>
-<tr>
-<td>G4: submitting → merged</td>
-<td>Broker; host confirms exact result</td>
-<td><code>MergeConfirmed</code></td>
-<td>E</td>
-<td>Merge SHA, parents, resulting tree; T</td>
-</tr>
-<tr>
-<td>G5: submitting → uncertain</td>
-<td>Broker; outcome ambiguous</td>
-<td><code>MergeOutcomeUnknown</code></td>
-<td>E/R; prohibit blind retry</td>
-<td>Request/response evidence; N</td>
-</tr>
-<tr>
-<td>G6: uncertain → merged/rejected</td>
-<td>Reconciler; remote state conclusively classified</td>
-<td><code>MergeReconciled</code></td>
-<td>R</td>
-<td>Source-host observations; T</td>
-</tr>
-<tr>
-<td>G7: integrating/eligible → superseded</td>
-<td>Controller; head/base/policy invalidates evaluation</td>
-<td><code>IntegrationSuperseded</code></td>
-<td>C; regenerate candidate</td>
-<td>Changed inputs; T/R</td>
-</tr>
-<tr>
-<td>G8: absent → building</td>
-<td>Release service; explicit release vector selected</td>
-<td><code>ReleaseBuildRequested</code></td>
-<td>C/V</td>
-<td>Source vector and build recipe; N</td>
-</tr>
-<tr>
-<td>G9: building → verified</td>
-<td>Builder/verifier; artifacts and release checks complete</td>
-<td><code>ReleaseVerified</code></td>
-<td>V</td>
-<td>Build provenance, SBOM, verification; N</td>
-</tr>
-<tr>
-<td>G10: verified → deploying</td>
-<td>Effect broker; target environment authorization satisfied</td>
-<td><code>DeploymentSubmitted</code></td>
-<td>E</td>
-<td>Artifact/config digests and environment generation; N</td>
-</tr>
-<tr>
-<td>G11: deploying → deployed</td>
-<td>Deployment verifier; runtime and health criteria pass</td>
-<td><code>DeploymentConfirmed</code></td>
-<td>V/E</td>
-<td>Deployment and runtime attestations; T</td>
-</tr>
-<tr>
-<td>G12: deploying → uncertain/degraded</td>
-<td>Controller; ambiguous API or failed health</td>
-<td><code>DeploymentUncertain</code> / <code>DeploymentDegraded</code></td>
-<td>R</td>
-<td>Observed environment state; N</td>
-</tr>
-<tr>
-<td>G13: degraded → rolled_back</td>
-<td>Recovery controller; permitted rollback verified</td>
-<td><code>DeploymentRolledBack</code></td>
-<td>E/V</td>
-<td>Prior artifact and health evidence; T</td>
-</tr>
-<tr>
-<td>G14: building/verified → failed/cancelled</td>
-<td>Controller; terminal verification or authorization failure</td>
-<td><code>ReleaseFailed</code> / <code>ReleaseCancelled</code></td>
-<td>C/R</td>
-<td>Failure and retained artifacts; T</td>
-</tr>
-</tbody>
-</table></div>
-<p>An uncertain deployment first enters reconciliation. It reaches deployed, degraded, or confirmed-not-applied before another deployment is admitted.</p>
-<h3 id="milestone-review">Milestone review<a class="headerlink" href="#milestone-review" title="Permanent link">§</a></h3>
-<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
-<thead>
-<tr>
-<th>ID / transition</th>
-<th>Actor and preconditions</th>
-<th>Durable event</th>
-<th>Profile; recovery</th>
-<th>Evidence / result</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>M1: absent → draft</td>
-<td>Planner/human; contract proposed</td>
-<td><code>MilestoneDrafted</code></td>
-<td>C</td>
-<td>Contract revision; N</td>
-</tr>
-<tr>
-<td>M2: draft → collecting</td>
-<td>Milestone service; contract activated, checkpoint reached</td>
-<td><code>MilestoneCollectionStarted</code></td>
-<td>C/V</td>
-<td>Included scope and gate-drain request; N</td>
-</tr>
-<tr>
-<td>M3: collecting → sealed</td>
-<td>Milestone service; effects drained, required graph complete</td>
-<td><code>MilestoneBundleSealed</code></td>
-<td>C</td>
-<td>Bundle digest and validation report; N</td>
-</tr>
-<tr>
-<td>M4: sealed → presented</td>
-<td>Review service; presentation and demo availability verified</td>
-<td><code>MilestonePresented</code></td>
-<td>C/H</td>
-<td>Presentation digest, demo access record; N</td>
-</tr>
-<tr>
-<td>M5: presented → approved</td>
-<td>Human; exact current bundle, authority, freshness, challenge valid</td>
-<td><code>MilestoneApproved</code></td>
-<td>C/H</td>
-<td>Signed decision; T</td>
-</tr>
-<tr>
-<td>M6: presented → conditionally_approved</td>
-<td>Human; explicit machine-checkable conditions and permissions</td>
-<td><code>MilestoneConditionallyApproved</code></td>
-<td>C/H</td>
-<td>Conditions and limited grants; N</td>
-</tr>
-<tr>
-<td>M7: conditionally_approved → approved</td>
-<td>Validator; original authorized conditions satisfied without changing bundle</td>
-<td><code>MilestoneConditionsSatisfied</code></td>
-<td>C/V</td>
-<td>Condition evidence; T</td>
-</tr>
-<tr>
-<td>M8: presented/conditional → changes_requested</td>
-<td>Human; exact bundle decision</td>
-<td><code>MilestoneChangesRequested</code></td>
-<td>C/H</td>
-<td>Original feedback and decision; T</td>
-</tr>
-<tr>
-<td>M9: presented/conditional → rejected</td>
-<td>Human; outcome unacceptable</td>
-<td><code>MilestoneRejected</code></td>
-<td>C/H</td>
-<td>Rationale and next authority boundary; T</td>
-</tr>
-<tr>
-<td>M10: sealed/presented/conditional → expired/superseded/withdrawn</td>
-<td>Controller or authorized human; expiry, changed bundle, or invalid evidence</td>
-<td>Corresponding <code>Milestone…</code> event</td>
-<td>C/H; keep downstream gate closed</td>
-<td>Cause and successor link; T</td>
-</tr>
-</tbody>
-</table></div>
-<p>Changes requested produce a new milestone revision. Historical acceptance remains a historical fact; it is never transferred to new evidence.</p>
-<h3 id="human-feedback">Human feedback<a class="headerlink" href="#human-feedback" title="Permanent link">§</a></h3>
-<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
-<thead>
-<tr>
-<th>ID / transition</th>
-<th>Actor and preconditions</th>
-<th>Durable event</th>
-<th>Profile; recovery</th>
-<th>Evidence / result</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>F1: absent → captured</td>
-<td>Human/decision service; authenticated feedback</td>
-<td><code>FeedbackCaptured</code></td>
-<td>C</td>
-<td>Verbatim feedback and bundle link; N</td>
-</tr>
-<tr>
-<td>F2: captured → triaged</td>
-<td>Planner; interpretation and acceptance correction proposed</td>
-<td><code>FeedbackTriaged</code></td>
-<td>C/H for material ambiguity</td>
-<td>Original-to-interpreted mapping; N</td>
-</tr>
-<tr>
-<td>F3: triaged → linked</td>
-<td>Validator; bounded corrective slices valid</td>
-<td><code>FeedbackSlicesLinked</code></td>
-<td>C</td>
-<td>Slice IDs and gate exception linkage; N</td>
-</tr>
-<tr>
-<td>F4: linked → implementing</td>
-<td>Scheduler; designated feedback work starts</td>
-<td><code>FeedbackImplementationStarted</code></td>
-<td>A</td>
-<td>Attempt links; N</td>
-</tr>
-<tr>
-<td>F5: implementing → verified</td>
-<td>Verifier; correction behavior demonstrated</td>
-<td><code>FeedbackVerified</code></td>
-<td>V</td>
-<td>Corrective tests and demo; N</td>
-</tr>
-<tr>
-<td>F6: verified → resolved</td>
-<td>Human milestone decision, or explicit contract resolution rule</td>
-<td><code>FeedbackResolved</code></td>
-<td>C/H</td>
-<td>Acceptance/disposition record; T</td>
-</tr>
-<tr>
-<td>F7: any unresolved → blocked</td>
-<td>Controller; dependency, budget, ambiguity, or access issue</td>
-<td><code>FeedbackBlocked</code></td>
-<td>C/H</td>
-<td>Reason and resume state; N</td>
-</tr>
-<tr>
-<td>F8: blocked → prior eligible state</td>
-<td>Validator; blocker resolved</td>
-<td><code>FeedbackUnblocked</code></td>
-<td>C</td>
-<td>Resolution evidence; N</td>
-</tr>
-<tr>
-<td>F9: unresolved → withdrawn</td>
-<td>Original authority; explicit withdrawal</td>
-<td><code>FeedbackWithdrawn</code></td>
-<td>C/H</td>
-<td>Signed reason; T</td>
-</tr>
-</tbody>
-</table></div>
-<p>A recurrence creates a new feedback item linked to the resolved item.</p>
-<h3 id="incident-and-recovery">Incident and recovery<a class="headerlink" href="#incident-and-recovery" title="Permanent link">§</a></h3>
-<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
-<thead>
-<tr>
-<th>ID / transition</th>
-<th>Actor and preconditions</th>
-<th>Durable event</th>
-<th>Profile; recovery</th>
-<th>Evidence / result</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>I1: absent → detected</td>
-<td>Monitor, human, or verifier; credible signal</td>
-<td><code>IncidentDetected</code></td>
-<td>C/R</td>
-<td>Trigger and affected graph; N</td>
-</tr>
-<tr>
-<td>I2: detected → contained</td>
-<td>Safety controller; containment policy applies</td>
-<td><code>IncidentContained</code></td>
-<td>R; escalate failed containment</td>
-<td>Revocations, paused scopes, preserved evidence; N</td>
-</tr>
-<tr>
-<td>I3: contained → assessed</td>
-<td>Incident commander; impact and authority established</td>
-<td><code>IncidentAssessed</code></td>
-<td>R</td>
-<td>Scope, root-cause hypotheses, recovery plan; N</td>
-</tr>
-<tr>
-<td>I4: assessed → recovering</td>
-<td>Recovery controller; approved or preauthorized plan</td>
-<td><code>RecoveryStarted</code></td>
-<td>R/E</td>
-<td>Exact recovery operations; N</td>
-</tr>
-<tr>
-<td>I5: recovering → validating</td>
-<td>Controller; operations reconciled</td>
-<td><code>RecoveryValidationStarted</code></td>
-<td>V</td>
-<td>Resulting state and artifact vector; N</td>
-</tr>
-<tr>
-<td>I6: validating → resolved</td>
-<td>Verifier/commander; health and evidence checks pass</td>
-<td><code>IncidentResolved</code></td>
-<td>C/V</td>
-<td>Recovery attestation and follow-up work; T</td>
-</tr>
-<tr>
-<td>I7: assessed/recovering/validating → escalated</td>
-<td>Controller; authority insufficient or recovery exhausted</td>
-<td><code>IncidentEscalated</code></td>
-<td>R/H</td>
-<td>Required decision and preserved state; N</td>
-</tr>
-<tr>
-<td>I8: escalated → assessed</td>
-<td>Authorized commander/human; new direction</td>
-<td><code>IncidentRecoveryReplanned</code></td>
-<td>C/H</td>
-<td>Revised plan and authority; N</td>
-</tr>
-</tbody>
-</table></div>
-<p>False alarms receive an explicit assessment and resolution record; evidence is not deleted.</p>
+<p>Terminal attempts are not reopened as retries. A replacement gets a new ID and predecessor link. Review <code>completed</code> with <code>verdict: changes_required</code> is a completed review execution, not a passing slice.</p>
+<h3 id="review-and-effect-state">Review and effect state<a class="headerlink" href="#review-and-effect-state" title="Permanent link">§</a></h3>
+<p>Review outcomes are <code>pass</code>, <code>changes_required</code>, <code>inconclusive</code>; disputes are recorded per finding and resolved by a separately assigned reviewer or authorized human. A changed subject starts a new review round. Relevant prior blocking findings carry forward until resolved with evidence, explicitly invalidated, or waived by the policy's authority. A later pass cannot mask a fail.</p>
+<p>Protected effects use <code>prepared → submitted → confirmed</code>, or <code>submitted → uncertain → confirmed/not_applied/needs_inspection</code>. Record effect key, action, bounded normalized arguments (or an immutable input reference), payload digest, expected subject, target, authorizing attempt and returned object identifiers inside the attempt comment before submission. A key reused with different input is rejected. Each pending effect is reconstructed and reconciled before conflicting replacement work.</p>
+<figure class="diagram"><figcaption>Design diagram</figcaption><div class="diagram-view" role="region" aria-label="Scrollable design diagram" tabindex="0"></div><p class="diagram-status">Diagram source below; visual rendering requires JavaScript and network access.</p><details open><summary>Diagram source</summary><pre><code class="language-mermaid">flowchart TD
+  A[&quot;Allocated comment confirmed&quot;] --&gt; B[&quot;Executor starting or running&quot;]
+  B --&gt; C[&quot;Result and effect intent&quot;]
+  C --&gt; D[&quot;Broker submits exact effect&quot;]
+  D --&gt; E[&quot;Confirmed outcome recorded&quot;]
+  B --&gt; R[&quot;Restart: reconcile comments and native state&quot;]
+  D --&gt; R
+  R --&gt; S[&quot;Resume authorized session&quot;]
+  R --&gt; T[&quot;Record completed result&quot;]
+  R --&gt; U[&quot;Abandon or require inspection&quot;]
+  S --&gt; B
+</code></pre></details></figure>
+<p>Milestone states and decision semantics are in <a href="06-milestones-and-product-experience.html">section 13</a>; the restart algorithm and effect-specific guarantees are in <a href="07-reliability-security-economics.html">section 15</a>. These describe ordered calls and reconciliation, not PostgreSQL-level transactions.</p>
 <hr />
 <p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="02-architecture-and-work-model.html">Previous</a> · <a href="04-execution-scheduling-review.html">Next</a></p></article>
       <nav class="bottom-nav" aria-label="Reading shortcuts"><a href="README.html">Reading guide</a><a href="#content">Back to top ↑</a></nav>

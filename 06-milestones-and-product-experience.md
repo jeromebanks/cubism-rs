@@ -1,197 +1,77 @@
-# Nightshift — Milestone contracts and product experience
+# Nightshift — Milestones and product experience
 
 [Overview](index.html) · [Document index](README.md) · [Previous](05-trust-policy-evidence.md) · [Next](07-reliability-security-economics.md)
-> Design proposal · Packaged 2026-09-09 · Original sections 13–14 preserved below. Repository findings refer to the inspected checkpoint, not live project state.
 
-## 13. Human milestone contract
+> Revised design proposal · 2026-09-13 · GitHub-native, single-dispatcher profile. No Nightshift implementation is included.
 
-A milestone contract defines what the human is accepting and what that decision authorizes next.
+## 13. Milestone contract and acceptance
 
-Required contents:
+A milestone is more than a count of closed slices. Its parent issue defines observable integrated outcomes, included/excluded work, criteria and validation, a named human approver, finite limits, and any authority granted by acceptance. Initial default: merge and demonstrate Cubism changes, then human acceptance; no production deployment authority.
 
-- Exact included scope and release/source vector.
-- Excluded and deferred scope.
-- Acceptance criteria with evidence mappings.
-- Demonstrated user journeys.
-- Demo environment recipe, dataset, configuration, and artifact digests.
-- Test, review, performance, and operational evidence.
-- Known limitations and named risk acceptances.
-- Approval authority and required quorum.
-- Decision window, expiration, supersession, and withdrawal rules.
-- Permission granted by approval: continue planning, continue implementation, release, or deploy to a named environment.
+Use a genuine integration slice when assembled behavior needs explicit work: it depends on the implementation slices and can have multiple integration/repair/review attempts. It is created once for that intended outcome, not per check run. If integration exposes a defect within the still-open integration slice's repair scope, use another attempt there. For a defect in an already completed slice, create a linked corrective slice describing the newly discovered work; preserve the original merge/completion facts. Work outside the integration contract requires explicit replanning. Avoid reopening a historical merged fact as if it never happened.
 
-Entry requires complete required evidence, no unresolved blocking findings, an integrated candidate, a verified demonstration, and a drained gate for the included scope.
-
-The factory generates six linked deliverables:
-
-| Deliverable | Purpose |
+| Milestone transition | Evidence and durable record |
 |---|---|
-| Executive narrative | Outcome, business value, decisions, limitations |
-| Presentation | Concise progression from problem to demonstrated result |
-| Live or reproducible demo | Exercise exact accepted artifacts and fixtures |
-| Evidence appendix | Trace each criterion to tests, reviews, source, and artifacts |
-| Decision/risk register | Explain tradeoffs, deferred scope, accepted residual risks |
-| Sign-off interface | Make the exact decision and resulting permissions explicit |
+| draft → active | Human-approved scope and authority on parent; dependency graph validated |
+| active → integrating | Implementation prerequisites (excluding the integration slice itself) merged/verified; integrated subject selected; gate closes ordinary admission |
+| integrating → ready_for_acceptance | Integration checks and demo pass for recorded source; no unknown effects or blocking findings |
+| ready_for_acceptance → accepted | Authorized human comment names exact report/source/criteria and decision |
+| ready_for_acceptance → changes_requested | Human feedback recorded; only linked corrective work admitted |
+| changes_requested → integrating | Corrections verified; new report revision/source snapshot |
+| ready_for_acceptance → rejected | Explicit human decision; progression remains paused |
+| ready_for_acceptance → superseded | Material source, criteria or evidence change; new revision required |
 
-A suggested deck has eight slides: intended outcome, prior state, delivered journeys, demonstration, verification, limitations, decisions/costs, and acceptance contract. Narrative claims must cite evidence; unsupported claims are flagged before presentation.
+While integrating, admit the named integration slice and its already-authorized repair/review attempts; ordinary roadmap work remains paused. A needed corrective slice is explicitly linked and authorized through replanning before admission. This integration gate is distinct from the later human-review gate, where only an actual changes-requested decision grants the linked-feedback exception.
 
-```json
-{
-  "schema": "factory.milestone-bundle/v1",
-  "tenant": "acme",
-  "milestone": "recovery-demo",
-  "revision": 2,
-  "contract_digest": "sha256:contract-m2",
-  "plan_digest": "sha256:plan6",
-  "policy_digest": "sha256:policy7",
-  "included_slices": ["slice-103", "slice-104"],
-  "excluded_scope": ["Multi-region recovery"],
-  "sources": [
-    {"repository": "acme/service", "commit": "full-merge-sha", "tree_digest": "sha256:tree104"}
-  ],
-  "release_digest": "sha256:release12",
-  "criteria": [
-    {"id": "AC1", "status": "met", "evidence": ["sha256:test17", "sha256:review22"]}
-  ],
-  "demo": {
-    "environment_manifest": "sha256:env9",
-    "dataset": "sha256:fixture2",
-    "journey_results": "sha256:demo-run8",
-    "recording": "sha256:recording8",
-    "reproduce": "sha256:demo-recipe4"
-  },
-  "presentation": "sha256:deck2",
-  "evidence_index": "sha256:evidence-index2",
-  "risk_register": "sha256:risks2",
-  "operational_readiness": "sha256:ops2",
-  "cost_report": "sha256:cost2"
-}
-```
+Gate labels are projections of decisions and current checkpoint state. Only the broker applies machine gate updates. A human can request a pause directly in GitHub; broker acknowledgement defines when new admissions actually stop. Outstanding effects are listed until settled. Scheduled human waits need no running server and never auto-approve on timeout.
 
-The bundle digest is computed after assembly and is stored outside these bytes.
+### Small acceptance package
 
-### Decision semantics
+Reuse the repository's milestone manifest/report approach, strengthening evidence validation. One concise issue comment or versioned report is enough: outcome, included/excluded slices, exact source and PRs, criterion-to-test/review mapping, demo recipe/results, limitations, unresolved risks, total known/unknown cost, and the decision requested. A deck, hosted demo, sign-off service or six separate deliverables is not mandatory.
 
-- **Approve:** Accept this exact bundle and issue only the permissions named in the contract.
-- **Request changes:** Keep ordinary progression paused; authorize only linked corrective work within the feedback envelope.
-- **Reject:** Decline the outcome. Replanning or termination requires the specified next authority.
-- **Conditional approval:** Grant only explicit permissions under explicit conditions. Code changes needed to satisfy a condition require a new bundle; they cannot silently inherit acceptance.
+A checkpoint identifier binds the report bytes (Git commit/digest if stored in docs), source SHA(s), contract revision and relevant evidence identities. An authorized human records a GitHub comment with checkpoint ID and decision. The broker verifies the comment's actual GitHub author against protected policy; an agent-written claim that “the owner approved” or an approval label is insufficient. Record the decision comment ID and exact target in the milestone summary. Repeated processing grants no additional authority.
 
-```json
-{
-  "schema": "factory.human-decision/v1",
-  "decision_id": "decision-73",
-  "tenant": "acme",
-  "milestone": "recovery-demo",
-  "milestone_revision": 2,
-  "bundle_digest": "sha256:bundle2",
-  "contract_digest": "sha256:contract-m2",
-  "decision": "approve",
-  "accepted_risks": ["risk-local-region-only"],
-  "grants": ["continue:milestone-3", "deploy:staging:release12"],
-  "approver": {
-    "issuer": "https://id.acme.example",
-    "subject": "user-42",
-    "authority": "program-owner"
-  },
-  "challenge_id": "challenge-91",
-  "authentication_assertion_digest": "sha256:assertion91",
-  "decided_at": "2026-09-09T03:00:00Z",
-  "grant_expires_at": "2026-09-16T03:00:00Z"
-}
-```
-
-Use fresh authentication with a challenge bound server-side to the bundle, decision, contract, and nonce. WebAuthn provides challenge-based public-key authentication; the decision service verifies the assertion, authority, and transaction context before countersigning the record. This is an operational acceptance record, not a blanket claim about legal enforceability. [WebAuthn specification](https://www.w3.org/TR/webauthn-3/)
-
-Approval does not transfer when source, binaries, behavior-affecting configuration, acceptance criteria, material risks, or evidence subjects change. A new vulnerability may suspend use of an accepted release while leaving its historical acceptance intact.
-
-URL relocation, storage replication, and additional annotations can occur without reopening acceptance when the original bytes and digests remain unchanged. Correcting a signed narrative creates a new artifact; it never overwrites what the human saw.
-
-### Acceptance sequence
+Approval accepts that exact checkpoint. Request-changes retains original feedback and maps it to explicit corrective slices. Rejection pauses the milestone until authorized direction. Conditional approval must enumerate narrow permissions and checkable conditions; changed code/criteria requires a new checkpoint. A grant to continue work does not also authorize release/deployment. Later evidence of a defect preserves the historical acceptance while blocking further promotion where required.
 
 ```mermaid
 sequenceDiagram
-  participant M as Milestone service
-  participant B as Effect broker
-  participant E as Evidence store
+  participant D as Dispatcher and broker
+  participant G as GitHub and CI
+  participant E as Executor adapter
   participant H as Human
-  participant D as Decision service
-  participant P as Policy authority
-
-  M->>B: Close admission for checkpoint scope
-  B-->>M: Outstanding operations reconciled; gate drained
-  M->>E: Seal bundle from immutable evidence
-  E-->>M: Bundle digest
-  M->>H: Present narrative, demo, risks, contract
-  H->>D: Request decision challenge for bundle digest
-  D->>P: Verify current authority and contract
-  D-->>H: Bound challenge and exact granted permissions
-  H->>D: Authenticated decision response
-  D->>D: CAS current revision; deduplicate decision
-  D->>E: Store signed decision
-  D->>B: Activate permitted next actions
+  D->>G: Record integration attempt and close ordinary admission
+  D->>E: Verify assembled source and demo
+  E-->>D: Structured result and source identity
+  D->>G: Confirm checks, settle effects, record checkpoint
+  H->>G: Decision naming exact checkpoint
+  D->>G: Verify author, current subject and explicit grants
+  alt Accepted
+    D->>G: Record acceptance and update gate
+  else Changes requested
+    D->>G: Link corrective slices and retain pause
+  end
 ```
 
-## 14. UI, API, and CLI surfaces
+## 14. CLI and GitHub UI first
 
-Within 30 seconds, a technical leader should understand:
+The first user experience is GitHub's issue/sub-issue/dependency UI plus a small CLI. Reuse static reports if useful. Defer a rich operations UI, persistent REST service, event-stream server and custom policy editor.
 
-- Which outcomes have been accepted.
-- What the factory is doing now.
-- The next useful result and its expected cost/date range.
-- What is blocked and why.
-- Whether any human decision is required.
-- Whether displayed evidence and external state are current.
-
-| Surface | Main interaction |
-|---|---|
-| Portfolio/program cockpit | Outcome progress, spend, critical path, gates, incidents, unmapped work |
-| Work graph/factory floor | Dependencies, active attempts, queues, capability constraints |
-| Slice/attempt timeline | Contract changes, tools, checkpoints, failures, retries, current candidate |
-| Review confrontation | Finding, counterexample, implementation response, judge disposition, exact SHAs |
-| Evidence explorer | Follow a claim to source, tests, artifacts, issuer, and limitations |
-| Cost controls | Reservations, actual/estimated usage, budget runway, pause thresholds |
-| Policy editor/explainer | Proposed rule, affected work, enforcement coverage, reason for denial |
-| Incident console | Containment state, uncertain effects, recovery plan, authority needed |
-| Milestone room | Presentation, exact demo, evidence appendix, risk register |
-| Sign-off | Bundle identity, unmet criteria, accepted risks, decision and resulting grants |
-| Audit export | Signed events, artifacts, policy versions, trust bundle, verification report |
-
-Freshness is visible per adapter and evidence class. “Last observed five minutes ago” must not be rendered as live certainty. Progress separates merged slices, verified behavior, accepted milestones, and deployed releases.
-
-Representative APIs:
+Illustrative commands, not shipped binaries:
 
 ```text
-POST /v1/programs
-POST /v1/programs/{id}/plan-revisions
-POST /v1/slices/{id}/commands/start
-POST /v1/attempts/{id}/checkpoints
-GET  /v1/reviews/{id}/findings
-POST /v1/findings/{id}/dispositions
-GET  /v1/evidence/{digest}
-POST /v1/milestones/{id}/bundles
-POST /v1/milestones/{id}/decision-challenges
-POST /v1/milestones/{id}/decisions
-POST /v1/programs/{id}/stop
-POST /v1/incidents/{id}/recovery-plans
-GET  /v1/audit/exports/{id}
+nightshift inspect --milestone OWNER/REPO#100
+nightshift run --milestone OWNER/REPO#100
+nightshift explain --slice OWNER/REPO#123
+nightshift reconcile --milestone OWNER/REPO#100
+nightshift attempt inspect <attempt-id>
+nightshift stop --milestone OWNER/REPO#100
 ```
 
-Commands require an idempotency key and expected version. There is no general API to set arbitrary workflow status.
+Show selected work, current role/session, next dependency, blocked reason, retry/time/spend remaining, unknown usage, candidate/review/integration state, pending effects, next human checkpoint and last refresh. Link native sessions and logs without proxying transcript storage. A refresh failure is visible; “last seen” is not “current.”
 
-Illustrative CLI:
+Report these separately: implementation candidate produced, review passed, integration verified, source merged, slice complete, milestone accepted, release published and deployment healthy. Replanning shows what changed in the denominator. CLI status remains useful when Cubism is down; advanced analytics can be missing without blocking any workflow transition.
 
-```text
-nightshift program inspect delivery-pilot
-nightshift slice explain slice-104
-nightshift attempt logs attempt-9
-nightshift review inspect review-22
-nightshift evidence verify sha256:bundle2
-nightshift milestone open recovery-demo
-nightshift program stop delivery-pilot --reason "Customer pause"
-```
-
-The CLI can initiate a human decision flow, but cannot convert an agent-held API token into human authority.
+Human checkpoint identity is a modest GitHub-based acceptance record within a trusted small team, not a legal signature system or defense against repository administrators rewriting history.
 
 ---
 

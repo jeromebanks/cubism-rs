@@ -1,197 +1,120 @@
-# Nightshift — Durable events and state machines
+# Nightshift — Attempt journal and state machines
 
 [Overview](index.html) · [Document index](README.md) · [Previous](02-architecture-and-work-model.md) · [Next](04-execution-scheduling-review.md)
-> Design proposal · Packaged 2026-09-09 · Original sections 7 preserved below. Repository findings refer to the inspected checkpoint, not live project state.
 
-## 7. Durable event and state model
+> Revised design proposal · 2026-09-13 · GitHub-native, single-dispatcher profile. No Nightshift implementation is included.
 
-PostgreSQL is the authority for aggregate transitions. Each command transaction:
+## 7. GitHub-native durability and transitions
 
-1. Authenticates the actor and tenant.
-2. Checks aggregate version, current policy, gate generation, and lease where applicable.
-3. Validates preconditions and budget.
-4. Appends the domain event.
-5. Updates state and reservations.
-6. Writes outbox records.
-7. Commits before reporting acceptance.
+Issue comments are a modest durability mechanism for a small number of attempts, not a high-throughput event store. No database transaction, unique constraint, compare-and-swap across comments, or immutable history is implied. Human edits/deletions, lost responses, pagination and rate limits are part of the failure model. The broker is the sole writer of machine records; only trusted broker-authored records with valid schema and matching assignments are accepted. A marker copied into an arbitrary user's comment carries no authority.
 
-Each event contains:
+### Compact attempt schema
 
-```text
-event_id, tenant_id, aggregate_type, aggregate_id, aggregate_version,
-event_type, actor_identity, command_id, idempotency_key,
-causation_id, correlation_id, occurred_at, recorded_at,
-contract_digest, policy_digest, authority_epoch,
-payload_digest, evidence_refs, schema_version
+Use one primary comment per attempt on its slice. Integration attempts use the relevant implementation slice for pre-merge verification or the milestone integration slice for assembled verification. This illustrative record uses abbreviated SHAs; production records use full IDs.
+
+````markdown
+<!-- nightshift-attempt:01994ba0-6a00-7000-8000-000000000123 -->
+### Implementation attempt 3
+```yaml
+schema: nightshift.attempt/v1
+attempt_id: 01994ba0-6a00-7000-8000-000000000123
+revision: 2
+slice: github:OWNER/REPO#123
+role: implementation
+predecessor_attempt: null
+executor: factory-droid
+model: claude-sonnet
+session_ref: {adapter: factory-droid, opaque_id: droid-session-123}
+status: completed
+allocated_at: 2026-09-13T19:23:59Z
+started_at: 2026-09-13T19:24:00Z
+finished_at: 2026-09-13T19:41:00Z
+contract: {revision: 1, digest: 'sha256:contract', summary: 'Implement the specified sparse aggregation behavior'}
+policy: {source_commit: abc123, digest: 'sha256:policy'}
+base_commit: abc123
+candidate_commit: def456
+outcome: candidate-produced
+failure_class: null
+usage: {tokens: 184291, cost: 2.84, currency: USD, basis: executor-reported}
+review: pending
+workflow_checks: []
+artifact_refs: []
+effects: []
 ```
+````
 
-Unique constraints enforce aggregate sequencing and command deduplication. A reused idempotency key with different input is rejected.
+A globally unique UUID (for example UUIDv7) or ULID is allocated before any executor launch. The marker and field must agree. Required allocation fields include ID, role, slice, input identities, executor/model selection, limits, allocation time, status and schema. Session, candidate, timestamps and usage can be unknown; null is distinct from zero. Record supported model version and adapter/runtime version when available. Keep secrets and transcripts out. A separate `adapter_metadata` object may hold provider-specific details, never domain control state.
 
-### Transition contract
+`revision` detects unexpected changes in this single writer's own record; it is not atomic concurrency control. Treat terminal outcomes as final in normal operation. Later usage corrections or recovered facts carry a correction reason/time and preserve the previous value, or use a linked correction comment. Duplicate identical markers are reconciled to a canonical comment ID with duplicates referenced; contradictory payloads block the attempt. Unknown schema, missing trusted records or unexplained edits require inspection.
 
-The tables below enumerate allowed transitions. Unlisted transitions are rejected.
+### Durable launch and completion order
 
-For every row, the idempotency key is:
+1. Reconcile the slice, validate readiness/policy and compute conservative remaining limits in memory.
+2. Allocate ID; write and confirm an `allocated` comment before launching. If POST times out, paginate comments and find the marker; never blindly allocate another ID or launch while its durable allocation is uncertain.
+3. Record `starting`, stable launch key and intended workspace; launch via adapter using the attempt ID as a correlation/idempotency key where supported. This key does not invent executor-side deduplication.
+4. Record `running` and native session reference as soon as observed. Stream detailed events transiently; write only material lifecycle changes, permission waits and summaries to GitHub.
+5. Validate the returned subject/result; broker publishes permitted candidate objects and records their IDs. Write terminal outcome and observed usage. Executor exit zero alone is not proof of acceptance.
+6. A failed durable write stops dependent scheduling and protected progression until reconciled. In-flight bounded computation can finish without new effect authority.
 
-```text
-K = H(tenant, aggregate_id, transition_ID, expected_version, command_id)
-```
+The launch-to-session-recording gap cannot be eliminated. Restart may find a running executor without a recorded session reference, or a result published without the terminal comment. Recovery can abandon work or occasionally duplicate computation. It cannot blindly repeat a protected effect.
 
-The first accepted command stores its input digest and result under `K`; retries return that result. External steps additionally receive a persistent `operation_id`. Evidence columns are added to the common signed transition receipt containing actor, policy, inputs, and prior/new versions.
+### Slice state machine
 
-Actor names imply these scoped permissions:
+States are interpreted from issue contract/topology, attempt summaries and native GitHub facts. They are not rows in an event-sourced aggregate framework. The broker updates UI labels after confirming facts; partial label writes are repaired on reread.
 
-| Actor | Authorization |
-|---|---|
-| Planner | `plan.propose`, `slice.propose`; cannot expand approved envelope |
-| Validator | `contract.validate`, `slice.ready` |
-| Scheduler | `attempt.allocate`, `lease.issue`, budget reservation |
-| Runner | Current attempt’s `progress`, `checkpoint`, `candidate.submit` |
-| Review service | `review.assign`, `review.aggregate`; cannot author implementation |
-| Reviewer | Assigned round’s `review.submit`; no candidate write |
-| Judge | `finding.adjudicate` within delegated risk limits |
-| Effect broker | Exact signed source/deployment operation |
-| Verifier | Assigned verification/build attestation |
-| Milestone service | `bundle.assemble`, `bundle.seal`, gate coordination |
-| Human | Current contract’s designated decision authority |
-| Recovery controller | Reconciliation and preauthorized recovery only |
-| Incident commander | Explicit containment, recovery, or exception authority |
-
-Timeout profiles apply to every listed transition:
-
-| Profile | Timeout and retry | Failure and recovery |
+| Transition | Preconditions / result | Failure behavior |
 |---|---|---|
-| **C: command** | 10-second request deadline; retry transaction conflicts up to three times with jitter | No partial domain commit; reject or return `retryable_conflict` |
-| **A: execution** | Five-minute startup; contract runtime cap; 20-second heartbeat, 90-second lease | Expire and fence; preserve evidence; replacement gets a new attempt |
-| **V: verification/review** | Default 30-minute job deadline, contract override; two infrastructure retries | Failure remains visible; exhausted execution becomes inconclusive, never passing |
-| **E: external effect** | 30-second request deadline; transport ambiguity triggers reconciliation | Retry only after proving absence or using native idempotency/CAS; unresolved becomes `uncertain` |
-| **H: human wait** | Default seven-day decision window; configurable reminders | Expire or remain waiting by contract; no automatic approval |
-| **R: recovery** | Containment target 30 seconds; five-minute reconciliation intervals; escalation after 30 minutes | Keep affected scope fenced until verified recovery |
+| proposed → ready | Valid bounded contract, satisfied native dependencies, open gate, qualified adapter and limits | Keep proposed/blocked on missing information |
+| ready → active | Allocation comment confirmed; current in-process assignment | Reconcile ambiguous allocation before launch |
+| active → reviewing | Candidate identified and prerequisite checks valid | Failure creates retry/repair attempt or blocks |
+| reviewing → rework | Structured blocking findings | Preserve findings and create bounded repair attempt |
+| rework → active | Same intended scope, limits and gate permit | Changed scope enters replanning |
+| reviewing → integrating | Required current reviews pass; no unresolved findings | Missing/stale result remains nonpassing |
+| integrating → complete | Verification-only slice: exact assembled-source checks/demo satisfy its contract, required review policy is met, no pending effects; no source change or PR required | Missing/stale evidence blocks; a source change follows the reviewed candidate/merge path |
+| integrating → merged | Exact-head merge confirmed by GitHub after required integration verification | Unknown effect blocks; moved inputs need fresh verification |
+| merged → complete | Slice's explicit completion predicates hold | Remain merged if further verification is required |
+| any unfinished → blocked | Dependency, pause, limit, access, uncertainty or safety failure | Revoke new effects and settle admitted effects |
+| blocked → ready/reviewing/integrating | Reconciliation and fresh predicates justify the particular next step | Do not restart implementation if a valid candidate already exists |
+| unmerged → cancelled/superseded | Authorized decision, admitted effects settled | Preserve attempts and replacement links |
 
-`T` marks terminal for that entity revision. `T/R` is a terminal attempt or round from which the parent may create a replacement. `N` is nonterminal. Terminal history is never rewritten.
+A merged fact cannot be cancelled retroactively; a revert is new work. A closed issue is insufficient evidence of complete work. Cancelled/superseded issues have explicit outcomes and do not unblock dependents as successful slices.
 
-### Slice lifecycle
+### Attempt state machine
 
-| ID / transition | Actor and preconditions | Durable event | Profile; recovery | Evidence / result |
-|---|---|---|---|---|
-| S1: absent → proposed | Planner; approved program envelope | `SliceProposed` | C; reject invalid scope | Contract proposal; N |
-| S2: proposed → ready | Validator; valid contract, dependencies, gate, budget feasibility | `SliceReadied` | C; remain proposed on failure | Readiness evaluation; N |
-| S3: ready → active | Scheduler; capacity and exclusive lease acquired | `SliceStarted` | C/A; release reservation if launch never occurs | Attempt and lease IDs; N |
-| S4: active → reviewing | Runner submits; candidate sealed, initial verification complete | `CandidateAccepted` | C; reject stale lease | Source/context/verification digests; N |
-| S5: reviewing → rework | Review service; blocking findings | `ReworkRequired` | C; retain all findings | Finding set; N |
-| S6: rework → active | Scheduler; fixes within scope, budget and gate permit | `ReworkStarted` | C/A; new attempt on failure | Fix contract and prior findings; N |
-| S7: reviewing → merge_pending | Review service; all required rounds and checks pass | `SliceIntegrationRequested` | C/E; wait or supersede stale candidate | Review and check graph; N |
-| S8: merge_pending → merged | Effect broker/reconciler; actual merge confirmed | `SliceMerged` | E; reconcile issue closure separately | Merge SHA and parentage; T |
-| S9: any unmerged state → blocked | Policy/recovery controller; dependency, access, gate, budget, or safety failure | `SliceBlocked` | C/R; fence active work, settle effects | Reason and resume state; N |
-| S10: blocked → ready | Validator; blocker resolved, old work reconciled | `SliceUnblocked` | C; new attempt if needed | Resolution evidence; N |
-| S11: unmerged → superseded | Planner; replacement plan authorized, effects settled | `SliceSuperseded` | C; retain candidate | Replacement IDs; T |
-| S12: unmerged → cancelled/failed | Authorized customer/controller; cancellation or exhausted policy | `SliceCancelled` / `SliceFailed` | C/R; drain in-flight effects first | Cause, spend, retained artifacts; T |
+| Transition | Rule |
+|---|---|
+| absent → allocated → starting → running | Each pre-launch durable write confirmed; native session reference recorded when available |
+| running → waiting_permission → running | Adapter surfaces request; trusted permission decision recorded; no self-approval |
+| running → suspended | Executor confirms native checkpoint/stop; pending effects settled |
+| suspended → starting | Same fixed inputs and authorized assignment; native resume supported; fresh process-local capability |
+| running → completed | Normalized result and summary durably recorded; role-specific evidence evaluated separately |
+| allocated/starting/running/waiting_permission/suspended → failed/cancelled/abandoned | Reason and known/unknown usage retained; revoke authority before replacement |
+| any nonterminal → needs_inspection | Contradictory/missing evidence or ambiguous external action |
+| needs_inspection → supported recovered state or abandoned | Recorded reconciliation decision, never an invented success |
 
-An already merged slice cannot be cancelled retroactively. A revert or correction is new work linked to the original.
+Terminal attempts are not reopened as retries. A replacement gets a new ID and predecessor link. Review `completed` with `verdict: changes_required` is a completed review execution, not a passing slice.
 
-### Execution attempt
+### Review and effect state
 
-| ID / transition | Actor and preconditions | Durable event | Profile; recovery | Evidence / result |
-|---|---|---|---|---|
-| A1: absent → allocated | Scheduler; reservation and lease transaction succeeds | `AttemptAllocated` | C | Runner class, model route, budget; N |
-| A2: allocated → starting | Gateway; signed manifest accepted | `AttemptDispatched` | A; deduplicate launch ID | Manifest and runtime image digest; N |
-| A3: starting → running | Runner supervisor; identity, workspace, policy verified | `AttemptStarted` | A; fence failed startup | Runtime attestation; N |
-| A4: running → running | Runner supervisor; valid lease and increasing sequence | `AttemptProgressed` | A; heartbeat failure expires lease | Tool/test/artifact progress delta; N |
-| A5: running → checkpointing | Runner/controller; context, time, or preemption threshold | `CheckpointRequested` | A; preserve last durable checkpoint | Trigger and pending operations; N |
-| A6: checkpointing → suspended | Supervisor; checkpoint uploaded, effects reconciled, credentials revoked | `AttemptSuspended` | A/R | Checkpoint digest; N |
-| A7: suspended → starting | Scheduler; same attempt still permitted, fresh lease generation | `AttemptResumed` | C/A | Checkpoint compatibility evaluation; N |
-| A8: running → completed | Supervisor; candidate and final usage sealed, no unresolved effects | `AttemptCompleted` | C | Execution attestation; T |
-| A9: allocated/starting/running/checkpointing → failed_retryable | Controller; infrastructure/provider failure | `AttemptFailedRetryable` | A/R; new attempt | Failure and last checkpoint; T/R |
-| A10: active → abandoned | Lease service; expiry or owner loss | `AttemptAbandoned` | R; fence and reconcile before replacement effects | Lease history and recovery report; T/R |
-| A11: active/suspended → cancelled/failed_terminal | Controller; cancellation, policy violation, exhausted limit | `AttemptCancelled` / `AttemptFailedTerminal` | R; revoke and retain | Cause and final accounting; T |
+Review outcomes are `pass`, `changes_required`, `inconclusive`; disputes are recorded per finding and resolved by a separately assigned reviewer or authorized human. A changed subject starts a new review round. Relevant prior blocking findings carry forward until resolved with evidence, explicitly invalidated, or waived by the policy's authority. A later pass cannot mask a fail.
 
-A provider failover creates a new attempt when execution semantics or context continuity cannot be preserved. A failed attempt is never renamed into its replacement.
+Protected effects use `prepared → submitted → confirmed`, or `submitted → uncertain → confirmed/not_applied/needs_inspection`. Record effect key, action, bounded normalized arguments (or an immutable input reference), payload digest, expected subject, target, authorizing attempt and returned object identifiers inside the attempt comment before submission. A key reused with different input is rejected. Each pending effect is reconstructed and reconciled before conflicting replacement work.
 
-### Review round
+```mermaid
+flowchart TD
+  A["Allocated comment confirmed"] --> B["Executor starting or running"]
+  B --> C["Result and effect intent"]
+  C --> D["Broker submits exact effect"]
+  D --> E["Confirmed outcome recorded"]
+  B --> R["Restart: reconcile comments and native state"]
+  D --> R
+  R --> S["Resume authorized session"]
+  R --> T["Record completed result"]
+  R --> U["Abandon or require inspection"]
+  S --> B
+```
 
-| ID / transition | Actor and preconditions | Durable event | Profile; recovery | Evidence / result |
-|---|---|---|---|---|
-| Q1: absent → planned | Review service; immutable candidate, risk policy selected | `ReviewPlanned` | C | Required classes and review scope; N |
-| Q2: planned → assigned | Review service; independent eligible identities available | `ReviewAssigned` | C/A | Assignment and separation evidence; N |
-| Q3: assigned → running | Reviewer supervisor; verified clean context package | `ReviewStarted` | V | Context-access manifest; N |
-| Q4: running → submitted | Reviewer; complete structured findings and coverage | `ReviewSubmitted` | C | Signed review attestation; N |
-| Q5: submitted → passed | Review service; coverage complete, no unresolved blocking findings | `ReviewPassed` | C | Aggregated decision; T |
-| Q6: submitted → changes_required | Review service; actionable blocking finding | `ReviewChangesRequired` | C; initiate rework | Findings and reproduction evidence; T |
-| Q7: submitted → disputed | Implementer/reviewer; explicit evidence-backed disagreement | `ReviewDisputed` | C/V; assign judge | Competing claims; N |
-| Q8: disputed → passed/changes_required | Judge or designated human; authorized disposition | `ReviewAdjudicated` | V/H | Ruling per finding; T |
-| Q9: assigned/running/submitted/disputed → inconclusive | Controller; missing evidence, timeout, exhausted retries | `ReviewInconclusive` | V; replacement round | Failure and uncovered areas; T/R |
-| Q10: any current round → superseded | Review service; candidate/contract changes | `ReviewSuperseded` | C; retain findings in next round | Old/new digest link; T |
-
-A new clean round cannot erase an earlier blocking finding. It must explicitly resolve, invalidate, or carry that finding forward.
-
-### Merge and release
-
-| ID / transition | Actor and preconditions | Durable event | Profile; recovery | Evidence / result |
-|---|---|---|---|---|
-| G1: absent → integrating | Effect broker; slice eligible, branch capability qualified | `IntegrationStarted` | E/V | Head, base, policy and gate generations; N |
-| G2: integrating → eligible | Verifier; integration candidate checks pass | `IntegrationVerified` | V | Tested integration SHA/tree; N |
-| G3: eligible → submitting | Effect broker; current policy/gate valid, exact operation admitted | `MergeSubmitted` | C/E | Consumed authorization and expected head; N |
-| G4: submitting → merged | Broker; host confirms exact result | `MergeConfirmed` | E | Merge SHA, parents, resulting tree; T |
-| G5: submitting → uncertain | Broker; outcome ambiguous | `MergeOutcomeUnknown` | E/R; prohibit blind retry | Request/response evidence; N |
-| G6: uncertain → merged/rejected | Reconciler; remote state conclusively classified | `MergeReconciled` | R | Source-host observations; T |
-| G7: integrating/eligible → superseded | Controller; head/base/policy invalidates evaluation | `IntegrationSuperseded` | C; regenerate candidate | Changed inputs; T/R |
-| G8: absent → building | Release service; explicit release vector selected | `ReleaseBuildRequested` | C/V | Source vector and build recipe; N |
-| G9: building → verified | Builder/verifier; artifacts and release checks complete | `ReleaseVerified` | V | Build provenance, SBOM, verification; N |
-| G10: verified → deploying | Effect broker; target environment authorization satisfied | `DeploymentSubmitted` | E | Artifact/config digests and environment generation; N |
-| G11: deploying → deployed | Deployment verifier; runtime and health criteria pass | `DeploymentConfirmed` | V/E | Deployment and runtime attestations; T |
-| G12: deploying → uncertain/degraded | Controller; ambiguous API or failed health | `DeploymentUncertain` / `DeploymentDegraded` | R | Observed environment state; N |
-| G13: degraded → rolled_back | Recovery controller; permitted rollback verified | `DeploymentRolledBack` | E/V | Prior artifact and health evidence; T |
-| G14: building/verified → failed/cancelled | Controller; terminal verification or authorization failure | `ReleaseFailed` / `ReleaseCancelled` | C/R | Failure and retained artifacts; T |
-
-An uncertain deployment first enters reconciliation. It reaches deployed, degraded, or confirmed-not-applied before another deployment is admitted.
-
-### Milestone review
-
-| ID / transition | Actor and preconditions | Durable event | Profile; recovery | Evidence / result |
-|---|---|---|---|---|
-| M1: absent → draft | Planner/human; contract proposed | `MilestoneDrafted` | C | Contract revision; N |
-| M2: draft → collecting | Milestone service; contract activated, checkpoint reached | `MilestoneCollectionStarted` | C/V | Included scope and gate-drain request; N |
-| M3: collecting → sealed | Milestone service; effects drained, required graph complete | `MilestoneBundleSealed` | C | Bundle digest and validation report; N |
-| M4: sealed → presented | Review service; presentation and demo availability verified | `MilestonePresented` | C/H | Presentation digest, demo access record; N |
-| M5: presented → approved | Human; exact current bundle, authority, freshness, challenge valid | `MilestoneApproved` | C/H | Signed decision; T |
-| M6: presented → conditionally_approved | Human; explicit machine-checkable conditions and permissions | `MilestoneConditionallyApproved` | C/H | Conditions and limited grants; N |
-| M7: conditionally_approved → approved | Validator; original authorized conditions satisfied without changing bundle | `MilestoneConditionsSatisfied` | C/V | Condition evidence; T |
-| M8: presented/conditional → changes_requested | Human; exact bundle decision | `MilestoneChangesRequested` | C/H | Original feedback and decision; T |
-| M9: presented/conditional → rejected | Human; outcome unacceptable | `MilestoneRejected` | C/H | Rationale and next authority boundary; T |
-| M10: sealed/presented/conditional → expired/superseded/withdrawn | Controller or authorized human; expiry, changed bundle, or invalid evidence | Corresponding `Milestone…` event | C/H; keep downstream gate closed | Cause and successor link; T |
-
-Changes requested produce a new milestone revision. Historical acceptance remains a historical fact; it is never transferred to new evidence.
-
-### Human feedback
-
-| ID / transition | Actor and preconditions | Durable event | Profile; recovery | Evidence / result |
-|---|---|---|---|---|
-| F1: absent → captured | Human/decision service; authenticated feedback | `FeedbackCaptured` | C | Verbatim feedback and bundle link; N |
-| F2: captured → triaged | Planner; interpretation and acceptance correction proposed | `FeedbackTriaged` | C/H for material ambiguity | Original-to-interpreted mapping; N |
-| F3: triaged → linked | Validator; bounded corrective slices valid | `FeedbackSlicesLinked` | C | Slice IDs and gate exception linkage; N |
-| F4: linked → implementing | Scheduler; designated feedback work starts | `FeedbackImplementationStarted` | A | Attempt links; N |
-| F5: implementing → verified | Verifier; correction behavior demonstrated | `FeedbackVerified` | V | Corrective tests and demo; N |
-| F6: verified → resolved | Human milestone decision, or explicit contract resolution rule | `FeedbackResolved` | C/H | Acceptance/disposition record; T |
-| F7: any unresolved → blocked | Controller; dependency, budget, ambiguity, or access issue | `FeedbackBlocked` | C/H | Reason and resume state; N |
-| F8: blocked → prior eligible state | Validator; blocker resolved | `FeedbackUnblocked` | C | Resolution evidence; N |
-| F9: unresolved → withdrawn | Original authority; explicit withdrawal | `FeedbackWithdrawn` | C/H | Signed reason; T |
-
-A recurrence creates a new feedback item linked to the resolved item.
-
-### Incident and recovery
-
-| ID / transition | Actor and preconditions | Durable event | Profile; recovery | Evidence / result |
-|---|---|---|---|---|
-| I1: absent → detected | Monitor, human, or verifier; credible signal | `IncidentDetected` | C/R | Trigger and affected graph; N |
-| I2: detected → contained | Safety controller; containment policy applies | `IncidentContained` | R; escalate failed containment | Revocations, paused scopes, preserved evidence; N |
-| I3: contained → assessed | Incident commander; impact and authority established | `IncidentAssessed` | R | Scope, root-cause hypotheses, recovery plan; N |
-| I4: assessed → recovering | Recovery controller; approved or preauthorized plan | `RecoveryStarted` | R/E | Exact recovery operations; N |
-| I5: recovering → validating | Controller; operations reconciled | `RecoveryValidationStarted` | V | Resulting state and artifact vector; N |
-| I6: validating → resolved | Verifier/commander; health and evidence checks pass | `IncidentResolved` | C/V | Recovery attestation and follow-up work; T |
-| I7: assessed/recovering/validating → escalated | Controller; authority insufficient or recovery exhausted | `IncidentEscalated` | R/H | Required decision and preserved state; N |
-| I8: escalated → assessed | Authorized commander/human; new direction | `IncidentRecoveryReplanned` | C/H | Revised plan and authority; N |
-
-False alarms receive an explicit assessment and resolution record; evidence is not deleted.
+Milestone states and decision semantics are in [section 13](06-milestones-and-product-experience.md); the restart algorithm and effect-specific guarantees are in [section 15](07-reliability-security-economics.md). These describe ordered calls and reconciliation, not PostgreSQL-level transactions.
 
 ---
 

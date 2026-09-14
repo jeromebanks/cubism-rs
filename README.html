@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Nightshift — complete design draft, with source and section navigation.">
-  <meta name="source-sha256" content="c1e44a5493a8926dce2cdda5206f5ecd16028973bfbc55d230b966d64e8ea0e1">
+  <meta name="source-sha256" content="0a175cfc238a5b022fe17a8030dc96549de62f29164db99492ef3a3e8ca0ebc6">
   <title>Nightshift</title>
   <link rel="stylesheet" href="reader.css">
   <script type="module" src="reader.js"></script>
@@ -14,15 +14,14 @@
   <header class="masthead"><a href="index.html">NIGHTSHIFT / Design notebook</a><span>Draft for review · Proposed architecture, not an implemented platform</span></header>
   <div class="layout">
     <aside aria-label="Document navigation"><div>
-      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html" aria-current="page">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Durable events and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and adversarial review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestone contracts and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Migration roadmap, risks, and architectural decisions</a></li></ol></nav>
+      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html" aria-current="page">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Attempt journal and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and independent review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestones and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Roadmap, risks, and architectural decisions</a></li></ol></nav>
       <details open><summary>On this page</summary><nav aria-label="Page sections"><div class="toc">
 <ul>
-<li><a href="#brand">Brand</a></li>
 <li><a href="#reading-guide">Reading guide</a></li>
-<li><a href="#complete-section-map">Complete section map</a></li>
-<li><a href="#preservation-and-scope">Preservation and scope</a></li>
-<li><a href="#evidence-baseline">Evidence baseline</a></li>
-<li><a href="#html-reading-editions-and-publication">HTML reading editions and publication</a></li>
+<li><a href="#revision-and-evidence-baseline">Revision and evidence baseline</a></li>
+<li><a href="#profiles-and-deliberate-limits">Profiles and deliberate limits</a></li>
+<li><a href="#html-reading-editions-and-validation">HTML reading editions and validation</a></li>
+<li><a href="#branch-and-publication-scope">Branch and publication scope</a></li>
 </ul>
 </div>
 </nav></details>
@@ -31,97 +30,62 @@
       <div class="source-bar"><a href="index.html">← TL;DR overview</a><a href="README.md" download>Markdown source ↓</a><span>Full text · Generated from preserved Markdown</span></div>
       <article><h1 id="nightshift">Nightshift<a class="headerlink" href="#nightshift" title="Permanent link">§</a></h1>
 <p><strong>Big plans. Small slices. Verified delivery.</strong></p>
-<p>A governed autonomous software factory: humans define outcomes and milestone contracts; agents execute bounded slices; independent review and deterministic controls establish evidence; humans accept integrated results.</p>
-<p>Start with the <a href="https://jeromebanks.github.io/cubism-rs/">TL;DR HTML overview on GitHub Pages</a>. It links to the complete HTML reading editions. The <a href="index.html">local HTML overview</a> remains available for offline use.</p>
-<h2 id="brand">Brand<a class="headerlink" href="#brand" title="Permanent link">§</a></h2>
-<p><strong>Nightshift</strong> evokes a factory that keeps delivery moving between human checkpoints. It is the proposed product name. Astra refers only to a model option; it is not the product brand. This package does not claim trademark or domain availability.</p>
+<p>An open-source orchestration tool for an individual developer or small team: one milestone → dependency-aware slices → multiple implementation/review/repair/integration attempts → verified integration → human acceptance.</p>
+<p>The recommended starting point is <strong>GitHub-native work topology and compact attempt comments, one local dispatcher, executor-native sessions, an in-process trusted effect broker, and asynchronous Cubism analytics</strong>. No PostgreSQL, SQLite, Dolt server, Temporal or persistent Nightshift infrastructure is required. GitHub comments provide modest durability and explicit reconciliation, not database transactions.</p>
+<p>Start with the <a href="index.html">HTML overview</a> or <a href="README.html">HTML reading guide</a>. This is a documentation-only revision of the existing design on <code>docs/nightshift-design-draft</code>, not a separate proposal or implemented platform.</p>
 <h2 id="reading-guide">Reading guide<a class="headerlink" href="#reading-guide" title="Permanent link">§</a></h2>
 <div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
 <thead>
 <tr>
 <th>Document</th>
-<th>Original sections</th>
+<th>Sections</th>
 <th>Contents</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></td>
+<td><a href="01-product-and-prototype.html">Product and prototype</a></td>
 <td>1–4</td>
-<td>Executive thesis and product definition; Evidence-grounded assessment of the prototype; Retain / repair / replace / add; Product principles and invariants</td>
+<td>Initial product boundary, current repository findings, preserved historical evidence, required invariants</td>
 </tr>
 <tr>
 <td><a href="02-architecture-and-work-model.html">Architecture and work model</a></td>
 <td>5–6</td>
-<td>Recommended reference architecture; Domain model and work planning</td>
+<td>Sources of truth, profiles, native GitHub API/CLI, topology and replanning</td>
 </tr>
 <tr>
-<td><a href="03-durable-state-machines.html">Durable events and state machines</a></td>
+<td><a href="03-durable-state-machines.html">Attempt journal and state machines</a></td>
 <td>7</td>
-<td>Durable event and state model</td>
+<td>Compact schema, allocation ordering, transitions and ambiguity</td>
 </tr>
 <tr>
-<td><a href="04-execution-scheduling-review.html">Scheduling, execution, and adversarial review</a></td>
+<td><a href="04-execution-scheduling-review.html">Execution and independent review</a></td>
 <td>8–9</td>
-<td>Scheduling and lease protocol; Provider-neutral execution and adversarial review</td>
+<td>One dispatcher, retry bounds, executor interface, Factory lessons, structured review</td>
 </tr>
 <tr>
-<td><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></td>
+<td><a href="05-trust-policy-evidence.html">Trust, policy and evidence</a></td>
 <td>10–12</td>
-<td>Trust, identity, and threat model; Policy as code; Evidence and attestation model</td>
+<td>In-process broker, idempotency, protected policy, verification and retention</td>
 </tr>
 <tr>
-<td><a href="06-milestones-and-product-experience.html">Milestone contracts and product experience</a></td>
+<td><a href="06-milestones-and-product-experience.html">Milestones and product experience</a></td>
 <td>13–14</td>
-<td>Human milestone contract; UI, API, and CLI surfaces</td>
+<td>Integration, exact checkpoint acceptance, GitHub UI and CLI</td>
 </tr>
 <tr>
-<td><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></td>
+<td><a href="07-reliability-security-economics.html">Reliability and economics</a></td>
 <td>15–18</td>
-<td>Reliability, integration, and disaster recovery; Security and multi-tenancy; Observability, evaluation, economics, and commercial model; Build-versus-buy decisions</td>
+<td>Restart reconciliation, merge limitations, cost/Cubism, infrastructure dispositions</td>
 </tr>
 <tr>
-<td><a href="08-roadmap-and-decisions.html">Migration roadmap, risks, and architectural decisions</a></td>
+<td><a href="08-roadmap-and-decisions.html">Roadmap and decisions</a></td>
 <td>19–21</td>
-<td>Migration roadmap and independently reviewable slices; Top risks, prioritized questions, and what not to build; Recommended architectural decisions</td>
+<td>Small Cubism milestones, risks, qualification gates and revised ADRs</td>
 </tr>
 </tbody>
 </table></div>
-<h2 id="complete-section-map">Complete section map<a class="headerlink" href="#complete-section-map" title="Permanent link">§</a></h2>
-<ol>
-<li><a href="01-product-and-prototype.html">Executive thesis and product definition</a></li>
-<li><a href="01-product-and-prototype.html">Evidence-grounded assessment of the prototype</a></li>
-<li><a href="01-product-and-prototype.html">Retain / repair / replace / add</a></li>
-<li><a href="01-product-and-prototype.html">Product principles and invariants</a></li>
-<li><a href="02-architecture-and-work-model.html">Recommended reference architecture</a></li>
-<li><a href="02-architecture-and-work-model.html">Domain model and work planning</a></li>
-<li><a href="03-durable-state-machines.html">Durable event and state model</a></li>
-<li><a href="04-execution-scheduling-review.html">Scheduling and lease protocol</a></li>
-<li><a href="04-execution-scheduling-review.html">Provider-neutral execution and adversarial review</a></li>
-<li><a href="05-trust-policy-evidence.html">Trust, identity, and threat model</a></li>
-<li><a href="05-trust-policy-evidence.html">Policy as code</a></li>
-<li><a href="05-trust-policy-evidence.html">Evidence and attestation model</a></li>
-<li><a href="06-milestones-and-product-experience.html">Human milestone contract</a></li>
-<li><a href="06-milestones-and-product-experience.html">UI, API, and CLI surfaces</a></li>
-<li><a href="07-reliability-security-economics.html">Reliability, integration, and disaster recovery</a></li>
-<li><a href="07-reliability-security-economics.html">Security and multi-tenancy</a></li>
-<li><a href="07-reliability-security-economics.html">Observability, evaluation, economics, and commercial model</a></li>
-<li><a href="07-reliability-security-economics.html">Build-versus-buy decisions</a></li>
-<li><a href="08-roadmap-and-decisions.html">Migration roadmap and independently reviewable slices</a></li>
-<li><a href="08-roadmap-and-decisions.html">Top risks, prioritized questions, and what not to build</a></li>
-<li><a href="08-roadmap-and-decisions.html">Recommended architectural decisions</a></li>
-</ol>
-<h2 id="preservation-and-scope">Preservation and scope<a class="headerlink" href="#preservation-and-scope" title="Permanent link">§</a></h2>
-<p>This is the complete prior design, divided by topic rather than abridged. All 21 numbered sections, transition tables, diagrams, illustrative contracts and attestations, diagnostic results, recommendations, alternatives, stage criteria, risks, open questions, and ADR proposals are retained. The HTML is an additional summary, not a substitute for those documents.</p>
-<p>Packaging changes:</p>
-<ul>
-<li>Rebranded the product, illustrative CLI, domains, workload identities, and diagram labels to Nightshift.</li>
-<li>Corrected the model/harness distinction for Astra in section 9 and the qualification question in section 20.</li>
-<li>Converted repository evidence links to commit-pinned GitHub links with line anchors so the package can be moved or shared. PostScript source links use the HEAD recorded during the historical comparison; those reads were from its checkout, not a separate immutable-worktree audit.</li>
-<li>Added navigation, document titles, and this provenance note. Removed only the chat renderer's memory-citation footer from the document body.</li>
-</ul>
-<p>The original design's statements that no files or GitHub state were changed describe the earlier read-only assessment. This packaging task adds this documentation folder. It does not implement the proposed platform or revise the inspected prototype.</p>
-<h2 id="evidence-baseline">Evidence baseline<a class="headerlink" href="#evidence-baseline" title="Permanent link">§</a></h2>
+<h2 id="revision-and-evidence-baseline">Revision and evidence baseline<a class="headerlink" href="#revision-and-evidence-baseline" title="Permanent link">§</a></h2>
 <div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
 <thead>
 <tr>
@@ -131,50 +95,54 @@
 </thead>
 <tbody>
 <tr>
-<td>Cubism branch</td>
-<td><code>chore/checkpoint-sdlc-worktree-state</code></td>
+<td>Revision date</td>
+<td>2026-09-13</td>
 </tr>
 <tr>
-<td>Cubism commit</td>
-<td><code>0cbaf2d3c92ea30eafe507a5460894f5322ccc69</code></td>
+<td>Starting design branch</td>
+<td><code>docs/nightshift-design-draft</code></td>
 </tr>
 <tr>
-<td>Local main</td>
-<td><code>1ae95dd9fdfb56febf463c3fd5601ddafbeac4d0</code></td>
+<td>Starting commit</td>
+<td><code>231a161f06a354f34b1c6184a66a813f3d84f8c0</code></td>
 </tr>
 <tr>
-<td>PostScript HEAD observed</td>
-<td><code>1a5bb6520dfb9fea54a0a4fe34930e9dafa5d5e7</code></td>
+<td>Historical Cubism assessment</td>
+<td><code>0cbaf2d3c92ea30eafe507a5460894f5322ccc69</code>, preserved in chapter 1</td>
 </tr>
 <tr>
-<td>Original instructions</td>
-<td><code>astra-sdlc.txt</code>, read completely in the preceding assessment</td>
+<td>Beads source inspected</td>
+<td><code>f56632adcfabed7da6ed0aabe4e760066b472c46</code></td>
 </tr>
 <tr>
-<td>Packaging date</td>
-<td>2026-09-09</td>
+<td>Factory droid-action inspected</td>
+<td><code>b46affde010c543aefc51b5d82618b8e825845ca</code></td>
+</tr>
+<tr>
+<td>Factory VFS inspected</td>
+<td><code>4852148cecde9c5413b51e4184eac55015bfe766</code></td>
 </tr>
 </tbody>
 </table></div>
-<p>Eight existing SDLC unit tests passed during the earlier assessment. In-memory diagnostics reproduced receipt, check-name, feedback-gate, and applied-merge defects without external mutations. The branch-claim race was established by code/interleaving analysis and documented Git semantics, not a remote race experiment. Live protections, production deployments, hosted demos, and provider/harness capability were not verified.</p>
-<p>The migration entries are proposed work, not existing GitHub issues. Illustrative identifiers, digests, prices, availability targets, and CLI commands are design examples. Markdown Mermaid blocks require a Mermaid-capable viewer; the HTML overview needs no renderer, scripts, fonts, or network resources.</p>
-<p>External primary-source links are preserved beside their claims throughout the full documents. They support the original design assessment; this packaging pass did not refresh external platform research.</p>
-<h2 id="html-reading-editions-and-publication">HTML reading editions and publication<a class="headerlink" href="#html-reading-editions-and-publication" title="Permanent link">§</a></h2>
-<p>Every Markdown document, including this guide, has a same-name HTML reading edition. Start at <a href="index.html">the overview</a> or <a href="README.html">the HTML reading guide</a>. HTML navigation stays in HTML; each page also offers the unchanged Markdown source for agents. The overview remains self-contained. Full reading editions use local <code>reader.css</code> and <code>reader.js</code>; only diagram rendering loads an external dependency (Mermaid 11.12.0 from jsDelivr). All prose, tables, examples, and diagram source remain readable without JavaScript or network access. Diagram sources collapse only after successful rendering.</p>
-<p>The publication target is <a href="https://jeromebanks.github.io/cubism-rs/">GitHub Pages</a>. Source documents and generated HTML live on <code>docs/nightshift-design-draft</code>. A dedicated <code>nightshift-pages</code> branch contains only this folder, extracted with Git subtree. Pages publishes that branch's root, with <code>.nojekyll</code> preventing Markdown rewriting. Nothing is merged into <code>main</code>. This uses the repository's single Pages site; a future broader documentation site will need an explicit integration decision.</p>
-<p>To rebuild, use an isolated Python environment with the pinned renderer. From the repository root (replace the example temporary environment path with your own):</p>
-<pre><code class="language-bash">rtk python3 -m venv /private/tmp/nightshift-docs-venv
-rtk /private/tmp/nightshift-docs-venv/bin/pip install -r scripts/nightshift-docs-requirements.txt
-rtk /private/tmp/nightshift-docs-venv/bin/python scripts/render-nightshift-docs.py
-rtk /private/tmp/nightshift-docs-venv/bin/python scripts/render-nightshift-docs.py --check
+<p>All eight existing Markdown chapters, this guide, HTML reading editions and the hand-maintained overview were audited. Repository inspection included <code>AGENTS.md</code>, <code>SDLC.md</code>, <code>.sdlc/config.json</code>, relevant <code>scripts/sdlc.py</code> paths and the documentation renderer. The older prototype findings retain commit-pinned links and explicitly historical diagnostic results. They are not fresh runtime tests. No Nightshift code, infrastructure, issue topology or active SDLC policy is changed by this revision.</p>
+<p>The old mandatory database/workflow architecture is superseded throughout. Section numbers remain for navigation; old ADR numbers now state revised decisions. Git history retains the prior design. Current upstream sources were checked for native GitHub relationships/CLI, Checks/retention limits, Factory execution/session/compute capabilities, Beads storage modes and Dolt. Factory VFS's manifest/README declare MIT and version 1.1.1; runtime maturity was not independently tested. No source is copied from Factory repositories. <code>gh</code> and <code>rtk</code> were unavailable in the inspection environment, so CLI flags were checked against the current official manual and underlying shell commands used for documentation work.</p>
+<p>Live GitHub protections/installed credential capabilities and executor sandbox/session behavior remain implementation qualification gates. No unresolved architecture choice blocks starting the initial profile. Illustrative schemas, commands, identifiers and limits are proposed contracts, not shipped interfaces or provider prices.</p>
+<h2 id="profiles-and-deliberate-limits">Profiles and deliberate limits<a class="headerlink" href="#profiles-and-deliberate-limits" title="Permanent link">§</a></h2>
+<p>GitHub is the one authoritative initial work graph. Beads with embedded Dolt is an optional later local profile; Dolt server mode is for genuine concurrent graph writers. PostgreSQL becomes an option only for demonstrated multiple active dispatchers, cross-host effect fencing, strict transactional global budgets or a durable outbox. A deployment must not duplicate authoritative graph state across those backends.</p>
+<p>Attempts remain execution records, never GitHub/Beads work items or per-attempt Dolt branches. Native session state remains executor-owned. The broker enforces protected effects under trusted policy. Recovery can lose native context or duplicate bounded computation; uncertain protected effects block rather than being blindly repeated. Comment history and raw CI artifacts are not permanent audit storage. Cubism/telemetry outages never prevent correctness.</p>
+<h2 id="html-reading-editions-and-validation">HTML reading editions and validation<a class="headerlink" href="#html-reading-editions-and-validation" title="Permanent link">§</a></h2>
+<p>Each Markdown document has a same-name generated HTML edition. The overview is hand-maintained and self-contained; full editions use <code>reader.css</code> and <code>reader.js</code>, loading Mermaid 11.12.0 from jsDelivr only for visual diagrams. Text and diagram source remain readable offline. The renderer embeds each Markdown source's SHA-256 and checks local links/anchors/assets plus byte-for-byte reproduction.</p>
+<p>From the repository root, with the pinned renderer installed:</p>
+<pre><code class="language-bash">python3 -m venv /tmp/nightshift-docs-venv
+/tmp/nightshift-docs-venv/bin/pip install -r scripts/nightshift-docs-requirements.txt
+/tmp/nightshift-docs-venv/bin/python scripts/render-nightshift-docs.py
+/tmp/nightshift-docs-venv/bin/python scripts/render-nightshift-docs.py --check
+git diff --check
+rg -ni 'PostgreSQL|Temporal|SQLite|lease|transaction|inbox|outbox|object stor|event.sourc' docs/nightshift-design
 </code></pre>
-<p>The checker verifies byte-for-byte reproducibility and all local HTML links, anchors, and assets. Each reading edition embeds the SHA-256 digest of its Markdown source. <code>--patch</code> emits an <code>apply_patch</code> payload instead of writing files directly. Review and commit the generated HTML alongside source edits.</p>
-<p>After the reviewed source changes are committed on <code>docs/nightshift-design-draft</code>, publish updates without a main-branch merge:</p>
-<pre><code class="language-bash">rtk git push origin docs/nightshift-design-draft
-rtk git subtree split --prefix=docs/nightshift-design -b nightshift-pages
-rtk git push origin nightshift-pages
-</code></pre>
-<p>The subtree command advances the local publication branch when its history is compatible; do not force-push if it reports divergence. Pages must be configured once to publish <code>nightshift-pages</code> at <code>/</code>. Check the Pages build and live URLs after every publication. Build and publishing operations do not validate or implement the proposed software-factory architecture.</p></article>
+<p>Use the repository's <code>rtk</code> prefix when installed. Review generated HTML alongside Markdown and separately inspect overview consistency. The infrastructure search intentionally finds explicit removals, limitations and future profiles; it must not find mandatory default services. Inspect attempt identity, policy origin, diagrams, recovery, retention and asynchronous analytics as semantic checks too.</p>
+<h2 id="branch-and-publication-scope">Branch and publication scope<a class="headerlink" href="#branch-and-publication-scope" title="Permanent link">§</a></h2>
+<p>Source documents and generated HTML live on <code>docs/nightshift-design-draft</code>. This revision updates that branch. It does not merge into <code>main</code> or publish the existing <a href="https://jeromebanks.github.io/cubism-rs/">GitHub Pages site</a>. The site has a separate <code>nightshift-pages</code> publication branch and may show an older design until a separately requested publication. Do not treat the live Pages content as proof that this branch has been deployed.</p></article>
       <nav class="bottom-nav" aria-label="Reading shortcuts"><a href="README.html">Reading guide</a><a href="#content">Back to top ↑</a></nav>
       <footer>Nightshift design draft. Sources and qualifications are retained in the text. HTML is a reading edition, not a new design revision. Diagram visuals load Mermaid 11.12.0 from jsDelivr; text, tables, code, and diagram sources work without it.</footer>
     </main>

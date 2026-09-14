@@ -1,186 +1,93 @@
 # Nightshift — Trust, policy, and evidence
 
 [Overview](index.html) · [Document index](README.md) · [Previous](04-execution-scheduling-review.md) · [Next](06-milestones-and-product-experience.md)
-> Design proposal · Packaged 2026-09-09 · Original sections 10–12 preserved below. Repository findings refer to the inspected checkpoint, not live project state.
 
-## 10. Trust, identity, and threat model
+> Revised design proposal · 2026-09-13 · GitHub-native, single-dispatcher profile. No Nightshift implementation is included.
 
-Trust roots are:
+## 10. In-process trusted effect broker
 
-- Customer identity provider and registered human authentication credentials.
-- Nightshift service identity issuer and workload enrollment.
-- Role-specific signing keys controlled outside untrusted runners.
-- Customer-approved policy authority.
-- Qualified source-host, CI, and build issuers.
-- Infrastructure operators responsible for the VM and control-plane boundaries.
+The dispatcher and broker run trusted installed code outside the candidate checkout. Agents produce local candidate commits, review findings, structured verdicts or exact effect requests. The broker performs issue/comment mutations, branch publication, PR creation/updates, statuses/Checks, merge, release and other protected effects. Initial policy disables release/deployment effects unless explicitly enabled.
 
-SPIFFE provides a useful workload identity model with explicit trust domains and verifiable identity documents. Its use does not itself prove that a workload is uncompromised. [SPIFFE concepts](https://spiffe.io/docs/latest/spiffe-about/spiffe-concepts/)
+No agent receives unrestricted GitHub integration credentials. Removing an environment variable alone is insufficient: executor isolation must prevent access to the developer's credential files/helpers, keychain, SSH agent, cloud metadata, broker memory/control files and writable trusted code. Use existing executor OS sandboxing or an isolated user/container boundary with narrow mounts and no inherited credential helpers. Worktrees alone isolate edits, not secrets. If the installed adapter cannot enforce this boundary, block unattended protected effects. The host operator remains trusted; this is not hostile multi-tenant isolation.
 
-GitHub integration should use separate Apps or independently isolated credentials for source writes, review/check publication, and privileged provisioning. Agents receive none of these credentials directly. Installation tokens can be scoped to repositories and permissions and expire after one hour; the broker keeps them outside the runner and imposes shorter operation grants. [GitHub App token documentation](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app)
+The broker accepts typed operations, never arbitrary shell/HTTP requests. Validate current attempt, role, scoped capability, immutable inputs, policy, gate and target allowlist. A review capability cannot publish code or merge. Implementer-supplied text cannot assign a reviewer or issue human approval. Publish source through trusted Git operations with hooks disabled and safe configuration; never execute candidate scripts in the credential-bearing process.
 
-### Threat controls
+### Effect idempotency and local fencing
 
-| Threat | Preventive | Detective | Recovery |
-|---|---|---|---|
-| Malicious agent or tool misuse | Capability broker; exact operation schema; sandbox; no direct merge credentials | Denied-operation events, anomaly detection | Fence attempt, revoke grants, replace runner |
-| Repository/issue/log prompt injection | Separate trusted instructions from data; restrict tools and egress regardless of model request | Injection canaries, unusual tool requests, context-access audit | Quarantine context, restart with clean package |
-| Forged review | Assigned reviewer identity, signed attestation, role separation | Signature/assignment mismatch | Reject evidence, invalidate dependent eligibility |
-| Stolen source credential | Broker-only storage, narrow App scope, short-lived grants | Unexpected refs/actions and installation audit | Revoke installation/token, reconcile mutations |
-| Secret exfiltration | No secrets by default; scoped broker; destination-aware egress | DLP signals, network and secret access logs | Rotate secrets, contain tenant scope, notify |
-| Dependency/build compromise | Pinned inputs, approved registries, isolated build, verified provenance | Dependency scanning, reproducibility checks | Rebuild from trusted inputs; revoke affected artifacts |
-| Tenant boundary violation | Tenant-bound identity, DB authorization, object-store policy, isolated VM | Cross-tenant negative tests and access alarms | Disable affected path, rotate keys, investigate exposure |
-| Policy tampering in PR | Policy fetched from independent signed authority | Candidate policy differs from active policy | Reject candidate’s attempted policy influence |
-| Artifact substitution | Digest verification at every promotion | Digest/provenance mismatch | Quarantine artifact; rebuild |
-| Human gate bypass | Decision service and effect admission enforce contract generation | Projection drift, unauthorized promotions | Stop release progression; incident and compensation |
-| Compromised runner host | Dedicated trust class; no signing/merge root keys in guest | Runtime attestation, independent verification | Destroy host, invalidate affected evidence |
-| Compromised orchestrator | Separate policy/decision roots and effect broker verification | Independent audit export, abnormal grant requests | Disable authority epoch; restore and reconcile |
-| Compromised signer or policy authority | Separate keys, constrained signing APIs, dual control for root changes | Key-use audit and external witnesses | Revoke trust version; invalidate affected descendants |
+Use stable keys derived from the logical action, target, exact input identity and authorizing attempt; persist the key, bounded normalized arguments (or immutable input reference) and payload digest before submission. Reconciliation uses the original key even after process restart. When a new attempt proposes an equivalent effect, first look for the existing logical target (slice/PR/head or release tag); a new attempt ID must not authorize a duplicate PR or release.
 
-Prompt-injection defenses constrain consequences; they do not guarantee the model will interpret hostile text correctly.
+| Effect | Reconciliation identity / safe behavior |
+|---|---|
+| Attempt comment | Marker, broker author and confirmed comment ID; reread on POST ambiguity |
+| Issue or discovered slice | Plan-change ID and logical new-slice marker on parent/child; never blindly duplicate |
+| Label/dependency/assignment update | Desired exact state and target; reread current topology, preserve unrelated human fields |
+| Candidate branch | Stable attempt-qualified name and expected full SHA; no force overwrite of unknown state |
+| PR | Stable slice/candidate marker, repository, head/base refs; search open and closed PRs before creation |
+| Status/Check | Exact SHA, context/name, trusted issuer, external ID where supported; identical status updates may create duplicate native records but not new authority |
+| Merge | PR identity, expected head, trusted review/check inputs and integration intent; query PR and Git result after timeout |
+| Release/deployment | Explicit policy grant and native stable tag/version or deployment operation ID; unsupported ambiguous actions require inspection |
 
-A fully compromised administrative trust root can defeat controls in its domain. Higher-assurance deployments reduce that risk through separate accounts, customer-held keys, independent evidence export, and dual authorization for root changes. Cryptographic signatures prove who attested to bytes, not that those bytes describe truthful work.
+GitHub generally does not honor Nightshift keys as a universal idempotency header. Safety comes from serialized broker calls, recorded intent, native preconditions, querying outcomes and refusing blind retries. For an ambiguous non-idempotent create, absence on one read is not proof that a delayed request cannot commit: keep it uncertain until settled or inspected. Identical duplicate journal comments/computation may occur; duplicate protected semantic actions must not be deliberately dispatched to resolve uncertainty.
 
-## 11. Policy as code
+Dispatcher-owned allocation, graph and gate operations use explicit trusted operator/policy authority, never agent-supplied approval. Executor-requested effects must belong to a current attempt; merge is a broker step of the authorized integration attempt, whose terminal outcome is recorded after the effect settles. A completed implementation attempt cannot later request merge.
 
-Customers edit a typed policy schema, not unrestricted executable code. The compiler produces:
+On cancellation/reassignment, revoke the old in-memory capability before authorizing a replacement. Late results can be retained as historical facts but cannot overwrite the current candidate or verdict. A submitted effect remains pending until reconciled; revocation cannot retract it. There is no cross-host fence in this profile.
 
-1. OPA policy/data bundles.
-2. Source-host protection requirements.
-3. Runner capability manifests.
-4. Secret and network policies.
-5. Workflow gates and budgets.
-6. UI explanations and audit predicates.
+## 11. Protected policy
 
-Policy versions are signed and activated independently of product PRs. The active version governs the change that proposes its successor. Emergency revocations can invalidate previously admitted-but-not-consumed grants; ordinary policy changes specify whether in-flight work is grandfathered or revalidated.
+Load policy from the protected/default branch at a recorded commit or an explicitly trusted local/configuration source outside agent write access. Never load candidate-branch policy as authority for that candidate. A policy change is reviewed under the prior trusted version and becomes active only through authorized promotion. Use trusted installed broker code as well; safe configuration cannot protect a broker script replaced by an agent.
 
-OPA supports signed bundle verification, but that verification must be explicitly configured. An unsigned bundle is not automatically rejected in an unconfigured installation. [OPA bundle signing](https://www.openpolicyagent.org/docs/management-bundles)
+Start with a small validated schema and deterministic checks; no OPA service, signature infrastructure or identity provider is required. Record source/digest in attempts and revalidate current policy at effects. Policy revocation blocks new effects immediately when observed. Criteria/scope changes invalidate the affected assignments; they do not silently inherit old approval.
+
+Illustrative fields, not current `.sdlc/config.json` syntax:
 
 ```yaml
-schema: factory.policy/v1
-id: acme-default
-version: 7
-default: deny
-required_checks:
-  - name: factory/verification
-    issuer:
-      github_app_id: 12345
-      workflow_digest: sha256:trusted-workflow
-    conclusion: success
-review:
-  baseline:
-    classes: [cold_correctness]
-    independent_execution: true
-    reviewers: 1
-  rules:
-    - when:
-        any:
-          - risk_at_least: high
-          - paths_match: ["auth/**", "factory/leases/**", ".github/workflows/**"]
-      require:
-        reviewers: 2
-        classes: [cold_correctness, security_specialist]
-        distinct_model_families: true
-        failure_injection: true
-merge:
-  strategy: merge
-  require_current_integration_evidence: true
-  trusted_admission_issuer: factory-effect-broker
+schema: nightshift.policy/v1
+repository: OWNER/REPO
+work_graph: github
 execution:
-  egress: [approved-model-gateway, approved-package-proxy]
-  secrets: []
-  max_attempts: 3
+  max_active_attempts: 1
+  max_total_attempts_per_slice: 10
+  max_implementation_repair_attempts: 3
+  max_review_attempts_per_candidate: 3
+  max_integration_attempts_per_subject: 2
+  max_attempt_minutes: 45
   max_slice_usd: 30
-human_gates:
-  placement: milestone
-  policy_relaxation_authority: tenant-security-owner
-release:
-  staging: automatic_if_verified
-  production: require_contract_grant
-exceptions:
-  require_named_authority: true
-  require_reason_and_expiry: true
-  agents_may_self_issue: false
-retention:
-  raw_model_content_days: 0
-  diagnostic_logs_days: 30
-  accepted_evidence_days: 365
+review:
+  independent_session: true
+  required_reviewers: 1
+merge:
+  expected_head_required: true
+  require_integration_verification: true
+  required_checks: [CI required checks]
+  allowed_issuers: [configured-trusted-issuer]
+human:
+  approver_login: configured-owner
+release: {enabled: false}
+deployment: {enabled: false}
 ```
 
-The complete schema also covers sensitive operations, runtime ceilings, environment-specific secrets, demonstration requirements, merge queue settings, privacy classes, residency, retention holds, and stop scopes.
+Pin workflow/issuer identity as well as check names. Validate source SHA, workflow origin, run attempt, conclusion and required job coverage; a same-named check from another issuer is not sufficient. Required status checks can be bound to an expected App through [GitHub branch protection](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches). Qualification must report unavailable protections or insufficient identity evidence, not claim enforcement it cannot establish.
 
-Policy compilation must report unsupported enforcement. If a repository cannot enforce a required source-host invariant, onboarding cannot silently declare it qualified.
+The trusted GitHub principal may be a narrowly scoped operator token for the simplest status/comment integration, or an App installation. Rich Checks integration may require an App and appropriate Checks permission; the [Checks API documentation](https://docs.github.com/en/rest/checks/runs) includes credential-specific restrictions. Use commit statuses if that avoids requiring an App. Agents receive neither credential. Integration account compromise is outside the local broker's defense; revoke access, pause and inspect remote changes.
 
-Source-host checks must be identified by issuer and job identity, not display name alone. GitHub supports selecting a specific App as the expected source of a required status check. Nightshift’s verifier additionally validates workflow origin, run attempt, event, source SHA, and required job coverage. [GitHub protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)
+## 12. Evidence, summaries and retention
 
-## 12. Evidence and attestation model
+Progress and evidence remain separate. Evidence identifies what was run, who/what produced it, the exact source subject, recipe, result, relevant limitations and native references. Git commits supply immutable content identity; comments and issue bodies remain editable and deletable. Do not describe the journal as tamper-proof, permanently immutable or independently signed audit evidence.
 
-The evidence graph is:
+| Evidence | Required compact summary |
+|---|---|
+| Implementation | Fixed inputs, candidate full SHA, outcome and limitations |
+| Independent review | Assigned attempt/session, exact reviewed head/base, verdict, coverage and unresolved findings/dispositions |
+| Test/build | Trusted workflow/job/run attempt or verifier identity, tested SHA, recipe, conclusion, failures/skips and time |
+| Integration | Tested head/base or integration SHA/tree, checks and actual merge/result SHA |
+| Milestone | Included slices/source snapshot, criterion-to-evidence mapping, reproducible demo, gaps and human decision |
 
-```text
-intent → contract → plan → slice → attempt → candidate commits
-       → verification → reviews → integration → merge
-       → build → deployment → demo → milestone bundle → human decision
-```
+Checks and commit statuses carry commit-specific verification results; they cannot represent a failed attempt that never produced a commit. The attempt comment therefore exists first and contains the durable important summary afterward. Native Checks can prune older same-named runs (the documented suite limit is 1,000). Actions [logs/artifacts have retention limits](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts), and deleting a workflow run deletes its associated artifacts. Actions artifacts are not permanent audit storage.
 
-Edges have semantics: `implements`, `verifies`, `reviews`, `built-from`, `deployed-as`, `demonstrates`, `supersedes`, `accepts`, and `invalidates`.
+Store important pass/fail summaries, findings, subject IDs, recipe and references in comments while the raw records are accessible. Reference executor-native logs/transcripts with their access/retention limitations; do not duplicate full contents. GitHub has its own account/repository availability and deletion risks. Summaries preserve understanding, not the ability to re-verify missing raw evidence indefinitely. Before a pending promotion, expired required evidence must be rerun or explicitly inspected; an old summary alone cannot silently substitute for a required live check.
 
-An evidence node contains a schema version, media type, digest, producer identity, source references, policy/contract versions, observation time, collection time, storage location, retention class, and verification status.
-
-Artifacts are addressed by SHA-256 of exact stored bytes. Git references additionally retain repository identity and full Git object IDs. Signed manifests avoid self-reference: the bundle does not contain its own digest or the later human decision.
-
-### Attestation schemas
-
-| Attestation | Required fields beyond the common envelope | Signer |
-|---|---|---|
-| Execution | Attempt/lease, source input/output, runner image, model requested/observed, harness, prompts/skills/tools digests, context manifest, checkpoints, usage, result and limitations | Execution supervisor through constrained execution signer |
-| Review | Assignment, reviewed head/base/tree, contract, coverage by class, findings/dispositions, context-access manifest, reviewer identity, model/harness versions | Review signer bound to reviewer execution |
-| Verification | Test recipe, immutable source/integration subject, toolchain, environment, command, exit code, report/log digests, retries, skips, limitations | Verifier/CI identity |
-| Build | Build definition, resolved dependencies, builder identity, invocation, source, artifact subjects | Qualified build platform |
-| Deployment | Release and artifact digests, target environment/configuration, operation ID, observed runtime, health checks, rollback reference | Deployment verifier |
-| Milestone bundle | Contract, complete release/source vector, evidence roots, demos, narrative, presentation, risks, exclusions, operational readiness | Milestone assembler; signatures do not replace referenced evidence |
-| Human decision | Exact bundle/contract, decision, conditions, accepted risks, authority, authenticated challenge, expiry/supersession semantics | Human authentication assertion plus decision-service countersignature |
-
-Use in-toto statements for subject/predicate binding and SLSA build provenance for build facts. Custom execution, review, and milestone predicates extend this model without pretending that model review is a SLSA build level. [in-toto statement specification](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md), [SLSA build provenance](https://slsa.dev/spec/v1.2/build-provenance)
-
-### Illustrative review attestation
-
-```json
-{
-  "_type": "https://in-toto.io/Statement/v1",
-  "subject": [
-    {"name": "candidate-tree", "digest": {"sha256": "tree104"}}
-  ],
-  "predicateType": "https://nightshift.example/attestations/review/v1",
-  "predicate": {
-    "tenant": "acme",
-    "round": "review-22",
-    "assignment": "assignment-41",
-    "repository": "acme/service",
-    "head_sha": "full-git-head-sha",
-    "base_sha": "full-git-base-sha",
-    "contract_digest": "sha256:contract3",
-    "policy_digest": "sha256:policy7",
-    "reviewer_identity": "spiffe://review.nightshift.example/acme/review-22",
-    "implementation_attempt": "attempt-9",
-    "review_attempt": "attempt-r22",
-    "context_manifest_digest": "sha256:context22",
-    "isolation_class": "separate-vm-no-implementation-transcript",
-    "model": {"provider": "approved-provider", "observed_version": "version-id"},
-    "harness_digest": "sha256:harness4",
-    "coverage": ["correctness", "acceptance", "security", "test-adequacy"],
-    "findings": [],
-    "limitations": ["No production-load benchmark performed"],
-    "verdict": "pass",
-    "finished_at": "2026-09-09T02:00:00Z"
-  }
-}
-```
-
-The statement is wrapped in a signed envelope. The signing endpoint verifies assignment and observed execution identity; it is not an arbitrary “sign this JSON” API exposed to agents.
-
-GitHub artifact attestations are useful imported evidence and distribution mechanisms. Retain independent copies and validate the artifact, repository, workflow identity, and predicate. Their existence alone does not establish acceptance, review independence, or a trustworthy build definition. [GitHub artifact attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
-
-Verification follows the graph backward: verify digest, signature, trust root, signer role, tenant, assignment, policy, source binding, freshness, and invalidation records. A revoked or compromised signer can invalidate descendant eligibility without deleting historical evidence.
+A milestone report may live in existing repository docs with a Git commit and digest for exact acceptance. That does not require a content-addressed artifact service. Permanent artifact storage, stronger attestations, WORM archives and independent trust roots are deferred until a specific retention or assurance need warrants them. Limit sensitive code, prompts, secrets and personal information in comments and telemetry; a public repository's journal is public.
 
 ---
 
