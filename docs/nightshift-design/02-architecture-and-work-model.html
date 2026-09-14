@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Nightshift — Architecture and work model — complete design draft, with source and section navigation.">
-  <meta name="source-sha256" content="88dc55a43a970e2456e2350179dbdcd2d491993f754e450bd60abcf058a6dce1">
+  <meta name="source-sha256" content="6e959ef09fc596c8a756df4463213e59e2f7248e0444470755fa4cb893379c24">
   <title>Nightshift — Architecture and work model</title>
   <link rel="stylesheet" href="reader.css">
   <script type="module" src="reader.js"></script>
@@ -14,16 +14,17 @@
   <header class="masthead"><a href="index.html">NIGHTSHIFT / Design notebook</a><span>Draft for review · Proposed architecture, not an implemented platform</span></header>
   <div class="layout">
     <aside aria-label="Document navigation"><div>
-      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html" aria-current="page">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Durable events and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and adversarial review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestone contracts and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Migration roadmap, risks, and architectural decisions</a></li></ol></nav>
+      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html" aria-current="page">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Attempt journal and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and independent review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestones and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Roadmap, risks, and architectural decisions</a></li></ol></nav>
       <details open><summary>On this page</summary><nav aria-label="Page sections"><div class="toc">
 <ul>
-<li><a href="#5-recommended-reference-architecture">5. Recommended reference architecture</a><ul>
-<li><a href="#component-and-trust-boundary-diagram">Component and trust-boundary diagram</a></li>
-<li><a href="#deployment-modes">Deployment modes</a></li>
+<li><a href="#5-recommended-architecture">5. Recommended architecture</a><ul>
+<li><a href="#sources-of-truth">Sources of truth</a></li>
+<li><a href="#deployment-profiles">Deployment profiles</a></li>
 </ul>
 </li>
-<li><a href="#6-domain-model-and-work-planning">6. Domain model and work planning</a><ul>
-<li><a href="#illustrative-slice-contract">Illustrative slice contract</a></li>
+<li><a href="#6-work-model-and-github-capabilities">6. Work model and GitHub capabilities</a><ul>
+<li><a href="#current-api-and-cli-support-checked-2026-09-13">Current API and CLI support, checked 2026-09-13</a></li>
+<li><a href="#scope-and-replanning">Scope and replanning</a></li>
 </ul>
 </li>
 </ul>
@@ -35,263 +36,214 @@
       <article><h1 id="nightshift-architecture-and-work-model">Nightshift — Architecture and work model<a class="headerlink" href="#nightshift-architecture-and-work-model" title="Permanent link">§</a></h1>
 <p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="01-product-and-prototype.html">Previous</a> · <a href="03-durable-state-machines.html">Next</a></p>
 <blockquote>
-<p>Design proposal · Packaged 2026-09-09 · Original sections 5–6 preserved below. Repository findings refer to the inspected checkpoint, not live project state.</p>
+<p>Revised design proposal · 2026-09-13 · GitHub-native, single-dispatcher profile. No Nightshift implementation is included.</p>
 </blockquote>
-<h2 id="5-recommended-reference-architecture">5. Recommended reference architecture<a class="headerlink" href="#5-recommended-reference-architecture" title="Permanent link">§</a></h2>
-<p>Use a modular control-plane application with a small number of separately privileged services. Avoid premature microservice decomposition, while separating credentials and execution trust boundaries from the beginning.</p>
-<p>Concrete hosted defaults:</p>
-<ul>
-<li><strong>Python control-plane services</strong>, preserving the prototype’s language and enabling incremental extraction.</li>
-<li><strong>PostgreSQL</strong> for authoritative contracts, aggregate state, leases, operation records, budgets, inbox/outbox, and evidence indexes.</li>
-<li><strong>Temporal Cloud</strong> for durable orchestration and timers; self-hosted Temporal for deployments whose residency requirements exclude the managed service.</li>
-<li><strong>OPA</strong> for authorization and policy evaluation, behind a constrained customer policy schema.</li>
-<li><strong>S3-compatible object storage</strong> for content-addressed artifacts; AWS S3 and KMS for the initial hosted deployment.</li>
-<li><strong>React/TypeScript UI</strong>, REST/OpenAPI, event streaming, and a thin CLI.</li>
-<li><strong>Managed containers for trusted control services</strong>; ephemeral VMs for untrusted execution.</li>
-<li><strong>GitHub first</strong>, with repository, tracker, CI, and deployment adapters kept separate.</li>
-<li><strong>OpenTelemetry</strong> for operational telemetry; separate immutable audit evidence.</li>
-<li>Existing customer CI remains supported. Nightshift supplies a verification runner when the existing CI cannot meet the contract.</li>
-</ul>
-<p>Temporal should coordinate work, not become a second source of business truth. Each activity invokes an idempotent domain command against PostgreSQL. Workflow history records orchestration; committed domain events establish authority. Temporal’s own architecture requires deterministic workflow code and idempotent or non-retryable activities. <a href="https://github.com/temporalio/temporal/blob/main/docs/architecture/README.md">Temporal architecture</a></p>
-<h3 id="component-and-trust-boundary-diagram">Component and trust-boundary diagram<a class="headerlink" href="#component-and-trust-boundary-diagram" title="Permanent link">§</a></h3>
-<figure class="diagram"><figcaption>Design diagram</figcaption><div class="diagram-view" role="region" aria-label="Scrollable design diagram" tabindex="0"></div><p class="diagram-status">Diagram source below; visual rendering requires JavaScript and network access.</p><details open><summary>Diagram source</summary><pre><code class="language-mermaid">flowchart TB
-  subgraph Customer[&quot;Customer authority&quot;]
-    Human[&quot;Product owner / approver&quot;]
-    IdP[&quot;Customer identity provider&quot;]
-    UI[&quot;UI / API / CLI&quot;]
-  end
-
-  subgraph Control[&quot;Nightshift control plane&quot;]
-    API[&quot;Contract and command API&quot;]
-    DB[&quot;PostgreSQL: state, events, leases, budgets, outbox&quot;]
-    WF[&quot;Temporal workflows&quot;]
-    Scheduler[&quot;Scheduler&quot;]
-    Policy[&quot;Policy evaluator&quot;]
-    Gateway[&quot;Agent gateway / harness adapters&quot;]
-    ReadModel[&quot;Cockpit and evidence projections&quot;]
-    Costs[&quot;Cost accounting&quot;]
-    HumanReview[&quot;Milestone and decision service&quot;]
-  end
-
-  subgraph Security[&quot;Separately privileged authorization boundary&quot;]
-    Authority[&quot;Identity / policy authority&quot;]
-    Effects[&quot;Effect broker: source and deployment writes&quot;]
-    Signers[&quot;Role-scoped attestation signers&quot;]
-    Keys[&quot;KMS / trust roots&quot;]
-  end
-
-  subgraph Execution[&quot;Execution plane: tenant-isolated&quot;]
-    Impl[&quot;Implementation VM&quot;]
-    Review[&quot;Independent review VM&quot;]
-    Verify[&quot;Verification / build VM&quot;]
-    Demo[&quot;Demo environment&quot;]
-  end
-
-  subgraph Evidence[&quot;Evidence and audit boundary&quot;]
-    Store[&quot;Content-addressed artifacts&quot;]
-    Audit[&quot;Append-only audit archive&quot;]
-    OTel[&quot;Observability pipeline&quot;]
-  end
-
-  subgraph External[&quot;External systems&quot;]
-    Repo[&quot;Source host&quot;]
-    Tracker[&quot;Tracker&quot;]
-    CI[&quot;Customer CI&quot;]
-    Models[&quot;Approved model providers&quot;]
-    Deploy[&quot;Customer environments&quot;]
-  end
-
-  Human --&gt; UI
-  IdP --&gt; API
-  UI --&gt; API
-  API --&gt; DB
-  DB --&gt; WF
-  WF --&gt; API
-  WF --&gt; Scheduler
-  Scheduler --&gt; Gateway
-  Gateway --&gt; Impl
-  Gateway --&gt; Review
-  Gateway --&gt; Verify
-  Gateway --&gt; Models
-  API --&gt; Policy
-  Policy --&gt; Authority
-  Authority --&gt; Keys
-  Impl --&gt; Effects
-  Effects --&gt; Repo
-  Effects --&gt; Tracker
-  Effects --&gt; Deploy
-  Review --&gt; Signers
-  Verify --&gt; Signers
-  Signers --&gt; Store
-  CI --&gt; Store
-  Verify --&gt; Demo
-  Demo --&gt; Store
-  DB --&gt; ReadModel
-  Store --&gt; ReadModel
-  DB --&gt; HumanReview
-  HumanReview --&gt; Human
-  HumanReview --&gt; Signers
-  DB --&gt; Costs
-  DB --&gt; Audit
-  Store --&gt; Audit
-  Gateway --&gt; OTel
-  Effects --&gt; OTel
+<h2 id="5-recommended-architecture">5. Recommended architecture<a class="headerlink" href="#5-recommended-architecture" title="Permanent link">§</a></h2>
+<p>Use a small Python CLI/process, building on the repository's existing tooling. Modules within that process perform GitHub reads, scheduling, reconciliation, policy validation, executor adaptation and trusted effects. No independently deployed Nightshift service is needed.</p>
+<figure class="diagram"><figcaption>Design diagram</figcaption><div class="diagram-view" role="region" aria-label="Scrollable design diagram" tabindex="0"></div><p class="diagram-status">Diagram source below; visual rendering requires JavaScript and network access.</p><details open><summary>Diagram source</summary><pre><code class="language-mermaid">flowchart TD
+  H[&quot;Human and GitHub UI&quot;] --&gt; G[&quot;Issues: work graph and attempt comments&quot;]
+  G &lt;--&gt; D[&quot;One dispatcher: schedule and reconcile&quot;]
+  P[&quot;Protected policy and trusted code&quot;] --&gt; D
+  D --&gt; A[&quot;Executor adapters&quot;]
+  A &lt;--&gt; E[&quot;Executors: sessions and workspaces&quot;]
+  E --&gt;|&quot;Results and effect requests&quot;| B[&quot;In-process trusted broker&quot;]
+  D --&gt; B
+  P --&gt; B
+  B --&gt; G
+  B &lt;--&gt; S[&quot;GitHub: commits, PRs, CI and merge&quot;]
+  A -.-&gt;|&quot;Optional normalized events&quot;| C[&quot;Cubism and telemetry&quot;]
 </code></pre></details></figure>
-<p>Arrows from runners to privileged services represent authenticated requests, not possession of source-host or deployment credentials.</p>
-<h3 id="deployment-modes">Deployment modes<a class="headerlink" href="#deployment-modes" title="Permanent link">§</a></h3>
+<p>The executor is a separate restricted process/workspace. The broker is in the trusted dispatcher's process, not the agent's process. Arrows from executors convey requests, never reusable GitHub credentials. Telemetry export has bounded buffering and no awaited acknowledgement in scheduling or effects.</p>
+<h3 id="sources-of-truth">Sources of truth<a class="headerlink" href="#sources-of-truth" title="Permanent link">§</a></h3>
 <div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
 <thead>
 <tr>
-<th>Mode</th>
-<th>Control plane</th>
-<th>Execution and code</th>
-<th>Assurance boundary</th>
+<th>Fact</th>
+<th>Authoritative record</th>
+<th>Reconstructible view</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Hosted SaaS</td>
-<td>Nightshift-operated</td>
-<td>Nightshift ephemeral runners</td>
-<td>Nightshift operates the full execution trust boundary</td>
+<td>Milestone, epic, slice and dependencies</td>
+<td>GitHub Issues, native parent/sub-issue and blocking edges</td>
+<td>Readiness list and graph snapshot</td>
 </tr>
 <tr>
-<td>Hybrid</td>
-<td>Nightshift-operated</td>
-<td>Customer runners and optional customer artifact store</td>
-<td>Customer controls runner integrity; residency rules govern metadata and model traffic</td>
+<td>Scope and acceptance criteria</td>
+<td>Issue contract and broker-recorded revision/digest</td>
+<td>Attempt's pinned contract summary</td>
 </tr>
 <tr>
-<td>Customer VPC</td>
-<td>Dedicated managed deployment</td>
-<td>Customer VPC</td>
-<td>Same software, tenant-specific infrastructure and keys</td>
+<td>Attempt allocation, outcome and effect intent</td>
+<td>Broker-authored structured issue comments</td>
+<td>In-memory attempt index</td>
 </tr>
 <tr>
-<td>Self-hosted enterprise</td>
-<td>Customer-operated</td>
-<td>Customer-operated</td>
-<td>Customer owns operations and trust roots; support contract defines responsibilities</td>
+<td>Session contents and continuation</td>
+<td>Executor-native store</td>
+<td>Opaque session reference in comment</td>
+</tr>
+<tr>
+<td>Candidate</td>
+<td>Repository identity plus full commit SHA and retained branch</td>
+<td>Selected-candidate reference in comment/PR</td>
+</tr>
+<tr>
+<td>Verification</td>
+<td>Trusted workflow run, Check or status for exact subject</td>
+<td>Durable summary in attempt comment</td>
+</tr>
+<tr>
+<td>Merge</td>
+<td>GitHub PR merge state and resulting Git objects</td>
+<td>Issue completion and milestone report</td>
+</tr>
+<tr>
+<td>Policy</td>
+<td>Protected/default-branch version or explicit trusted source</td>
+<td>Pinned policy SHA/digest per attempt</td>
+</tr>
+<tr>
+<td>Human decision</td>
+<td>Authorized human's GitHub comment identifying exact checkpoint</td>
+<td>Gate labels</td>
+</tr>
+<tr>
+<td>Cost/outcome analytics</td>
+<td>Normalized observed usage with provenance</td>
+<td>Cubism aggregates; never work authority</td>
 </tr>
 </tbody>
 </table></div>
-<p>A customer runner connects outbound using mutual authentication. Jobs carry signed manifests and short-lived capabilities. A network partition permits bounded local computation until its execution allowance expires; it does not permit offline merges or new privileged effects.</p>
-<h2 id="6-domain-model-and-work-planning">6. Domain model and work planning<a class="headerlink" href="#6-domain-model-and-work-planning" title="Permanent link">§</a></h2>
-<p>The hierarchy is:</p>
-<pre><code class="language-text">Tenant
-└── Portfolio
-    └── Program
-        ├── Epics
-        ├── Versioned plan DAG
-        ├── Milestone contracts spanning selected epics
-        ├── Slices belonging to an epic
-        │   ├── Implementation attempts
-        │   └── Review rounds and review attempts
-        ├── Feedback items linked to decisions and corrective slices
-        ├── Releases containing repository/artifact vectors
-        └── Incidents affecting any of the above
-</code></pre>
+<p>Labels display ready/blocked/running/review/gate states but are not locks or sufficient acceptance evidence. On disagreement, reread authoritative objects; do not blindly replay labels. GitHub is not a consistent multi-object snapshot. Revalidate prerequisites immediately before dispatch and protected effects; changed or unavailable inputs block progression.</p>
+<h3 id="deployment-profiles">Deployment profiles<a class="headerlink" href="#deployment-profiles" title="Permanent link">§</a></h3>
 <div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
 <thead>
 <tr>
-<th>Entity</th>
-<th>Meaning</th>
+<th>Profile</th>
+<th>One authoritative work graph</th>
+<th>Execution records and concurrency</th>
+<th>Adoption trigger</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Portfolio</td>
-<td>Business priorities and resource allocation across programs</td>
+<td>GitHub-native — initial</td>
+<td>GitHub Issues</td>
+<td>Attempt comments; one dispatcher; serial attempts initially</td>
+<td>Current Cubism development</td>
 </tr>
 <tr>
-<td>Program</td>
-<td>Outcome spanning time, repositories, and milestones</td>
+<td>Beads — optional later</td>
+<td>Beads with embedded Dolt, no server</td>
+<td>Separate compact attempt journal adapter, not Beads work objects; one dispatcher</td>
+<td>Offline/local work, richer graph semantics, Dolt history or GitHub independence</td>
 </tr>
 <tr>
-<td>Epic</td>
-<td>Coherent capability area; never directly executable</td>
+<td>Concurrent Beads — later</td>
+<td>Beads with Dolt server</td>
+<td>Multiple graph writers; still one Nightshift dispatcher until separately qualified</td>
+<td>Real concurrent users/processes writing the graph</td>
 </tr>
 <tr>
-<td>Milestone contract</td>
-<td>Versioned acceptance boundary with scope, evidence, authority, and permitted next actions</td>
+<td>Distributed control plane — deferred</td>
+<td>Explicitly selected GitHub or Beads backend; PostgreSQL may own the graph only after an explicit migration</td>
+<td>PostgreSQL may own runtime coordination, cross-host fencing, strict budget accounting and durable outbox</td>
+<td>Multiple active dispatchers or demonstrated safety requirements</td>
+</tr>
+</tbody>
+</table></div>
+<p>In Beads profiles, Beads owns milestones, slices, readiness, claims, discovered work, completion and replanning. GitHub mirrors, if offered, are read-only projections for topology; PR/commit facts remain native. The non-GitHub attempt-journal format is deliberately a future adapter requirement, not a reason to add a local journal today. Concurrent graph writes do not by themselves establish safe concurrent dispatchers or effect brokers.</p>
+<p>A backend migration pauses dispatch, settles effects, imports and checks topology and stable ID mappings, names the new authority in trusted configuration, then resumes. No bidirectional authoritative synchronization, dual writes or automatic graph conflict merging. Dolt history can explain a milestone's replanning; never create a Dolt branch per attempt.</p>
+<h2 id="6-work-model-and-github-capabilities">6. Work model and GitHub capabilities<a class="headerlink" href="#6-work-model-and-github-capabilities" title="Permanent link">§</a></h2>
+<p>A milestone is a parent issue with acceptance criteria and a checkpoint discussion. Optional epic parent issues group slices below it. A GitHub Milestone may group issues for UI convenience, but is not a second acceptance authority. A slice has one parent; native blocking edges describe prerequisites separately from hierarchy. A milestone integration slice is a real work item with the outcome “verify the assembled milestone,” not a dummy issue per integration attempt.</p>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Contract</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Milestone</td>
+<td>Intended integrated outcome, included slices, non-goals, acceptance and approver</td>
 </tr>
 <tr>
 <td>Slice</td>
-<td>One independently testable vertical outcome, normally implemented within one bounded session</td>
+<td>Independently testable bounded outcome, validation commands, context and dependencies</td>
 </tr>
 <tr>
 <td>Attempt</td>
-<td>One execution identity and budget allocation; may checkpoint across sessions</td>
+<td>One role assignment with fixed source/contract/policy inputs; zero or more native session references</td>
+</tr>
+<tr>
+<td>Session</td>
+<td>Executor-owned conversation/execution context; may be resumed within an attempt</td>
+</tr>
+<tr>
+<td>Candidate</td>
+<td>Exact repository/head/base identity produced by an implementation or repair attempt</td>
 </tr>
 <tr>
 <td>Review round</td>
-<td>Evaluation of one immutable candidate under one review policy</td>
+<td>Required review attempts for one candidate/input set; derived grouping, not a work item</td>
 </tr>
 <tr>
-<td>Feedback item</td>
-<td>Original human observation plus its agreed interpretation and resolution links</td>
-</tr>
-<tr>
-<td>Release</td>
-<td>Immutable vector of source revisions, artifacts, configuration, and environment intent</td>
-</tr>
-<tr>
-<td>Incident</td>
-<td>Safety, correctness, availability, access, or evidence failure requiring containment and recovery</td>
+<td>Effect</td>
+<td>Broker-authorized exact mutation with stable key, payload digest and observed result</td>
 </tr>
 </tbody>
 </table></div>
-<p>A broad outcome becomes work through:</p>
-<ol>
-<li>Capture user journeys and acceptance criteria.</li>
-<li>Map existing capabilities and constraints from evidence.</li>
-<li>Identify uncertainties and architectural decisions.</li>
-<li>Create bounded discovery slices where uncertainty prevents implementation.</li>
-<li>Propose vertical slices, dependency edges, and milestone demonstrations.</li>
-<li>Validate the DAG for cycles, missing prerequisites, scope coverage, and risk.</li>
-<li>Activate the plan within the human-approved execution envelope.</li>
-</ol>
-<p>Readiness requires satisfied dependency predicates, an immutable contract revision, defined validation, a compatible runner, sufficient reserved budget, and an open gate. Dependency predicates distinguish “source merged,” “artifact published,” and “behavior deployed.”</p>
-<p>Prioritization combines critical-path impact, business priority, feedback urgency, aging, expected duration, and available capabilities. Issue number is only a stable tie-breaker.</p>
-<p>Risk is the maximum of declared risk, deterministic path/change rules, environment impact, and detected concerns. Agents may raise risk. Lowering it requires the policy-defined authority.</p>
-<p>Material architectural decisions become versioned ADR proposals. An architecture agent may approve decisions within predelegated boundaries; changes to customer commitments, trust boundaries, or risk acceptance require the designated human authority.</p>
-<p>Replanning preserves the previous DAG and records why nodes were split, replaced, deferred, or cancelled. Completion percentages use a named plan revision and display denominator changes.</p>
-<h3 id="illustrative-slice-contract">Illustrative slice contract<a class="headerlink" href="#illustrative-slice-contract" title="Permanent link">§</a></h3>
-<p>All digests below are abbreviated examples.</p>
-<pre><code class="language-yaml">schema: factory.slice/v1
-id: slice-104
-tenant: acme
-program: delivery-pilot
-epic: recovery
-revision: 3
-outcome: An expired worker cannot publish a candidate
-scope:
-  repositories: [acme/service]
-  paths: [factory/leases/**, tests/leases/**]
-non_goals:
-  - Multi-region failover
-acceptance:
-  - id: AC1
-    behavior: Generation 7 publication is rejected after generation 8 is issued
-    verification: stale_worker_publish_test
-dependencies:
-  - slice: slice-103
-    predicate: merged
-validation:
-  commands:
-    - [&quot;pytest&quot;, &quot;tests/leases/test_stale_publish.py&quot;]
-risk: high
-policy_digest: sha256:policy7
-context:
-  - uri: evidence://adr-lease-protocol
-    digest: sha256:adr4
-budget:
-  wall_minutes: 90
-  max_usd: 30
-  max_attempts: 3
-milestone_contract: recovery-demo@2
+<p>One session may serve successive attempts through explicit continuation, but those assignments never overlap and usage is attributed by delta. A fork, role change, different candidate or replacement execution creates a new attempt ID linked to its predecessor. Resuming the same still-authorized assignment can keep its ID. Attempt counters are display values; IDs establish identity.</p>
+<h3 id="current-api-and-cli-support-checked-2026-09-13">Current API and CLI support, checked 2026-09-13<a class="headerlink" href="#current-api-and-cli-support-checked-2026-09-13" title="Permanent link">§</a></h3>
+<p>GitHub has native <a href="https://docs.github.com/en/rest/issues/sub-issues">sub-issue REST endpoints</a> and <a href="https://docs.github.com/en/rest/issues/issue-dependencies">blocking dependency endpoints</a>. Relationship writes require Issues write access. API bodies use the issue's database <code>id</code>, not its repository-local issue number.</p>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>REST route relative to <code>/repos/{owner}/{repo}</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>List/add children</td>
+<td><code>GET/POST /issues/{number}/sub_issues</code></td>
+</tr>
+<tr>
+<td>Read parent</td>
+<td><code>GET /issues/{number}/parent</code></td>
+</tr>
+<tr>
+<td>Remove child</td>
+<td><code>DELETE /issues/{number}/sub_issue</code> with <code>sub_issue_id</code></td>
+</tr>
+<tr>
+<td>List/add blockers</td>
+<td><code>GET/POST /issues/{number}/dependencies/blocked_by</code></td>
+</tr>
+<tr>
+<td>List dependents</td>
+<td><code>GET /issues/{number}/dependencies/blocking</code></td>
+</tr>
+<tr>
+<td>Remove blocker</td>
+<td><code>DELETE /issues/{number}/dependencies/blocked_by/{issue_id}</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>The current <a href="https://cli.github.com/manual/gh_issue_edit">gh issue edit manual</a> exposes <code>--parent</code>, <code>--add-sub-issue</code>, <code>--add-blocked-by</code>, <code>--add-blocking</code> and corresponding remove flags. Use these or <code>gh api</code>; do not assume an extension is necessary. The inspection environment had no <code>gh</code> binary, so flags were verified against the current manual rather than executed. Installation qualification must probe local CLI/host capabilities; older CLI can use REST, while a host lacking native relationships is unsupported by this initial profile rather than silently replaced with parsed checklists.</p>
+<p>Illustrative broker operations, not commands executed in this revision:</p>
+<pre><code class="language-bash">gh issue edit 123 --repo OWNER/REPO --parent 100
+gh issue edit 123 --repo OWNER/REPO --add-blocked-by 122
+gh api --paginate repos/OWNER/REPO/issues/123/dependencies/blocked_by
 </code></pre>
-<p>Paths guide scope enforcement but do not prove semantic scope. A diff touching an allowed file can still exceed the contract; independent acceptance review addresses that remaining judgment.</p>
+<p>Paginate graph, comments and PR reads completely for the selected milestone; missing pages or inaccessible blockers mean unknown readiness. Detect cycles, orphan slices and inconsistent parentage. Native blocking edges alone do not prove a closed prerequisite succeeded: its contract declares the predicate (normally merged-and-verified), and cancelled/superseded work cannot satisfy it without authorized replanning. Labels and assignment provide human visibility, not mutual exclusion.</p>
+<h3 id="scope-and-replanning">Scope and replanning<a class="headerlink" href="#scope-and-replanning" title="Permanent link">§</a></h3>
+<p>Retain the current Outcome, Scope, Acceptance criteria, Validation, Demo, Non-goals and Context fields. Add native dependencies, milestone association, limits and contract revision. At dispatch record the exact contract digest and material criteria in the allocation comment; a bare digest cannot reconstruct an edited issue body.</p>
+<p>Retries, review requests, context exhaustion and provider failover produce attempts on the same slice. Create/split/replace slices only for changed intended work, such as a newly discovered prerequisite or a broader acceptance requirement. Record a compact replanning comment on the parent with stable plan-change ID, reason, old/new nodes and edges, authority and changed criteria. Pause affected work during its multi-call mutation; restart completes or flags a partially applied change before scheduling it. The current graph is authoritative; comments explain its evolution without claiming immutable database history.</p>
+<p>Within approved scope, bounded replanning can proceed automatically. Scope expansion or weaker criteria require the designated human. Display plan revisions and denominator changes so splitting work does not manufacture progress.</p>
 <hr />
 <p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="01-product-and-prototype.html">Previous</a> · <a href="03-durable-state-machines.html">Next</a></p></article>
       <nav class="bottom-nav" aria-label="Reading shortcuts"><a href="README.html">Reading guide</a><a href="#content">Back to top ↑</a></nav>

@@ -1,219 +1,108 @@
 # Nightshift — Architecture and work model
 
 [Overview](index.html) · [Document index](README.md) · [Previous](01-product-and-prototype.md) · [Next](03-durable-state-machines.md)
-> Design proposal · Packaged 2026-09-09 · Original sections 5–6 preserved below. Repository findings refer to the inspected checkpoint, not live project state.
 
-## 5. Recommended reference architecture
+> Revised design proposal · 2026-09-13 · GitHub-native, single-dispatcher profile. No Nightshift implementation is included.
 
-Use a modular control-plane application with a small number of separately privileged services. Avoid premature microservice decomposition, while separating credentials and execution trust boundaries from the beginning.
+## 5. Recommended architecture
 
-Concrete hosted defaults:
-
-- **Python control-plane services**, preserving the prototype’s language and enabling incremental extraction.
-- **PostgreSQL** for authoritative contracts, aggregate state, leases, operation records, budgets, inbox/outbox, and evidence indexes.
-- **Temporal Cloud** for durable orchestration and timers; self-hosted Temporal for deployments whose residency requirements exclude the managed service.
-- **OPA** for authorization and policy evaluation, behind a constrained customer policy schema.
-- **S3-compatible object storage** for content-addressed artifacts; AWS S3 and KMS for the initial hosted deployment.
-- **React/TypeScript UI**, REST/OpenAPI, event streaming, and a thin CLI.
-- **Managed containers for trusted control services**; ephemeral VMs for untrusted execution.
-- **GitHub first**, with repository, tracker, CI, and deployment adapters kept separate.
-- **OpenTelemetry** for operational telemetry; separate immutable audit evidence.
-- Existing customer CI remains supported. Nightshift supplies a verification runner when the existing CI cannot meet the contract.
-
-Temporal should coordinate work, not become a second source of business truth. Each activity invokes an idempotent domain command against PostgreSQL. Workflow history records orchestration; committed domain events establish authority. Temporal’s own architecture requires deterministic workflow code and idempotent or non-retryable activities. [Temporal architecture](https://github.com/temporalio/temporal/blob/main/docs/architecture/README.md)
-
-### Component and trust-boundary diagram
+Use a small Python CLI/process, building on the repository's existing tooling. Modules within that process perform GitHub reads, scheduling, reconciliation, policy validation, executor adaptation and trusted effects. No independently deployed Nightshift service is needed.
 
 ```mermaid
-flowchart TB
-  subgraph Customer["Customer authority"]
-    Human["Product owner / approver"]
-    IdP["Customer identity provider"]
-    UI["UI / API / CLI"]
-  end
-
-  subgraph Control["Nightshift control plane"]
-    API["Contract and command API"]
-    DB["PostgreSQL: state, events, leases, budgets, outbox"]
-    WF["Temporal workflows"]
-    Scheduler["Scheduler"]
-    Policy["Policy evaluator"]
-    Gateway["Agent gateway / harness adapters"]
-    ReadModel["Cockpit and evidence projections"]
-    Costs["Cost accounting"]
-    HumanReview["Milestone and decision service"]
-  end
-
-  subgraph Security["Separately privileged authorization boundary"]
-    Authority["Identity / policy authority"]
-    Effects["Effect broker: source and deployment writes"]
-    Signers["Role-scoped attestation signers"]
-    Keys["KMS / trust roots"]
-  end
-
-  subgraph Execution["Execution plane: tenant-isolated"]
-    Impl["Implementation VM"]
-    Review["Independent review VM"]
-    Verify["Verification / build VM"]
-    Demo["Demo environment"]
-  end
-
-  subgraph Evidence["Evidence and audit boundary"]
-    Store["Content-addressed artifacts"]
-    Audit["Append-only audit archive"]
-    OTel["Observability pipeline"]
-  end
-
-  subgraph External["External systems"]
-    Repo["Source host"]
-    Tracker["Tracker"]
-    CI["Customer CI"]
-    Models["Approved model providers"]
-    Deploy["Customer environments"]
-  end
-
-  Human --> UI
-  IdP --> API
-  UI --> API
-  API --> DB
-  DB --> WF
-  WF --> API
-  WF --> Scheduler
-  Scheduler --> Gateway
-  Gateway --> Impl
-  Gateway --> Review
-  Gateway --> Verify
-  Gateway --> Models
-  API --> Policy
-  Policy --> Authority
-  Authority --> Keys
-  Impl --> Effects
-  Effects --> Repo
-  Effects --> Tracker
-  Effects --> Deploy
-  Review --> Signers
-  Verify --> Signers
-  Signers --> Store
-  CI --> Store
-  Verify --> Demo
-  Demo --> Store
-  DB --> ReadModel
-  Store --> ReadModel
-  DB --> HumanReview
-  HumanReview --> Human
-  HumanReview --> Signers
-  DB --> Costs
-  DB --> Audit
-  Store --> Audit
-  Gateway --> OTel
-  Effects --> OTel
+flowchart TD
+  H["Human and GitHub UI"] --> G["Issues: work graph and attempt comments"]
+  G <--> D["One dispatcher: schedule and reconcile"]
+  P["Protected policy and trusted code"] --> D
+  D --> A["Executor adapters"]
+  A <--> E["Executors: sessions and workspaces"]
+  E -->|"Results and effect requests"| B["In-process trusted broker"]
+  D --> B
+  P --> B
+  B --> G
+  B <--> S["GitHub: commits, PRs, CI and merge"]
+  A -.->|"Optional normalized events"| C["Cubism and telemetry"]
 ```
 
-Arrows from runners to privileged services represent authenticated requests, not possession of source-host or deployment credentials.
+The executor is a separate restricted process/workspace. The broker is in the trusted dispatcher's process, not the agent's process. Arrows from executors convey requests, never reusable GitHub credentials. Telemetry export has bounded buffering and no awaited acknowledgement in scheduling or effects.
 
-### Deployment modes
+### Sources of truth
 
-| Mode | Control plane | Execution and code | Assurance boundary |
+| Fact | Authoritative record | Reconstructible view |
+|---|---|---|
+| Milestone, epic, slice and dependencies | GitHub Issues, native parent/sub-issue and blocking edges | Readiness list and graph snapshot |
+| Scope and acceptance criteria | Issue contract and broker-recorded revision/digest | Attempt's pinned contract summary |
+| Attempt allocation, outcome and effect intent | Broker-authored structured issue comments | In-memory attempt index |
+| Session contents and continuation | Executor-native store | Opaque session reference in comment |
+| Candidate | Repository identity plus full commit SHA and retained branch | Selected-candidate reference in comment/PR |
+| Verification | Trusted workflow run, Check or status for exact subject | Durable summary in attempt comment |
+| Merge | GitHub PR merge state and resulting Git objects | Issue completion and milestone report |
+| Policy | Protected/default-branch version or explicit trusted source | Pinned policy SHA/digest per attempt |
+| Human decision | Authorized human's GitHub comment identifying exact checkpoint | Gate labels |
+| Cost/outcome analytics | Normalized observed usage with provenance | Cubism aggregates; never work authority |
+
+Labels display ready/blocked/running/review/gate states but are not locks or sufficient acceptance evidence. On disagreement, reread authoritative objects; do not blindly replay labels. GitHub is not a consistent multi-object snapshot. Revalidate prerequisites immediately before dispatch and protected effects; changed or unavailable inputs block progression.
+
+### Deployment profiles
+
+| Profile | One authoritative work graph | Execution records and concurrency | Adoption trigger |
 |---|---|---|---|
-| Hosted SaaS | Nightshift-operated | Nightshift ephemeral runners | Nightshift operates the full execution trust boundary |
-| Hybrid | Nightshift-operated | Customer runners and optional customer artifact store | Customer controls runner integrity; residency rules govern metadata and model traffic |
-| Customer VPC | Dedicated managed deployment | Customer VPC | Same software, tenant-specific infrastructure and keys |
-| Self-hosted enterprise | Customer-operated | Customer-operated | Customer owns operations and trust roots; support contract defines responsibilities |
+| GitHub-native — initial | GitHub Issues | Attempt comments; one dispatcher; serial attempts initially | Current Cubism development |
+| Beads — optional later | Beads with embedded Dolt, no server | Separate compact attempt journal adapter, not Beads work objects; one dispatcher | Offline/local work, richer graph semantics, Dolt history or GitHub independence |
+| Concurrent Beads — later | Beads with Dolt server | Multiple graph writers; still one Nightshift dispatcher until separately qualified | Real concurrent users/processes writing the graph |
+| Distributed control plane — deferred | Explicitly selected GitHub or Beads backend; PostgreSQL may own the graph only after an explicit migration | PostgreSQL may own runtime coordination, cross-host fencing, strict budget accounting and durable outbox | Multiple active dispatchers or demonstrated safety requirements |
 
-A customer runner connects outbound using mutual authentication. Jobs carry signed manifests and short-lived capabilities. A network partition permits bounded local computation until its execution allowance expires; it does not permit offline merges or new privileged effects.
+In Beads profiles, Beads owns milestones, slices, readiness, claims, discovered work, completion and replanning. GitHub mirrors, if offered, are read-only projections for topology; PR/commit facts remain native. The non-GitHub attempt-journal format is deliberately a future adapter requirement, not a reason to add a local journal today. Concurrent graph writes do not by themselves establish safe concurrent dispatchers or effect brokers.
 
-## 6. Domain model and work planning
+A backend migration pauses dispatch, settles effects, imports and checks topology and stable ID mappings, names the new authority in trusted configuration, then resumes. No bidirectional authoritative synchronization, dual writes or automatic graph conflict merging. Dolt history can explain a milestone's replanning; never create a Dolt branch per attempt.
 
-The hierarchy is:
+## 6. Work model and GitHub capabilities
 
-```text
-Tenant
-└── Portfolio
-    └── Program
-        ├── Epics
-        ├── Versioned plan DAG
-        ├── Milestone contracts spanning selected epics
-        ├── Slices belonging to an epic
-        │   ├── Implementation attempts
-        │   └── Review rounds and review attempts
-        ├── Feedback items linked to decisions and corrective slices
-        ├── Releases containing repository/artifact vectors
-        └── Incidents affecting any of the above
-```
+A milestone is a parent issue with acceptance criteria and a checkpoint discussion. Optional epic parent issues group slices below it. A GitHub Milestone may group issues for UI convenience, but is not a second acceptance authority. A slice has one parent; native blocking edges describe prerequisites separately from hierarchy. A milestone integration slice is a real work item with the outcome “verify the assembled milestone,” not a dummy issue per integration attempt.
 
-| Entity | Meaning |
+| Concept | Contract |
 |---|---|
-| Portfolio | Business priorities and resource allocation across programs |
-| Program | Outcome spanning time, repositories, and milestones |
-| Epic | Coherent capability area; never directly executable |
-| Milestone contract | Versioned acceptance boundary with scope, evidence, authority, and permitted next actions |
-| Slice | One independently testable vertical outcome, normally implemented within one bounded session |
-| Attempt | One execution identity and budget allocation; may checkpoint across sessions |
-| Review round | Evaluation of one immutable candidate under one review policy |
-| Feedback item | Original human observation plus its agreed interpretation and resolution links |
-| Release | Immutable vector of source revisions, artifacts, configuration, and environment intent |
-| Incident | Safety, correctness, availability, access, or evidence failure requiring containment and recovery |
+| Milestone | Intended integrated outcome, included slices, non-goals, acceptance and approver |
+| Slice | Independently testable bounded outcome, validation commands, context and dependencies |
+| Attempt | One role assignment with fixed source/contract/policy inputs; zero or more native session references |
+| Session | Executor-owned conversation/execution context; may be resumed within an attempt |
+| Candidate | Exact repository/head/base identity produced by an implementation or repair attempt |
+| Review round | Required review attempts for one candidate/input set; derived grouping, not a work item |
+| Effect | Broker-authorized exact mutation with stable key, payload digest and observed result |
 
-A broad outcome becomes work through:
+One session may serve successive attempts through explicit continuation, but those assignments never overlap and usage is attributed by delta. A fork, role change, different candidate or replacement execution creates a new attempt ID linked to its predecessor. Resuming the same still-authorized assignment can keep its ID. Attempt counters are display values; IDs establish identity.
 
-1. Capture user journeys and acceptance criteria.
-2. Map existing capabilities and constraints from evidence.
-3. Identify uncertainties and architectural decisions.
-4. Create bounded discovery slices where uncertainty prevents implementation.
-5. Propose vertical slices, dependency edges, and milestone demonstrations.
-6. Validate the DAG for cycles, missing prerequisites, scope coverage, and risk.
-7. Activate the plan within the human-approved execution envelope.
+### Current API and CLI support, checked 2026-09-13
 
-Readiness requires satisfied dependency predicates, an immutable contract revision, defined validation, a compatible runner, sufficient reserved budget, and an open gate. Dependency predicates distinguish “source merged,” “artifact published,” and “behavior deployed.”
+GitHub has native [sub-issue REST endpoints](https://docs.github.com/en/rest/issues/sub-issues) and [blocking dependency endpoints](https://docs.github.com/en/rest/issues/issue-dependencies). Relationship writes require Issues write access. API bodies use the issue's database `id`, not its repository-local issue number.
 
-Prioritization combines critical-path impact, business priority, feedback urgency, aging, expected duration, and available capabilities. Issue number is only a stable tie-breaker.
+| Operation | REST route relative to `/repos/{owner}/{repo}` |
+|---|---|
+| List/add children | `GET/POST /issues/{number}/sub_issues` |
+| Read parent | `GET /issues/{number}/parent` |
+| Remove child | `DELETE /issues/{number}/sub_issue` with `sub_issue_id` |
+| List/add blockers | `GET/POST /issues/{number}/dependencies/blocked_by` |
+| List dependents | `GET /issues/{number}/dependencies/blocking` |
+| Remove blocker | `DELETE /issues/{number}/dependencies/blocked_by/{issue_id}` |
 
-Risk is the maximum of declared risk, deterministic path/change rules, environment impact, and detected concerns. Agents may raise risk. Lowering it requires the policy-defined authority.
+The current [gh issue edit manual](https://cli.github.com/manual/gh_issue_edit) exposes `--parent`, `--add-sub-issue`, `--add-blocked-by`, `--add-blocking` and corresponding remove flags. Use these or `gh api`; do not assume an extension is necessary. The inspection environment had no `gh` binary, so flags were verified against the current manual rather than executed. Installation qualification must probe local CLI/host capabilities; older CLI can use REST, while a host lacking native relationships is unsupported by this initial profile rather than silently replaced with parsed checklists.
 
-Material architectural decisions become versioned ADR proposals. An architecture agent may approve decisions within predelegated boundaries; changes to customer commitments, trust boundaries, or risk acceptance require the designated human authority.
+Illustrative broker operations, not commands executed in this revision:
 
-Replanning preserves the previous DAG and records why nodes were split, replaced, deferred, or cancelled. Completion percentages use a named plan revision and display denominator changes.
-
-### Illustrative slice contract
-
-All digests below are abbreviated examples.
-
-```yaml
-schema: factory.slice/v1
-id: slice-104
-tenant: acme
-program: delivery-pilot
-epic: recovery
-revision: 3
-outcome: An expired worker cannot publish a candidate
-scope:
-  repositories: [acme/service]
-  paths: [factory/leases/**, tests/leases/**]
-non_goals:
-  - Multi-region failover
-acceptance:
-  - id: AC1
-    behavior: Generation 7 publication is rejected after generation 8 is issued
-    verification: stale_worker_publish_test
-dependencies:
-  - slice: slice-103
-    predicate: merged
-validation:
-  commands:
-    - ["pytest", "tests/leases/test_stale_publish.py"]
-risk: high
-policy_digest: sha256:policy7
-context:
-  - uri: evidence://adr-lease-protocol
-    digest: sha256:adr4
-budget:
-  wall_minutes: 90
-  max_usd: 30
-  max_attempts: 3
-milestone_contract: recovery-demo@2
+```bash
+gh issue edit 123 --repo OWNER/REPO --parent 100
+gh issue edit 123 --repo OWNER/REPO --add-blocked-by 122
+gh api --paginate repos/OWNER/REPO/issues/123/dependencies/blocked_by
 ```
 
-Paths guide scope enforcement but do not prove semantic scope. A diff touching an allowed file can still exceed the contract; independent acceptance review addresses that remaining judgment.
+Paginate graph, comments and PR reads completely for the selected milestone; missing pages or inaccessible blockers mean unknown readiness. Detect cycles, orphan slices and inconsistent parentage. Native blocking edges alone do not prove a closed prerequisite succeeded: its contract declares the predicate (normally merged-and-verified), and cancelled/superseded work cannot satisfy it without authorized replanning. Labels and assignment provide human visibility, not mutual exclusion.
+
+### Scope and replanning
+
+Retain the current Outcome, Scope, Acceptance criteria, Validation, Demo, Non-goals and Context fields. Add native dependencies, milestone association, limits and contract revision. At dispatch record the exact contract digest and material criteria in the allocation comment; a bare digest cannot reconstruct an edited issue body.
+
+Retries, review requests, context exhaustion and provider failover produce attempts on the same slice. Create/split/replace slices only for changed intended work, such as a newly discovered prerequisite or a broader acceptance requirement. Record a compact replanning comment on the parent with stable plan-change ID, reason, old/new nodes and edges, authority and changed criteria. Pause affected work during its multi-call mutation; restart completes or flags a partially applied change before scheduling it. The current graph is authoritative; comments explain its evolution without claiming immutable database history.
+
+Within approved scope, bounded replanning can proceed automatically. Scope expansion or weaker criteria require the designated human. Display plan revisions and denominator changes so splitting work does not manufacture progress.
 
 ---
 

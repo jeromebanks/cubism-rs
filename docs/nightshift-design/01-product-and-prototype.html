@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Nightshift — Product, prototype assessment, and principles — complete design draft, with source and section navigation.">
-  <meta name="source-sha256" content="ce932fc7c3f2dac3a24311fcfdb15756c25fac032bc308df93981be2ba0d9385">
+  <meta name="source-sha256" content="801517f94e828ce2f959bec801a606990ed4120eb029d4883a8070bb939d8647">
   <title>Nightshift — Product, prototype assessment, and principles</title>
   <link rel="stylesheet" href="reader.css">
   <script type="module" src="reader.js"></script>
@@ -14,21 +14,20 @@
   <header class="masthead"><a href="index.html">NIGHTSHIFT / Design notebook</a><span>Draft for review · Proposed architecture, not an implemented platform</span></header>
   <div class="layout">
     <aside aria-label="Document navigation"><div>
-      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html" aria-current="page">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Durable events and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and adversarial review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestone contracts and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Migration roadmap, risks, and architectural decisions</a></li></ol></nav>
+      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html" aria-current="page">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Attempt journal and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and independent review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestones and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Roadmap, risks, and architectural decisions</a></li></ol></nav>
       <details open><summary>On this page</summary><nav aria-label="Page sections"><div class="toc">
 <ul>
-<li><a href="#1-executive-thesis-and-product-definition">1. Executive thesis and product definition</a><ul>
-<li><a href="#ownership-boundary">Ownership boundary</a></li>
-</ul>
-</li>
+<li><a href="#1-product-definition-and-initial-boundary">1. Product definition and initial boundary</a></li>
 <li><a href="#2-evidence-grounded-assessment-of-the-prototype">2. Evidence-grounded assessment of the prototype</a><ul>
+<li><a href="#current-design-branch-inspection">Current design-branch inspection</a></li>
+<li><a href="#preserved-historical-assessment">Preserved historical assessment</a></li>
 <li><a href="#confirmed-findings">Confirmed findings</a></li>
 <li><a href="#validation-performed-and-its-limits">Validation performed and its limits</a></li>
 <li><a href="#historical-lessons">Historical lessons</a></li>
 </ul>
 </li>
 <li><a href="#3-retain-repair-replace-add">3. Retain / repair / replace / add</a></li>
-<li><a href="#4-product-principles-and-invariants">4. Product principles and invariants</a></li>
+<li><a href="#4-required-invariants">4. Required invariants</a></li>
 </ul>
 </div>
 </nav></details>
@@ -38,68 +37,60 @@
       <article><h1 id="nightshift-product-prototype-assessment-and-principles">Nightshift — Product, prototype assessment, and principles<a class="headerlink" href="#nightshift-product-prototype-assessment-and-principles" title="Permanent link">§</a></h1>
 <p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="02-architecture-and-work-model.html">Next</a></p>
 <blockquote>
-<p>Design proposal · Packaged 2026-09-09 · Original sections 1–4 preserved below. Repository findings refer to the inspected checkpoint, not live project state.</p>
+<p>Revised design proposal · 2026-09-13 · GitHub-native, single-dispatcher profile. No Nightshift implementation is included.</p>
 </blockquote>
-<p>This design recommends a service that owns the execution of software programs from agreed intent through verified delivery and human milestone acceptance. Its central product is <strong>reliable delegation with inspectable evidence</strong>: a technical leader can authorize an outcome, let bounded work proceed across sessions and agents, and review coherent results without supervising every pull request.</p>
-<p>The Cubism prototype provides a useful operating model and reusable product assets. It does not yet provide the identity, concurrency, recovery, or authorization guarantees required for unattended operation across customers.</p>
-<p>I read <code>astra-sdlc.txt</code> completely, inspected the specified branch and its changes against <code>main</code>, examined the requested workflow materials and selected historical evidence, and ran non-mutating diagnostics. No repository files, issues, comments, branches, or GitHub settings were changed.</p>
-<h2 id="1-executive-thesis-and-product-definition">1. Executive thesis and product definition<a class="headerlink" href="#1-executive-thesis-and-product-definition" title="Permanent link">§</a></h2>
-<p>Nightshift is a <strong>governed software delivery service</strong> for programs that exceed the capacity of one coding session. Humans establish outcomes, constraints, budgets, and acceptance contracts. Nightshift plans and executes bounded slices, commissions independent reviews, coordinates integration, maintains evidence, and presents milestones for human acceptance.</p>
-<p>“Autonomous” means the service can select and complete authorized work, recover from routine failures, and continue across sessions without new human instructions. This authority is limited by an explicit execution envelope:</p>
-<ul>
-<li>Allowed repositories, environments, tools, networks, and secrets.</li>
-<li>Approved outcome and scope.</li>
-<li>Risk limits and required verification.</li>
-<li>Time, spend, concurrency, and retry budgets.</li>
-<li>Milestone boundaries and exception authority.</li>
-</ul>
-<p>“Dark” means ordinary delivery does not require a human operator. Every material action remains attributable and observable. A stopped factory must explain whether it is waiting for capacity, evidence, access, a dependency, or a human decision.</p>
-<p>The initial customer is a small engineering organization with maintained repositories, functioning CI, and a technical leader willing to delegate a bounded backlog. Start with internal tools, developer infrastructure, and well-tested backend changes. Do not initially promise unattended operation on arbitrary legacy systems or safety-critical software.</p>
-<h3 id="ownership-boundary">Ownership boundary<a class="headerlink" href="#ownership-boundary" title="Permanent link">§</a></h3>
+<h2 id="1-product-definition-and-initial-boundary">1. Product definition and initial boundary<a class="headerlink" href="#1-product-definition-and-initial-boundary" title="Permanent link">§</a></h2>
+<p>Nightshift is an open-source orchestration tool for an individual developer or small team. Its first purpose is to unblock Cubism development with a modest improvement over the existing issue/PR SDLC. A milestone can require multiple dependency-aware slices, and each slice can require multiple implementation, review, repair, and integration attempts across sessions. Humans define direction and accept coherent outcomes; they need not supervise each passing PR.</p>
+<p>The default is one foreground dispatcher on an existing developer machine, existing GitHub Issues/PRs/CI, and installed executors. It requires no PostgreSQL service, Dolt server, SQLite database, Temporal cluster, custom distributed control plane, or persistent Nightshift infrastructure. Local workspaces, disposable caches, and executor-owned session files are allowed; they are not an authoritative Nightshift database. The dispatcher need not run while waiting for a human: restart reconstructs work from GitHub and executor records.</p>
+<p>The initial authority envelope is one repository, bounded milestone scope, approved executors/models, finite attempt/time/spend limits, independent review, verified integration, merge, and human milestone acceptance. Release and deployment are disabled unless separately authorized by protected policy. Multi-repository releases and hosted enterprise operations are deferred.</p>
 <div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
 <thead>
 <tr>
-<th>Party</th>
-<th>Owns</th>
+<th>Owner</th>
+<th>Responsibility</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Customer</td>
-<td>Product direction, repository contents, acceptance authority, risk appetite, credentials granted, deployment ownership, IP</td>
+<td>Human</td>
+<td>Intended outcome, scope changes beyond delegation, protected policy, milestone acceptance</td>
 </tr>
 <tr>
-<td>Nightshift</td>
-<td>Contracts, scheduling, execution coordination, policy enforcement, agent identities, review assignment, evidence, recovery, spend accounting</td>
+<td>GitHub Issues</td>
+<td>Authoritative milestone/slice topology, dependencies, assignment, discovered work, replanning and completion</td>
 </tr>
 <tr>
-<td>Source host</td>
-<td>Git objects, refs, PR records, source-host permissions and enforcement</td>
+<td>Issue comments</td>
+<td>Compact attempt records, decisions, protected-effect intents and outcome summaries</td>
 </tr>
 <tr>
-<td>Tracker</td>
-<td>Customer-facing planning records; synchronized views of factory work</td>
+<td>Git and GitHub PRs/Checks/statuses</td>
+<td>Candidate identity, commit-specific verification, integration and merge facts</td>
 </tr>
 <tr>
-<td>CI/build system</td>
-<td>Execution of identified verification/build jobs and their native records</td>
+<td>Executor</td>
+<td>Native sessions, transcripts, context, checkpoints, permission interaction and detailed tool events</td>
 </tr>
 <tr>
-<td>Model provider</td>
-<td>Model inference and provider-side processing under the customer’s permitted terms</td>
+<td>Nightshift process</td>
+<td>Readiness, bounded scheduling, adapter coordination, separate review and in-process trusted effects</td>
 </tr>
 <tr>
-<td>Human approver</td>
-<td>Acceptance, rejection, risk acceptance, policy exceptions within assigned authority</td>
+<td>Cubism</td>
+<td>Asynchronous analytics; never scheduling or acceptance authority</td>
 </tr>
 </tbody>
 </table></div>
-<p>Nightshift does not infer production deployment authority from permission to implement or merge. Milestone acceptance, source integration, release creation, and deployment are separate actions.</p>
-<p>Initial assumptions: GitHub is the first source adapter; Linux is the first runner platform; customers permit selected external model providers; production deployment requires an explicit environment policy. These assumptions support a complete first design and remain revisable.</p>
 <h2 id="2-evidence-grounded-assessment-of-the-prototype">2. Evidence-grounded assessment of the prototype<a class="headerlink" href="#2-evidence-grounded-assessment-of-the-prototype" title="Permanent link">§</a></h2>
-<p>The checked-out branch is <code>chore/checkpoint-sdlc-worktree-state</code>, at <code>0cbaf2d3c92ea30eafe507a5460894f5322ccc69</code>. Local <code>main</code> is <code>1ae95dd9fdfb56febf463c3fd5601ddafbeac4d0</code>, matching the brief.</p>
+<h3 id="current-design-branch-inspection">Current design-branch inspection<a class="headerlink" href="#current-design-branch-inspection" title="Permanent link">§</a></h3>
+<p>This revision starts from <code>docs/nightshift-design-draft</code> at <code>231a161f06a354f34b1c6184a66a813f3d84f8c0</code>. All eight chapters, the guide, overview, generated reading editions, and renderer were inspected. The repository already has portable slice contracts, milestone manifests, labels, <code>scripts/sdlc.py</code>, and a static project cockpit. It has no implemented Nightshift kernel requiring a database migration.</p>
+<p>Source inspection at this branch confirms the relevant old construction problems remain: <code>command_merge</code> references undefined <code>add</code>/<code>remove</code>; receipts accept any nonempty claimed reviewer/author and any historical pass for the head; check names collapse issuer identity; claim uses absence-then-push; and enforcement/configuration comes from the checkout. These are future repair requirements, not fixes performed here. See <a href="https://github.com/jeromebanks/cubism-rs/blob/231a161f06a354f34b1c6184a66a813f3d84f8c0/scripts/sdlc.py">the inspected script</a> and <a href="https://github.com/jeromebanks/cubism-rs/blob/231a161f06a354f34b1c6184a66a813f3d84f8c0/SDLC.md">existing SDLC</a>.</p>
+<p>The existing SDLC's one-session slice rule is a sizing heuristic to revise during implementation: a retry or exhausted context does not itself create new intended work. Its branch-claim procedure must not become Nightshift's ownership protocol. This documentation revision does not activate or modify that repository delivery policy.</p>
+<h3 id="preserved-historical-assessment">Preserved historical assessment<a class="headerlink" href="#preserved-historical-assessment" title="Permanent link">§</a></h3>
+<p>The following findings and diagnostic results are from the earlier checkpoint, retained with their original pinned evidence. They are not claims of new runtime testing or live GitHub configuration verification.</p>
+<p>The earlier assessment inspected <code>chore/checkpoint-sdlc-worktree-state</code>, at <code>0cbaf2d3c92ea30eafe507a5460894f5322ccc69</code>. Its local <code>main</code> was <code>1ae95dd9fdfb56febf463c3fd5601ddafbeac4d0</code>, matching the brief.</p>
 <p>The checkpoint changes 32 files, with 2,726 insertions and 441 deletions. The substantive transition is from the large historical time-series skill to portable instructions, deterministic Python tooling, issue templates, and human-facing HTML.</p>
-<p>The only untracked file before and after inspection was <code>astra-sdlc.txt</code>.</p>
+<p>That earlier assessment reported its only untracked file as <code>astra-sdlc.txt</code>.</p>
 <h3 id="confirmed-findings">Confirmed findings<a class="headerlink" href="#confirmed-findings" title="Permanent link">§</a></h3>
 <div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
 <thead>
@@ -197,7 +188,7 @@
 </ol>
 <p>Git distinguishes an already-up-to-date ref from a newly created ref; the script accepts command success without checking exclusive acquisition. This conclusion follows from the code and documented push semantics; I did not perform a remote race experiment. <a href="https://git-scm.com/docs/git-push">Git push documentation</a></p>
 <h3 id="validation-performed-and-its-limits">Validation performed and its limits<a class="headerlink" href="#validation-performed-and-its-limits" title="Permanent link">§</a></h3>
-<p>All eight existing SDLC unit tests passed. Additional in-memory checks produced:</p>
+<p>During that earlier assessment, all eight existing SDLC unit tests passed. Additional in-memory checks produced:</p>
 <pre><code class="language-text">self-authored receipt gate errors: []
 pass then fail gate errors: []
 duplicate check names gate errors: []
@@ -210,7 +201,7 @@ external mutations attempted: 0
 <p>The local quality script can report success while skipping unavailable link and binding tools; it builds the Python binding but does not perform CI’s install/import check. That is acceptable as a local preflight if reported accurately, but cannot be treated as equivalent evidence. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/scripts/quality-gate.sh#L47">quality-gate.sh:47</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/.github/workflows/ci.yml#L141">ci.yml:141</a></p>
 <p>Live branch protections, installed Apps, provider availability, actual independent-review sessions, hosted demo behavior, and production deployment were not verified.</p>
 <h3 id="historical-lessons">Historical lessons<a class="headerlink" href="#historical-lessons" title="Permanent link">§</a></h3>
-<p>The PostScript workflow already has explicit local claim recovery with heartbeats and discussion of ABA races. It is richer than the Cubism branch claim in this respect, but remains a shared-filesystem protocol rather than a distributed lease service. Its cold-review workflow also documents stale output, wrong-worktree review, and fix-before-re-review pitfalls. <a href="https://github.com/jeromebanks/postscript_interpreter/blob/1a5bb6520dfb9fea54a0a4fe34930e9dafa5d5e7/.claude/skills/work-issue/SKILL.md#L82">PostScript work-issue:82</a>, <a href="https://github.com/jeromebanks/postscript_interpreter/blob/1a5bb6520dfb9fea54a0a4fe34930e9dafa5d5e7/.claude/skills/work-issue/SKILL.md#L553">review:553</a></p>
+<p>The PostScript workflow already has explicit local claim recovery with heartbeats and discussion of ABA races. It is richer than the Cubism branch claim in this respect, but remains a shared-filesystem protocol without establishing cross-host ownership. Its cold-review workflow also documents stale output, wrong-worktree review, and fix-before-re-review pitfalls. <a href="https://github.com/jeromebanks/postscript_interpreter/blob/1a5bb6520dfb9fea54a0a4fe34930e9dafa5d5e7/.claude/skills/work-issue/SKILL.md#L82">PostScript work-issue:82</a>, <a href="https://github.com/jeromebanks/postscript_interpreter/blob/1a5bb6520dfb9fea54a0a4fe34930e9dafa5d5e7/.claude/skills/work-issue/SKILL.md#L553">review:553</a></p>
 <p>The historical Cubism process contributed especially valuable evidence discipline: distinguish what a test proves, what it does not prove, and what was deferred. The selected Phase 20 handoff demonstrates this concretely, including its distinction between confirmed and unexplained formatting behavior. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/TIMESERIES_PHASE_20_HANDOFF.md#L195">Phase 20:195</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/TIMESERIES_PHASE_20_HANDOFF.md#L240">limitations:240</a></p>
 <p>The roadmap also distinguishes completed tracked milestones from completion of the broader specification. Preserve that distinction in the product. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/TIMESERIES_ROADMAP.md#L38">TIMESERIES_ROADMAP.md:38</a></p>
 <p>The retrospective documents the earlier absence of cold review on every slice; it is historical evidence, not proof of the current review posture. <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/sdlc-process-notes.md#L173">sdlc-process-notes.md:173</a></p>
@@ -218,113 +209,72 @@ external mutations attempted: 0
 <div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
 <thead>
 <tr>
-<th>Existing component</th>
-<th>Decision</th>
-<th>Product treatment</th>
+<th>Existing asset or assumption</th>
+<th>Disposition</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Epic → bounded slice → milestone model</td>
+<td>Epic, slice, feedback and milestone contracts</td>
+<td>Retain; add native dependencies and multiple attempts per slice</td>
+</tr>
+<tr>
+<td>Acceptance criteria, non-goals, validation and “does not prove” fields</td>
 <td>Retain</td>
-<td>Extend into versioned contracts and dependency graphs</td>
 </tr>
 <tr>
-<td>Scope, non-goals, acceptance, validation, context fields</td>
-<td>Retain</td>
-<td>Convert templates into schema-backed contracts</td>
+<td>Quality commands and report templates</td>
+<td>Reuse behind trusted validation; do not equate issue closure with evidence</td>
 </tr>
 <tr>
-<td>Portable agent instructions and thin harness entry points</td>
-<td>Retain</td>
-<td>Package as versioned execution guidance; never as authority</td>
+<td>Branch-as-claim and ad hoc receipt authorization</td>
+<td>Replace with one dispatcher's assignment and broker-validated session/role binding</td>
 </tr>
 <tr>
-<td>“Does not prove” evidence discipline</td>
-<td>Retain</td>
-<td>Required verification limitation fields</td>
+<td>Candidate-relative policy</td>
+<td>Load trusted policy and broker code independently of the candidate</td>
 </tr>
 <tr>
-<td>Quality-gate command catalog</td>
-<td>Retain and wrap</td>
-<td>Run inside isolated runners with structured results and provenance</td>
+<td>Tracker as a synchronized projection of internal state</td>
+<td>Delete; GitHub is the initial authoritative work graph</td>
 </tr>
 <tr>
-<td>Current merge and receipt logic</td>
-<td>Repair for dogfood, then replace</td>
-<td>External admission and authenticated attestations</td>
+<td>Full transcript/checkpoint replication</td>
+<td>Delegate to executors; retain normalized references and summaries</td>
 </tr>
 <tr>
-<td>Remote branch as claim</td>
-<td>Replace</td>
-<td>Transactional lease service; branch becomes an output</td>
+<td>Hosted service, tenant hierarchy and separate identity/signing systems</td>
+<td>Defer; local operator and GitHub identity first</td>
 </tr>
 <tr>
-<td>Markdown/labels as workflow state</td>
-<td>Replace</td>
-<td>Durable domain state; tracker records become synchronized projections</td>
-</tr>
-<tr>
-<td>Milestone manifest and report renderer</td>
-<td>Retain and extend</td>
-<td>Render from an immutable evidence bundle</td>
-</tr>
-<tr>
-<td>Cockpit layout and planning warnings</td>
-<td>Retain</td>
-<td>Live projection with freshness and completeness indicators</td>
-</tr>
-<tr>
-<td>Repository-relative policy loading</td>
-<td>Replace</td>
-<td>Signed policy versions from an independent authority</td>
-</tr>
-<tr>
-<td>Shared writable build cache</td>
-<td>Replace for hosted execution</td>
-<td>Tenant- and trust-scoped caches with verified keys</td>
-</tr>
-<tr>
-<td>Historical handoff chain</td>
-<td>Retire operationally</td>
-<td>Searchable historical evidence; structured checkpoints for continuation</td>
-</tr>
-<tr>
-<td>Source-host configuration reconciliation</td>
-<td>Retain concept</td>
-<td>Adapter detects desired/actual protection drift</td>
-</tr>
-<tr>
-<td>Tenant isolation, identity, accounting, incident handling</td>
-<td>Add</td>
-<td>First-class platform responsibilities</td>
+<td>Rich cockpit</td>
+<td>Defer; CLI, GitHub UI and optional existing static reports</td>
 </tr>
 </tbody>
 </table></div>
-<p>The relevant template foundations are already present in the <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/.github/ISSUE_TEMPLATE/slice.yml#L1">slice form</a>, <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/.github/ISSUE_TEMPLATE/feedback.yml#L1">feedback form</a>, and <a href="https://github.com/jeromebanks/cubism-rs/blob/0cbaf2d3c92ea30eafe507a5460894f5322ccc69/docs/sdlc/milestone-manifest.example.json#L1">milestone manifest</a>.</p>
-<h2 id="4-product-principles-and-invariants">4. Product principles and invariants<a class="headerlink" href="#4-product-principles-and-invariants" title="Permanent link">§</a></h2>
-<p>These are platform requirements, not instructions entrusted to an LLM:</p>
+<p>Infrastructure dispositions and future triggers are centralized in <a href="07-reliability-security-economics.html">section 18</a>.</p>
+<h2 id="4-required-invariants">4. Required invariants<a class="headerlink" href="#4-required-invariants" title="Permanent link">§</a></h2>
 <ol>
-<li>Every executable action belongs to a tenant, contract revision, attempt, and authorization.</li>
-<li>At most one implementation lease is authoritative for a slice at a time.</li>
-<li>An expired or superseded lease cannot authorize new effects.</li>
-<li>Agents cannot issue their own identities, approve themselves, activate policy, or grant additional permissions.</li>
-<li>Review and verification apply to immutable source and input identities.</li>
-<li>Every blocking finding remains unresolved until an authorized disposition addresses it.</li>
-<li>A PR cannot weaken the policy used to approve itself.</li>
-<li>Missing, ambiguous, stale, or untrusted evidence cannot become success.</li>
-<li>Human acceptance refers to one exact bundle and one contract revision.</li>
-<li>A milestone gate controls admission and promotion, not merely issue selection.</li>
-<li>External side effects have durable intent, reconciliation, and an explicit ambiguity state.</li>
-<li>Budgets include retries, reviews, abandoned attempts, and infrastructure.</li>
-<li>Cancellation never implies that an already-admitted external operation was undone.</li>
-<li>Merge, release, deployment, and product acceptance remain distinct facts.</li>
-<li>Scope changes create a new contract or plan revision; earlier commitments remain inspectable.</li>
-<li>Cross-tenant authorization never depends solely on application filtering or prompt instructions.</li>
-<li>An agent’s claim of progress is not progress evidence.</li>
-<li>Audit records distinguish observation, inference, assertion, and verified result.</li>
+<li>Exactly one authoritative work-graph backend exists per deployment.</li>
+<li>Attempts are execution records, never work items, GitHub Issues or Beads objects.</li>
+<li>One dispatcher is the initial concurrency boundary; a second active dispatcher is unsupported.</li>
+<li>A slice can have multiple implementation, review, repair and integration attempts.</li>
+<li>Every attempt has a globally unique identifier used for idempotency and reconciliation.</li>
+<li>Agent progress messages are not acceptance evidence.</li>
+<li>Agents do not directly perform protected GitHub effects or hold integration credentials.</li>
+<li>Review is separate from implementation and returns a structured verdict bound to exact inputs.</li>
+<li>Replanning changes durable topology only when intended work changes; retries do not change the graph.</li>
+<li>Cubism and telemetry are never required for correctness.</li>
+<li>GitHub comments provide modest durability, weaker than database transactions; ambiguity must remain visible.</li>
+<li>PostgreSQL is introduced only for explicit demonstrated scale or safety triggers in the future distributed profile.</li>
+<li>A stale or revoked attempt cannot authorize new broker effects; already-submitted effects must be reconciled.</li>
+<li>A candidate cannot weaken its own review or merge policy. Missing or stale evidence cannot become success.</li>
+<li>Blocking findings remain unresolved until explicitly dispositioned; a later clean review cannot erase them.</li>
+<li>Retry/time/spend bounds include reviews and abandoned work; unknown spend is not zero.</li>
+<li>Human acceptance identifies exact source, criteria and evidence. Merge, release, deployment and acceptance are distinct facts.</li>
+<li>A pause closes admission first, then settles in-flight effects; cancellation never implies rollback.</li>
 </ol>
-<p>A model may propose a transition. Deterministic services decide whether it is permitted.</p>
+<p>These requirements are enforced by trusted code and source-host controls, not entrusted to model instructions.</p>
 <hr />
 <p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="02-architecture-and-work-model.html">Next</a></p></article>
       <nav class="bottom-nav" aria-label="Reading shortcuts"><a href="README.html">Reading guide</a><a href="#content">Back to top ↑</a></nav>
