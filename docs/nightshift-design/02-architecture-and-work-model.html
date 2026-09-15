@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Nightshift — Architecture and work model — complete design draft, with source and section navigation.">
+  <meta name="source-sha256" content="88dc55a43a970e2456e2350179dbdcd2d491993f754e450bd60abcf058a6dce1">
+  <title>Nightshift — Architecture and work model</title>
+  <link rel="stylesheet" href="reader.css">
+  <script type="module" src="reader.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to document</a>
+  <header class="masthead"><a href="index.html">NIGHTSHIFT / Design notebook</a><span>Draft for review · Proposed architecture, not an implemented platform</span></header>
+  <div class="layout">
+    <aside aria-label="Document navigation"><div>
+      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html" aria-current="page">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Durable events and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and adversarial review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html">Milestone contracts and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Migration roadmap, risks, and architectural decisions</a></li></ol></nav>
+      <details open><summary>On this page</summary><nav aria-label="Page sections"><div class="toc">
+<ul>
+<li><a href="#5-recommended-reference-architecture">5. Recommended reference architecture</a><ul>
+<li><a href="#component-and-trust-boundary-diagram">Component and trust-boundary diagram</a></li>
+<li><a href="#deployment-modes">Deployment modes</a></li>
+</ul>
+</li>
+<li><a href="#6-domain-model-and-work-planning">6. Domain model and work planning</a><ul>
+<li><a href="#illustrative-slice-contract">Illustrative slice contract</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</nav></details>
+    </div></aside>
+    <main id="content">
+      <div class="source-bar"><a href="index.html">← TL;DR overview</a><a href="02-architecture-and-work-model.md" download>Markdown source ↓</a><span>Full text · Generated from preserved Markdown</span></div>
+      <article><h1 id="nightshift-architecture-and-work-model">Nightshift — Architecture and work model<a class="headerlink" href="#nightshift-architecture-and-work-model" title="Permanent link">§</a></h1>
+<p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="01-product-and-prototype.html">Previous</a> · <a href="03-durable-state-machines.html">Next</a></p>
+<blockquote>
+<p>Design proposal · Packaged 2026-09-09 · Original sections 5–6 preserved below. Repository findings refer to the inspected checkpoint, not live project state.</p>
+</blockquote>
+<h2 id="5-recommended-reference-architecture">5. Recommended reference architecture<a class="headerlink" href="#5-recommended-reference-architecture" title="Permanent link">§</a></h2>
+<p>Use a modular control-plane application with a small number of separately privileged services. Avoid premature microservice decomposition, while separating credentials and execution trust boundaries from the beginning.</p>
+<p>Concrete hosted defaults:</p>
+<ul>
+<li><strong>Python control-plane services</strong>, preserving the prototype’s language and enabling incremental extraction.</li>
+<li><strong>PostgreSQL</strong> for authoritative contracts, aggregate state, leases, operation records, budgets, inbox/outbox, and evidence indexes.</li>
+<li><strong>Temporal Cloud</strong> for durable orchestration and timers; self-hosted Temporal for deployments whose residency requirements exclude the managed service.</li>
+<li><strong>OPA</strong> for authorization and policy evaluation, behind a constrained customer policy schema.</li>
+<li><strong>S3-compatible object storage</strong> for content-addressed artifacts; AWS S3 and KMS for the initial hosted deployment.</li>
+<li><strong>React/TypeScript UI</strong>, REST/OpenAPI, event streaming, and a thin CLI.</li>
+<li><strong>Managed containers for trusted control services</strong>; ephemeral VMs for untrusted execution.</li>
+<li><strong>GitHub first</strong>, with repository, tracker, CI, and deployment adapters kept separate.</li>
+<li><strong>OpenTelemetry</strong> for operational telemetry; separate immutable audit evidence.</li>
+<li>Existing customer CI remains supported. Nightshift supplies a verification runner when the existing CI cannot meet the contract.</li>
+</ul>
+<p>Temporal should coordinate work, not become a second source of business truth. Each activity invokes an idempotent domain command against PostgreSQL. Workflow history records orchestration; committed domain events establish authority. Temporal’s own architecture requires deterministic workflow code and idempotent or non-retryable activities. <a href="https://github.com/temporalio/temporal/blob/main/docs/architecture/README.md">Temporal architecture</a></p>
+<h3 id="component-and-trust-boundary-diagram">Component and trust-boundary diagram<a class="headerlink" href="#component-and-trust-boundary-diagram" title="Permanent link">§</a></h3>
+<figure class="diagram"><figcaption>Design diagram</figcaption><div class="diagram-view" role="region" aria-label="Scrollable design diagram" tabindex="0"></div><p class="diagram-status">Diagram source below; visual rendering requires JavaScript and network access.</p><details open><summary>Diagram source</summary><pre><code class="language-mermaid">flowchart TB
+  subgraph Customer[&quot;Customer authority&quot;]
+    Human[&quot;Product owner / approver&quot;]
+    IdP[&quot;Customer identity provider&quot;]
+    UI[&quot;UI / API / CLI&quot;]
+  end
+
+  subgraph Control[&quot;Nightshift control plane&quot;]
+    API[&quot;Contract and command API&quot;]
+    DB[&quot;PostgreSQL: state, events, leases, budgets, outbox&quot;]
+    WF[&quot;Temporal workflows&quot;]
+    Scheduler[&quot;Scheduler&quot;]
+    Policy[&quot;Policy evaluator&quot;]
+    Gateway[&quot;Agent gateway / harness adapters&quot;]
+    ReadModel[&quot;Cockpit and evidence projections&quot;]
+    Costs[&quot;Cost accounting&quot;]
+    HumanReview[&quot;Milestone and decision service&quot;]
+  end
+
+  subgraph Security[&quot;Separately privileged authorization boundary&quot;]
+    Authority[&quot;Identity / policy authority&quot;]
+    Effects[&quot;Effect broker: source and deployment writes&quot;]
+    Signers[&quot;Role-scoped attestation signers&quot;]
+    Keys[&quot;KMS / trust roots&quot;]
+  end
+
+  subgraph Execution[&quot;Execution plane: tenant-isolated&quot;]
+    Impl[&quot;Implementation VM&quot;]
+    Review[&quot;Independent review VM&quot;]
+    Verify[&quot;Verification / build VM&quot;]
+    Demo[&quot;Demo environment&quot;]
+  end
+
+  subgraph Evidence[&quot;Evidence and audit boundary&quot;]
+    Store[&quot;Content-addressed artifacts&quot;]
+    Audit[&quot;Append-only audit archive&quot;]
+    OTel[&quot;Observability pipeline&quot;]
+  end
+
+  subgraph External[&quot;External systems&quot;]
+    Repo[&quot;Source host&quot;]
+    Tracker[&quot;Tracker&quot;]
+    CI[&quot;Customer CI&quot;]
+    Models[&quot;Approved model providers&quot;]
+    Deploy[&quot;Customer environments&quot;]
+  end
+
+  Human --&gt; UI
+  IdP --&gt; API
+  UI --&gt; API
+  API --&gt; DB
+  DB --&gt; WF
+  WF --&gt; API
+  WF --&gt; Scheduler
+  Scheduler --&gt; Gateway
+  Gateway --&gt; Impl
+  Gateway --&gt; Review
+  Gateway --&gt; Verify
+  Gateway --&gt; Models
+  API --&gt; Policy
+  Policy --&gt; Authority
+  Authority --&gt; Keys
+  Impl --&gt; Effects
+  Effects --&gt; Repo
+  Effects --&gt; Tracker
+  Effects --&gt; Deploy
+  Review --&gt; Signers
+  Verify --&gt; Signers
+  Signers --&gt; Store
+  CI --&gt; Store
+  Verify --&gt; Demo
+  Demo --&gt; Store
+  DB --&gt; ReadModel
+  Store --&gt; ReadModel
+  DB --&gt; HumanReview
+  HumanReview --&gt; Human
+  HumanReview --&gt; Signers
+  DB --&gt; Costs
+  DB --&gt; Audit
+  Store --&gt; Audit
+  Gateway --&gt; OTel
+  Effects --&gt; OTel
+</code></pre></details></figure>
+<p>Arrows from runners to privileged services represent authenticated requests, not possession of source-host or deployment credentials.</p>
+<h3 id="deployment-modes">Deployment modes<a class="headerlink" href="#deployment-modes" title="Permanent link">§</a></h3>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Control plane</th>
+<th>Execution and code</th>
+<th>Assurance boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Hosted SaaS</td>
+<td>Nightshift-operated</td>
+<td>Nightshift ephemeral runners</td>
+<td>Nightshift operates the full execution trust boundary</td>
+</tr>
+<tr>
+<td>Hybrid</td>
+<td>Nightshift-operated</td>
+<td>Customer runners and optional customer artifact store</td>
+<td>Customer controls runner integrity; residency rules govern metadata and model traffic</td>
+</tr>
+<tr>
+<td>Customer VPC</td>
+<td>Dedicated managed deployment</td>
+<td>Customer VPC</td>
+<td>Same software, tenant-specific infrastructure and keys</td>
+</tr>
+<tr>
+<td>Self-hosted enterprise</td>
+<td>Customer-operated</td>
+<td>Customer-operated</td>
+<td>Customer owns operations and trust roots; support contract defines responsibilities</td>
+</tr>
+</tbody>
+</table></div>
+<p>A customer runner connects outbound using mutual authentication. Jobs carry signed manifests and short-lived capabilities. A network partition permits bounded local computation until its execution allowance expires; it does not permit offline merges or new privileged effects.</p>
+<h2 id="6-domain-model-and-work-planning">6. Domain model and work planning<a class="headerlink" href="#6-domain-model-and-work-planning" title="Permanent link">§</a></h2>
+<p>The hierarchy is:</p>
+<pre><code class="language-text">Tenant
+└── Portfolio
+    └── Program
+        ├── Epics
+        ├── Versioned plan DAG
+        ├── Milestone contracts spanning selected epics
+        ├── Slices belonging to an epic
+        │   ├── Implementation attempts
+        │   └── Review rounds and review attempts
+        ├── Feedback items linked to decisions and corrective slices
+        ├── Releases containing repository/artifact vectors
+        └── Incidents affecting any of the above
+</code></pre>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Portfolio</td>
+<td>Business priorities and resource allocation across programs</td>
+</tr>
+<tr>
+<td>Program</td>
+<td>Outcome spanning time, repositories, and milestones</td>
+</tr>
+<tr>
+<td>Epic</td>
+<td>Coherent capability area; never directly executable</td>
+</tr>
+<tr>
+<td>Milestone contract</td>
+<td>Versioned acceptance boundary with scope, evidence, authority, and permitted next actions</td>
+</tr>
+<tr>
+<td>Slice</td>
+<td>One independently testable vertical outcome, normally implemented within one bounded session</td>
+</tr>
+<tr>
+<td>Attempt</td>
+<td>One execution identity and budget allocation; may checkpoint across sessions</td>
+</tr>
+<tr>
+<td>Review round</td>
+<td>Evaluation of one immutable candidate under one review policy</td>
+</tr>
+<tr>
+<td>Feedback item</td>
+<td>Original human observation plus its agreed interpretation and resolution links</td>
+</tr>
+<tr>
+<td>Release</td>
+<td>Immutable vector of source revisions, artifacts, configuration, and environment intent</td>
+</tr>
+<tr>
+<td>Incident</td>
+<td>Safety, correctness, availability, access, or evidence failure requiring containment and recovery</td>
+</tr>
+</tbody>
+</table></div>
+<p>A broad outcome becomes work through:</p>
+<ol>
+<li>Capture user journeys and acceptance criteria.</li>
+<li>Map existing capabilities and constraints from evidence.</li>
+<li>Identify uncertainties and architectural decisions.</li>
+<li>Create bounded discovery slices where uncertainty prevents implementation.</li>
+<li>Propose vertical slices, dependency edges, and milestone demonstrations.</li>
+<li>Validate the DAG for cycles, missing prerequisites, scope coverage, and risk.</li>
+<li>Activate the plan within the human-approved execution envelope.</li>
+</ol>
+<p>Readiness requires satisfied dependency predicates, an immutable contract revision, defined validation, a compatible runner, sufficient reserved budget, and an open gate. Dependency predicates distinguish “source merged,” “artifact published,” and “behavior deployed.”</p>
+<p>Prioritization combines critical-path impact, business priority, feedback urgency, aging, expected duration, and available capabilities. Issue number is only a stable tie-breaker.</p>
+<p>Risk is the maximum of declared risk, deterministic path/change rules, environment impact, and detected concerns. Agents may raise risk. Lowering it requires the policy-defined authority.</p>
+<p>Material architectural decisions become versioned ADR proposals. An architecture agent may approve decisions within predelegated boundaries; changes to customer commitments, trust boundaries, or risk acceptance require the designated human authority.</p>
+<p>Replanning preserves the previous DAG and records why nodes were split, replaced, deferred, or cancelled. Completion percentages use a named plan revision and display denominator changes.</p>
+<h3 id="illustrative-slice-contract">Illustrative slice contract<a class="headerlink" href="#illustrative-slice-contract" title="Permanent link">§</a></h3>
+<p>All digests below are abbreviated examples.</p>
+<pre><code class="language-yaml">schema: factory.slice/v1
+id: slice-104
+tenant: acme
+program: delivery-pilot
+epic: recovery
+revision: 3
+outcome: An expired worker cannot publish a candidate
+scope:
+  repositories: [acme/service]
+  paths: [factory/leases/**, tests/leases/**]
+non_goals:
+  - Multi-region failover
+acceptance:
+  - id: AC1
+    behavior: Generation 7 publication is rejected after generation 8 is issued
+    verification: stale_worker_publish_test
+dependencies:
+  - slice: slice-103
+    predicate: merged
+validation:
+  commands:
+    - [&quot;pytest&quot;, &quot;tests/leases/test_stale_publish.py&quot;]
+risk: high
+policy_digest: sha256:policy7
+context:
+  - uri: evidence://adr-lease-protocol
+    digest: sha256:adr4
+budget:
+  wall_minutes: 90
+  max_usd: 30
+  max_attempts: 3
+milestone_contract: recovery-demo@2
+</code></pre>
+<p>Paths guide scope enforcement but do not prove semantic scope. A diff touching an allowed file can still exceed the contract; independent acceptance review addresses that remaining judgment.</p>
+<hr />
+<p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="01-product-and-prototype.html">Previous</a> · <a href="03-durable-state-machines.html">Next</a></p></article>
+      <nav class="bottom-nav" aria-label="Reading shortcuts"><a href="README.html">Reading guide</a><a href="#content">Back to top ↑</a></nav>
+      <footer>Nightshift design draft. Sources and qualifications are retained in the text. HTML is a reading edition, not a new design revision. Diagram visuals load Mermaid 11.12.0 from jsDelivr; text, tables, code, and diagram sources work without it.</footer>
+    </main>
+  </div>
+</body>
+</html>

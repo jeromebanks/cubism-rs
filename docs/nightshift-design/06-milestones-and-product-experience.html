@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Nightshift — Milestone contracts and product experience — complete design draft, with source and section navigation.">
+  <meta name="source-sha256" content="7f7279163fdb065e61def38263a08eaff2dda4916f996ee763d9002b67c12c0e">
+  <title>Nightshift — Milestone contracts and product experience</title>
+  <link rel="stylesheet" href="reader.css">
+  <script type="module" src="reader.js"></script>
+</head>
+<body>
+  <a class="skip" href="#content">Skip to document</a>
+  <header class="masthead"><a href="index.html">NIGHTSHIFT / Design notebook</a><span>Draft for review · Proposed architecture, not an implemented platform</span></header>
+  <div class="layout">
+    <aside aria-label="Document navigation"><div>
+      <h2>Full design</h2><nav aria-label="Design documents"><ol><li><a href="README.html">Reading guide &amp; provenance</a></li><li><a href="01-product-and-prototype.html">Product, prototype assessment, and principles</a></li><li><a href="02-architecture-and-work-model.html">Architecture and work model</a></li><li><a href="03-durable-state-machines.html">Durable events and state machines</a></li><li><a href="04-execution-scheduling-review.html">Scheduling, execution, and adversarial review</a></li><li><a href="05-trust-policy-evidence.html">Trust, policy, and evidence</a></li><li><a href="06-milestones-and-product-experience.html" aria-current="page">Milestone contracts and product experience</a></li><li><a href="07-reliability-security-economics.html">Reliability, security, economics, and platform choices</a></li><li><a href="08-roadmap-and-decisions.html">Migration roadmap, risks, and architectural decisions</a></li></ol></nav>
+      <details open><summary>On this page</summary><nav aria-label="Page sections"><div class="toc">
+<ul>
+<li><a href="#13-human-milestone-contract">13. Human milestone contract</a><ul>
+<li><a href="#decision-semantics">Decision semantics</a></li>
+<li><a href="#acceptance-sequence">Acceptance sequence</a></li>
+</ul>
+</li>
+<li><a href="#14-ui-api-and-cli-surfaces">14. UI, API, and CLI surfaces</a></li>
+</ul>
+</div>
+</nav></details>
+    </div></aside>
+    <main id="content">
+      <div class="source-bar"><a href="index.html">← TL;DR overview</a><a href="06-milestones-and-product-experience.md" download>Markdown source ↓</a><span>Full text · Generated from preserved Markdown</span></div>
+      <article><h1 id="nightshift-milestone-contracts-and-product-experience">Nightshift — Milestone contracts and product experience<a class="headerlink" href="#nightshift-milestone-contracts-and-product-experience" title="Permanent link">§</a></h1>
+<p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="05-trust-policy-evidence.html">Previous</a> · <a href="07-reliability-security-economics.html">Next</a></p>
+<blockquote>
+<p>Design proposal · Packaged 2026-09-09 · Original sections 13–14 preserved below. Repository findings refer to the inspected checkpoint, not live project state.</p>
+</blockquote>
+<h2 id="13-human-milestone-contract">13. Human milestone contract<a class="headerlink" href="#13-human-milestone-contract" title="Permanent link">§</a></h2>
+<p>A milestone contract defines what the human is accepting and what that decision authorizes next.</p>
+<p>Required contents:</p>
+<ul>
+<li>Exact included scope and release/source vector.</li>
+<li>Excluded and deferred scope.</li>
+<li>Acceptance criteria with evidence mappings.</li>
+<li>Demonstrated user journeys.</li>
+<li>Demo environment recipe, dataset, configuration, and artifact digests.</li>
+<li>Test, review, performance, and operational evidence.</li>
+<li>Known limitations and named risk acceptances.</li>
+<li>Approval authority and required quorum.</li>
+<li>Decision window, expiration, supersession, and withdrawal rules.</li>
+<li>Permission granted by approval: continue planning, continue implementation, release, or deploy to a named environment.</li>
+</ul>
+<p>Entry requires complete required evidence, no unresolved blocking findings, an integrated candidate, a verified demonstration, and a drained gate for the included scope.</p>
+<p>The factory generates six linked deliverables:</p>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Deliverable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Executive narrative</td>
+<td>Outcome, business value, decisions, limitations</td>
+</tr>
+<tr>
+<td>Presentation</td>
+<td>Concise progression from problem to demonstrated result</td>
+</tr>
+<tr>
+<td>Live or reproducible demo</td>
+<td>Exercise exact accepted artifacts and fixtures</td>
+</tr>
+<tr>
+<td>Evidence appendix</td>
+<td>Trace each criterion to tests, reviews, source, and artifacts</td>
+</tr>
+<tr>
+<td>Decision/risk register</td>
+<td>Explain tradeoffs, deferred scope, accepted residual risks</td>
+</tr>
+<tr>
+<td>Sign-off interface</td>
+<td>Make the exact decision and resulting permissions explicit</td>
+</tr>
+</tbody>
+</table></div>
+<p>A suggested deck has eight slides: intended outcome, prior state, delivered journeys, demonstration, verification, limitations, decisions/costs, and acceptance contract. Narrative claims must cite evidence; unsupported claims are flagged before presentation.</p>
+<pre><code class="language-json">{
+  &quot;schema&quot;: &quot;factory.milestone-bundle/v1&quot;,
+  &quot;tenant&quot;: &quot;acme&quot;,
+  &quot;milestone&quot;: &quot;recovery-demo&quot;,
+  &quot;revision&quot;: 2,
+  &quot;contract_digest&quot;: &quot;sha256:contract-m2&quot;,
+  &quot;plan_digest&quot;: &quot;sha256:plan6&quot;,
+  &quot;policy_digest&quot;: &quot;sha256:policy7&quot;,
+  &quot;included_slices&quot;: [&quot;slice-103&quot;, &quot;slice-104&quot;],
+  &quot;excluded_scope&quot;: [&quot;Multi-region recovery&quot;],
+  &quot;sources&quot;: [
+    {&quot;repository&quot;: &quot;acme/service&quot;, &quot;commit&quot;: &quot;full-merge-sha&quot;, &quot;tree_digest&quot;: &quot;sha256:tree104&quot;}
+  ],
+  &quot;release_digest&quot;: &quot;sha256:release12&quot;,
+  &quot;criteria&quot;: [
+    {&quot;id&quot;: &quot;AC1&quot;, &quot;status&quot;: &quot;met&quot;, &quot;evidence&quot;: [&quot;sha256:test17&quot;, &quot;sha256:review22&quot;]}
+  ],
+  &quot;demo&quot;: {
+    &quot;environment_manifest&quot;: &quot;sha256:env9&quot;,
+    &quot;dataset&quot;: &quot;sha256:fixture2&quot;,
+    &quot;journey_results&quot;: &quot;sha256:demo-run8&quot;,
+    &quot;recording&quot;: &quot;sha256:recording8&quot;,
+    &quot;reproduce&quot;: &quot;sha256:demo-recipe4&quot;
+  },
+  &quot;presentation&quot;: &quot;sha256:deck2&quot;,
+  &quot;evidence_index&quot;: &quot;sha256:evidence-index2&quot;,
+  &quot;risk_register&quot;: &quot;sha256:risks2&quot;,
+  &quot;operational_readiness&quot;: &quot;sha256:ops2&quot;,
+  &quot;cost_report&quot;: &quot;sha256:cost2&quot;
+}
+</code></pre>
+<p>The bundle digest is computed after assembly and is stored outside these bytes.</p>
+<h3 id="decision-semantics">Decision semantics<a class="headerlink" href="#decision-semantics" title="Permanent link">§</a></h3>
+<ul>
+<li><strong>Approve:</strong> Accept this exact bundle and issue only the permissions named in the contract.</li>
+<li><strong>Request changes:</strong> Keep ordinary progression paused; authorize only linked corrective work within the feedback envelope.</li>
+<li><strong>Reject:</strong> Decline the outcome. Replanning or termination requires the specified next authority.</li>
+<li><strong>Conditional approval:</strong> Grant only explicit permissions under explicit conditions. Code changes needed to satisfy a condition require a new bundle; they cannot silently inherit acceptance.</li>
+</ul>
+<pre><code class="language-json">{
+  &quot;schema&quot;: &quot;factory.human-decision/v1&quot;,
+  &quot;decision_id&quot;: &quot;decision-73&quot;,
+  &quot;tenant&quot;: &quot;acme&quot;,
+  &quot;milestone&quot;: &quot;recovery-demo&quot;,
+  &quot;milestone_revision&quot;: 2,
+  &quot;bundle_digest&quot;: &quot;sha256:bundle2&quot;,
+  &quot;contract_digest&quot;: &quot;sha256:contract-m2&quot;,
+  &quot;decision&quot;: &quot;approve&quot;,
+  &quot;accepted_risks&quot;: [&quot;risk-local-region-only&quot;],
+  &quot;grants&quot;: [&quot;continue:milestone-3&quot;, &quot;deploy:staging:release12&quot;],
+  &quot;approver&quot;: {
+    &quot;issuer&quot;: &quot;https://id.acme.example&quot;,
+    &quot;subject&quot;: &quot;user-42&quot;,
+    &quot;authority&quot;: &quot;program-owner&quot;
+  },
+  &quot;challenge_id&quot;: &quot;challenge-91&quot;,
+  &quot;authentication_assertion_digest&quot;: &quot;sha256:assertion91&quot;,
+  &quot;decided_at&quot;: &quot;2026-09-09T03:00:00Z&quot;,
+  &quot;grant_expires_at&quot;: &quot;2026-09-16T03:00:00Z&quot;
+}
+</code></pre>
+<p>Use fresh authentication with a challenge bound server-side to the bundle, decision, contract, and nonce. WebAuthn provides challenge-based public-key authentication; the decision service verifies the assertion, authority, and transaction context before countersigning the record. This is an operational acceptance record, not a blanket claim about legal enforceability. <a href="https://www.w3.org/TR/webauthn-3/">WebAuthn specification</a></p>
+<p>Approval does not transfer when source, binaries, behavior-affecting configuration, acceptance criteria, material risks, or evidence subjects change. A new vulnerability may suspend use of an accepted release while leaving its historical acceptance intact.</p>
+<p>URL relocation, storage replication, and additional annotations can occur without reopening acceptance when the original bytes and digests remain unchanged. Correcting a signed narrative creates a new artifact; it never overwrites what the human saw.</p>
+<h3 id="acceptance-sequence">Acceptance sequence<a class="headerlink" href="#acceptance-sequence" title="Permanent link">§</a></h3>
+<figure class="diagram"><figcaption>Design diagram</figcaption><div class="diagram-view" role="region" aria-label="Scrollable design diagram" tabindex="0"></div><p class="diagram-status">Diagram source below; visual rendering requires JavaScript and network access.</p><details open><summary>Diagram source</summary><pre><code class="language-mermaid">sequenceDiagram
+  participant M as Milestone service
+  participant B as Effect broker
+  participant E as Evidence store
+  participant H as Human
+  participant D as Decision service
+  participant P as Policy authority
+
+  M-&gt;&gt;B: Close admission for checkpoint scope
+  B--&gt;&gt;M: Outstanding operations reconciled; gate drained
+  M-&gt;&gt;E: Seal bundle from immutable evidence
+  E--&gt;&gt;M: Bundle digest
+  M-&gt;&gt;H: Present narrative, demo, risks, contract
+  H-&gt;&gt;D: Request decision challenge for bundle digest
+  D-&gt;&gt;P: Verify current authority and contract
+  D--&gt;&gt;H: Bound challenge and exact granted permissions
+  H-&gt;&gt;D: Authenticated decision response
+  D-&gt;&gt;D: CAS current revision; deduplicate decision
+  D-&gt;&gt;E: Store signed decision
+  D-&gt;&gt;B: Activate permitted next actions
+</code></pre></details></figure>
+<h2 id="14-ui-api-and-cli-surfaces">14. UI, API, and CLI surfaces<a class="headerlink" href="#14-ui-api-and-cli-surfaces" title="Permanent link">§</a></h2>
+<p>Within 30 seconds, a technical leader should understand:</p>
+<ul>
+<li>Which outcomes have been accepted.</li>
+<li>What the factory is doing now.</li>
+<li>The next useful result and its expected cost/date range.</li>
+<li>What is blocked and why.</li>
+<li>Whether any human decision is required.</li>
+<li>Whether displayed evidence and external state are current.</li>
+</ul>
+<div class="table-scroll" role="region" aria-label="Scrollable design table" tabindex="0"><table>
+<thead>
+<tr>
+<th>Surface</th>
+<th>Main interaction</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Portfolio/program cockpit</td>
+<td>Outcome progress, spend, critical path, gates, incidents, unmapped work</td>
+</tr>
+<tr>
+<td>Work graph/factory floor</td>
+<td>Dependencies, active attempts, queues, capability constraints</td>
+</tr>
+<tr>
+<td>Slice/attempt timeline</td>
+<td>Contract changes, tools, checkpoints, failures, retries, current candidate</td>
+</tr>
+<tr>
+<td>Review confrontation</td>
+<td>Finding, counterexample, implementation response, judge disposition, exact SHAs</td>
+</tr>
+<tr>
+<td>Evidence explorer</td>
+<td>Follow a claim to source, tests, artifacts, issuer, and limitations</td>
+</tr>
+<tr>
+<td>Cost controls</td>
+<td>Reservations, actual/estimated usage, budget runway, pause thresholds</td>
+</tr>
+<tr>
+<td>Policy editor/explainer</td>
+<td>Proposed rule, affected work, enforcement coverage, reason for denial</td>
+</tr>
+<tr>
+<td>Incident console</td>
+<td>Containment state, uncertain effects, recovery plan, authority needed</td>
+</tr>
+<tr>
+<td>Milestone room</td>
+<td>Presentation, exact demo, evidence appendix, risk register</td>
+</tr>
+<tr>
+<td>Sign-off</td>
+<td>Bundle identity, unmet criteria, accepted risks, decision and resulting grants</td>
+</tr>
+<tr>
+<td>Audit export</td>
+<td>Signed events, artifacts, policy versions, trust bundle, verification report</td>
+</tr>
+</tbody>
+</table></div>
+<p>Freshness is visible per adapter and evidence class. “Last observed five minutes ago” must not be rendered as live certainty. Progress separates merged slices, verified behavior, accepted milestones, and deployed releases.</p>
+<p>Representative APIs:</p>
+<pre><code class="language-text">POST /v1/programs
+POST /v1/programs/{id}/plan-revisions
+POST /v1/slices/{id}/commands/start
+POST /v1/attempts/{id}/checkpoints
+GET  /v1/reviews/{id}/findings
+POST /v1/findings/{id}/dispositions
+GET  /v1/evidence/{digest}
+POST /v1/milestones/{id}/bundles
+POST /v1/milestones/{id}/decision-challenges
+POST /v1/milestones/{id}/decisions
+POST /v1/programs/{id}/stop
+POST /v1/incidents/{id}/recovery-plans
+GET  /v1/audit/exports/{id}
+</code></pre>
+<p>Commands require an idempotency key and expected version. There is no general API to set arbitrary workflow status.</p>
+<p>Illustrative CLI:</p>
+<pre><code class="language-text">nightshift program inspect delivery-pilot
+nightshift slice explain slice-104
+nightshift attempt logs attempt-9
+nightshift review inspect review-22
+nightshift evidence verify sha256:bundle2
+nightshift milestone open recovery-demo
+nightshift program stop delivery-pilot --reason &quot;Customer pause&quot;
+</code></pre>
+<p>The CLI can initiate a human decision flow, but cannot convert an agent-held API token into human authority.</p>
+<hr />
+<p><a href="index.html">Overview</a> · <a href="README.html">Document index</a> · <a href="05-trust-policy-evidence.html">Previous</a> · <a href="07-reliability-security-economics.html">Next</a></p></article>
+      <nav class="bottom-nav" aria-label="Reading shortcuts"><a href="README.html">Reading guide</a><a href="#content">Back to top ↑</a></nav>
+      <footer>Nightshift design draft. Sources and qualifications are retained in the text. HTML is a reading edition, not a new design revision. Diagram visuals load Mermaid 11.12.0 from jsDelivr; text, tables, code, and diagram sources work without it.</footer>
+    </main>
+  </div>
+</body>
+</html>
