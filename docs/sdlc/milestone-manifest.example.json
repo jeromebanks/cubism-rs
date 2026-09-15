@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "epic": 38,
+  "title": "Checkpoint title a human will recognize",
+  "summary": "A short explanation of the integrated outcome and why it matters.",
+  "included_slices": [60],
+  "highlights": [
+    "A concrete capability that is now available."
+  ],
+  "decisions": [
+    "An important tradeoff and the reason it was selected."
+  ],
+  "known_gaps": [
+    "Work deliberately left for a later checkpoint."
+  ],
+  "demo": {
+    "summary": "What the human will see or learn from the demonstration.",
+    "steps": [
+      "Run an exact command or open a stable URL.",
+      "Describe the expected observable result."
+    ]
+  }
+}

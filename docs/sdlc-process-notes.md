@@ -1,5 +1,10 @@
 # SDLC process notes
 
+> **Historical retrospective (retired process).** The shared time-series branch
+> merged in PR #24. These observations informed the current [`SDLC.md`](../SDLC.md),
+> but this document is not an active workflow. Future time-series work uses the
+> same `work-slice` issue/PR process as every other subsystem.
+
 Findings from running the `timeseries-slice` skill's session-slice loop
 across 13+ tracked slices (`docs/TIMESERIES_PHASE_0A_HANDOFF.md` through
 `TIMESERIES_PHASE_20_HANDOFF.md`, `git log --oneline | grep timeseries:`).
@@ -177,6 +182,12 @@ for each choice along the way. That's a real gap, but `work-issue`'s
 per-PR cadence doesn't map onto this branch (no PRs, direct push to a
 shared feature branch) or its economics (slices are deliberately small
 and cheap; a multi-minute cross-model pass on every one would erode that).
+
+**Update (2026-09-04):** PR #24 merged the shared time-series branch. The
+two-lane exception described in this retrospective is now retired. The useful
+parts—session-sized slices, advisor feedback, deterministic checks, and
+phase-level human visibility—were incorporated into the repo-wide process in
+`SDLC.md`; its issue/PR state and merge gates now apply to time-series work too.
 
 Landed as `.claude/skills/timeseries-slice/SKILL.md` step 8a instead:
 triggered only when a slice closes a roadmap `## Phase N "done" condition`
