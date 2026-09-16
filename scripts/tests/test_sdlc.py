@@ -170,6 +170,29 @@ Read one file.
         self.assertEqual(1, code)
         self.assertEqual([], calls)
 
+    # --- status projection ---
+
+    def test_status_projection_drops_prose_but_keeps_state(self):
+        model = sdlc.build_model({
+            "repository": "example/repo", "generated_at": "now",
+            "issues": [self.epic, self.slice], "pulls": [],
+        }, self.config)
+        projected = sdlc.status_projection(model)
+        rendered = json.dumps(projected)
+        self.assertNotIn("Parent epic: #10", rendered)
+        self.assertNotIn('"body"', rendered)
+        self.assertEqual(model["counts"], projected["counts"])
+        self.assertEqual(1, projected["epics"][0]["total_children"])
+
+    def test_status_projection_leaves_the_model_intact(self):
+        model = sdlc.build_model({
+            "repository": "example/repo", "generated_at": "now",
+            "issues": [self.epic, self.slice], "pulls": [],
+        }, self.config)
+        sdlc.status_projection(model)
+        # render_status still needs the untouched model afterwards.
+        self.assertIn("Visible delivery", sdlc.render_status(model))
+
     # --- claim exclusivity ---
 
     def _stub_run_process(self, returncode, stderr="", stdout=""):

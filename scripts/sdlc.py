@@ -591,9 +591,29 @@ body{{margin:0;background:#f5f3ed;color:#172026;font:16px/1.55 system-ui,-apple-
 </main></body></html>"""
 
 
+def status_projection(value: Any) -> Any:
+    """Strip issue/PR prose from the status model.
+
+    Status is about lane, gate, parentage and freshness. Bodies are content,
+    they are large, and GitHub already serves them — including them would make
+    the projection unreadable and imply this is a mirror of the tracker rather
+    than a view over it.
+    """
+    if isinstance(value, dict):
+        return {k: status_projection(v) for k, v in value.items() if k != "body"}
+    if isinstance(value, list):
+        return [status_projection(item) for item in value]
+    return value
+
+
 def command_status(args: argparse.Namespace, config: dict[str, Any]) -> int:
     data = load_status_data(args.input, config)
     model = build_model(data, config)
+    if args.json:
+        # The projection, not the page. This is the seam a real cockpit reads;
+        # `render_status` is the interim view that such a cockpit replaces.
+        print(json.dumps(status_projection(model), indent=2, sort_keys=True, default=str))
+        return 0
     output = args.output or ROOT / config["status"]["output"]
     write_atomic(output, render_status(model))
     if args.snapshot:
@@ -915,10 +935,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    status = sub.add_parser("status", help="generate the HTML delivery cockpit")
+    status = sub.add_parser("status", help="project current delivery state (local HTML view, or --json)")
     status.add_argument("--input", type=Path, help="offline JSON bundle instead of live GitHub")
-    status.add_argument("--output", type=Path)
-    status.add_argument("--snapshot", type=Path)
+    status.add_argument("--output", type=Path, help="where to write the local HTML view (untracked)")
+    status.add_argument("--snapshot", type=Path, help="also write the raw fetched GitHub bundle")
+    status.add_argument("--json", action="store_true", help="print the status projection instead of writing HTML")
     status.set_defaults(func=command_status)
 
     check_slice = sub.add_parser("check-slice", help="validate an issue as one executable slice")

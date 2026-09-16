@@ -6,3 +6,6 @@ proptest-regressions/
 __pycache__/
 examples/web_analytics_demo/.temporal_build/
 .serena/
+
+# Generated locally by `scripts/sdlc.py status`; the durable record is GitHub.
+docs/project-status.html

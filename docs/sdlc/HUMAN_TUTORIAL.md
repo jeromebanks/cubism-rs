@@ -4,8 +4,14 @@ This guide explains how to direct long-running Cubism projects without managing
 every pull request. You choose outcomes, review meaningful demonstrations, and
 give feedback. Agents plan and deliver bounded slices between those checkpoints.
 
-Start with the live [delivery cockpit](../project-status.html). It answers four
-questions at a glance:
+Start by generating the delivery view:
+
+```bash
+rtk python3 scripts/sdlc.py status && rtk open docs/project-status.html
+```
+
+It is written fresh each time and is not stored in the repository, so what you
+see is what GitHub says right now. It answers four questions at a glance:
 
 1. What has shipped?
 2. What is being worked on or reviewed now?
@@ -109,7 +115,7 @@ the complete control plane.
 
 ## Step 1: choose an epic
 
-Open [the delivery cockpit](../project-status.html) and look at **Roadmap
+Regenerate the delivery view (`rtk python3 scripts/sdlc.py status`) and look at **Roadmap
 outcomes**. An epic marked `needs-slicing` has a useful goal but is not yet safe
 to hand to an implementation agent.
 
@@ -176,7 +182,7 @@ Or generate the cockpit directly:
 
 ```bash
 rtk python3 scripts/sdlc.py status
-rtk open docs/project-status.html
+rtk python3 scripts/sdlc.py status && rtk open docs/project-status.html
 ```
 
 The main lanes mean:
@@ -316,7 +322,7 @@ system explaining which trust condition is missing.
 ```bash
 # Refresh/open the visual status
 rtk python3 scripts/sdlc.py status
-rtk open docs/project-status.html
+rtk python3 scripts/sdlc.py status && rtk open docs/project-status.html
 
 # Validate or select work
 rtk python3 scripts/sdlc.py check-slice ISSUE

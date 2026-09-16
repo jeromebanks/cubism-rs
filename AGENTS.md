@@ -26,7 +26,8 @@ Prefix shell commands with `rtk`. In command chains, prefix each segment. Use
 
 ## Orientation by task
 
-- Current project state: generate/open [`docs/project-status.html`](docs/project-status.html).
+- Current project state: run `rtk python3 scripts/sdlc.py status` (writes an
+  untracked local page) or `status --json` for the projection.
 - Issue implementation: [`.agents/skills/work-slice/SKILL.md`](.agents/skills/work-slice/SKILL.md).
 - Epic decomposition: [`.agents/skills/plan-epic/SKILL.md`](.agents/skills/plan-epic/SKILL.md).
 - Milestone checkpoint: [`.agents/skills/review-milestone/SKILL.md`](.agents/skills/review-milestone/SKILL.md).

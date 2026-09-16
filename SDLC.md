@@ -135,17 +135,26 @@ Run:
 rtk python3 scripts/sdlc.py status
 ```
 
-This generates [`docs/project-status.html`](docs/project-status.html) from live
-GitHub state. It shows:
+This writes `docs/project-status.html` from live GitHub state. The file is
+**untracked and deliberately not committed**: it is a local, on-demand view, not
+a repository artifact. `--json` prints the same projection for tooling.
+
+It shows:
 
 - work in progress, in agent review, blocked, or at a human gate;
 - progress and child slices for each epic;
 - open work that is not mapped to an epic;
 - recently completed work and planning-data warnings.
 
-GitHub remains authoritative; the HTML is a dated snapshot. Regenerate it after
-every merge, gate change, or feedback-tracking pass. It is intentionally static,
-self-contained, and dependency-free so a human can open it directly.
+GitHub remains authoritative; the HTML is a dated snapshot you regenerate when
+you want to look at it. Nothing depends on its freshness, because nothing stores
+it — a committed snapshot on a protected branch would cost a pull request and a
+full CI run per refresh, so it would drift and then mislead.
+
+This view is **interim**. It stands in for a real delivery cockpit, and it is
+deliberately cheap so that replacing it costs nothing. Treat `--json` as the
+stable surface: it is the projection an application would consume, while the
+generated page is the throwaway.
 
 For a human-oriented walkthrough, see
 [`docs/sdlc/HUMAN_TUTORIAL.md`](docs/sdlc/HUMAN_TUTORIAL.md). The

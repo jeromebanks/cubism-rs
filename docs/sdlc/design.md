@@ -27,7 +27,7 @@ Use one source for each kind of fact:
 | Lifecycle policy and human responsibilities | `SDLC.md` |
 | Mechanical classification and gates | `scripts/sdlc.py` |
 | Tool-specific invocation guidance | `.agents/skills/`, `.claude/skills/` |
-| Current visual status | Generated `docs/project-status.html` |
+| Current visual status | Regenerated on demand; never committed (`sdlc.py status`) |
 | Human checkpoint narrative and demo | Versioned milestone manifest + generated HTML |
 
 Do not restate roadmap state in handoff documents. If a current slice needs old
