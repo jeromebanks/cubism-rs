@@ -1,0 +1,47 @@
+name: Epic outcome
+description: Long-term outcome decomposed into bounded delivery slices
+title: "Epic: "
+labels: ["type:epic", "needs-slicing"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Describe the user or system outcome, not an implementation inventory.
+    validations:
+      required: true
+  - type: textarea
+    id: current_state
+    attributes:
+      label: Current state
+      description: What exists now, with evidence links where useful.
+    validations:
+      required: true
+  - type: textarea
+    id: slices
+    attributes:
+      label: Child slices
+      description: Link only bounded issues. Keep this checklist current.
+      value: "- [ ] #"
+    validations:
+      required: true
+  - type: textarea
+    id: checkpoints
+    attributes:
+      label: Human checkpoints and demos
+      description: What coherent intermediate outcomes should stop for human review?
+    validations:
+      required: true
+  - type: textarea
+    id: exit
+    attributes:
+      label: Exit criteria
+      description: Conditions that close the whole epic.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+    validations:
+      required: true

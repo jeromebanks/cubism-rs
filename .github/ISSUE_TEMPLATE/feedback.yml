@@ -1,0 +1,57 @@
+name: Milestone feedback slice
+description: Track one bounded correction requested during a human checkpoint
+title: "Feedback: "
+labels: ["type:feedback", "status:ready"]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: The requested observable correction, preserving the human's intent.
+    validations:
+      required: true
+  - type: input
+    id: parent
+    attributes:
+      label: Parent epic
+      placeholder: "Parent epic: #"
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      value: "- [ ] "
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+    validations:
+      required: true
+  - type: textarea
+    id: demo
+    attributes:
+      label: Demo / human-visible effect
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Link the human's feedback comment and affected checkpoint report.
+    validations:
+      required: true

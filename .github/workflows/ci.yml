@@ -144,13 +144,25 @@ jobs:
       - run: pip install --no-index --find-links bindings/cubism-py/dist cubism
       - run: python -c "import cubism; print(cubism.__file__)"
 
+  sdlc:
+    name: sdlc tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # scripts/sdlc.py gates every merge in this repository, so it is itself
+      # a required check. Dependency-free stdlib unittest — no install step.
+      - run: python -m unittest discover -s scripts/tests -v
+
   # Single required status check for branch protection, so the protected-
   # branch rule doesn't need updating every time a job above is added,
   # renamed, or split.
   ci-required:
     name: CI required checks
     if: always()
-    needs: [fmt, clippy, test, docs, spec-validate, links, python]
+    needs: [fmt, clippy, test, docs, spec-validate, links, python, sdlc]
     runs-on: ubuntu-latest
     steps:
       - name: Check all required jobs succeeded
