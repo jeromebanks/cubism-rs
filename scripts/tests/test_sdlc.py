@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -168,6 +169,58 @@ Read one file.
             sdlc.load_gate_inputs, sdlc.run_text = original_inputs, original_run
         self.assertEqual(1, code)
         self.assertEqual([], calls)
+
+    # --- claim exclusivity ---
+
+    def _stub_run_process(self, returncode, stderr="", stdout=""):
+        calls = []
+
+        def fake(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+
+        return fake, calls
+
+    def test_claim_ref_creation_uses_the_create_only_endpoint(self):
+        fake, calls = self._stub_run_process(0)
+        original = sdlc.run_process
+        sdlc.run_process = fake
+        try:
+            created = sdlc.create_remote_ref("refs/heads/issue/42", "deadbeef", self.config)
+        finally:
+            sdlc.run_process = original
+        self.assertTrue(created)
+        self.assertEqual(
+            [[
+                "gh", "api", "--method", "POST",
+                f"repos/{self.config['repository']}/git/refs",
+                "-f", "ref=refs/heads/issue/42",
+                "-f", "sha=deadbeef",
+            ]],
+            calls,
+        )
+
+    def test_losing_a_claim_race_is_reported_not_swallowed(self):
+        # GitHub answers 422 when the ref exists. `git push` of the same SHA
+        # would instead exit 0 as an up-to-date no-op, which is the race.
+        fake, _ = self._stub_run_process(1, stderr="gh: Reference already exists (HTTP 422)")
+        original = sdlc.run_process
+        sdlc.run_process = fake
+        try:
+            created = sdlc.create_remote_ref("refs/heads/issue/42", "deadbeef", self.config)
+        finally:
+            sdlc.run_process = original
+        self.assertFalse(created)
+
+    def test_unexpected_claim_failure_fails_closed(self):
+        fake, _ = self._stub_run_process(1, stderr="gh: Bad credentials (HTTP 401)")
+        original = sdlc.run_process
+        sdlc.run_process = fake
+        try:
+            with self.assertRaises(sdlc.SdlcError):
+                sdlc.create_remote_ref("refs/heads/issue/42", "deadbeef", self.config)
+        finally:
+            sdlc.run_process = original
 
     # --- human gates ---
 

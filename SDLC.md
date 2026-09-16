@@ -62,8 +62,13 @@ need for more.
    human gate. Never pick an epic or an unclassified backlog item.
 2. **Validate and claim.** Run the slice checker, then
    `rtk python3 scripts/sdlc.py claim N`. The stable remote branch `issue/N` is an
-   atomic, cross-session claim; the command creates an isolated worktree and
-   adds `in-progress`.
+   atomic, cross-session claim: it is created through GitHub's create-only ref
+   endpoint, so exactly one racing session wins and the others are told they
+   lost. The command then creates an isolated worktree and adds `in-progress`.
+
+   The claim has no heartbeat and no expiry. It establishes exclusive
+   acquisition, not liveness: a session that dies holds `issue/N` until a human
+   judges it abandoned and re-runs the command with `--resume`.
 3. **Plan.** Write a short plan against the issue's acceptance criteria. In
    Claude Code, request an advisor review when that facility is available.
    Record material decisions on the issue rather than in a transient handoff.

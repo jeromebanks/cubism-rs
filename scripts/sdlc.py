@@ -76,6 +76,30 @@ def run_process(args: list[str], *, check: bool = True) -> subprocess.CompletedP
     return proc
 
 
+def create_remote_ref(ref: str, sha: str, config: dict[str, Any]) -> bool:
+    """Create one remote ref. Return False if another writer created it first.
+
+    `git push` cannot express this. Pushing a SHA to a ref that already holds
+    that SHA succeeds as an up-to-date no-op, so two sessions that both observe
+    the claim branch absent, then both push the same default-branch SHA, both
+    see success and both report ownership. GitHub's ref-creation endpoint is
+    create-only and answers 422 when the ref exists, so the loser of a race
+    fails closed instead of claiming work it does not own.
+    """
+    proc = run_process([
+        "gh", "api", "--method", "POST",
+        f"repos/{config['repository']}/git/refs",
+        "-f", f"ref={ref}",
+        "-f", f"sha={sha}",
+    ], check=False)
+    if proc.returncode == 0:
+        return True
+    detail = f"{proc.stderr or ''}\n{proc.stdout or ''}".strip()
+    if "already exists" in detail.lower():
+        return False
+    raise SdlcError(detail or f"could not create remote ref {ref}")
+
+
 def label_names(item: dict[str, Any]) -> set[str]:
     return {
         label["name"] if isinstance(label, dict) else str(label)
@@ -647,9 +671,16 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
     run_text(["git", "fetch", "origin", config["default_branch"]])
     if remote.returncode == 2:
-        # Creating one stable remote ref per issue is the distributed claim.
-        # GitHub rejects the push if another session creates it first.
-        run_text(["git", "push", "origin", f"refs/remotes/origin/{config['default_branch']}:{remote_ref}"])
+        # The `ls-remote` check above is only a fast path to a friendly message.
+        # This create-only request is the actual claim: it is decided by the
+        # server, so there is no check-then-act window to lose.
+        base_sha = run_text(["git", "rev-parse", f"refs/remotes/origin/{config['default_branch']}"]).strip()
+        if not create_remote_ref(remote_ref, base_sha, config):
+            print(
+                f"BLOCKED: another session claimed issue #{args.issue} first; "
+                f"remote branch `{branch}` already exists"
+            )
+            return 1
         run_text(["git", "fetch", "origin", branch])
 
     worktree = ROOT / ".worktrees" / f"issue-{args.issue}"
