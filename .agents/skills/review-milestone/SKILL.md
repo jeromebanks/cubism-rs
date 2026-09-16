@@ -31,7 +31,9 @@ Read `SDLC.md`, the epic, its linked slices, and
 
 5. Open the generated HTML and verify its layout and every demo step. Link the
    report from the epic and ask the human for outcome-level approval or feedback.
-6. Refresh `docs/project-status.html` so the human gate is visible.
+6. The epic's `gate:human-review` label is what makes the gate visible; GitHub
+   is the record. Regenerate the local status view only if you want to look at
+   it (`rtk python3 scripts/sdlc.py status`).
 
 ## Record feedback
 

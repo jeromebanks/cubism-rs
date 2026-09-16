@@ -1,0 +1,567 @@
+
+  You are the principal architect and product strategist for a new product category:
+
+  A multi-tenant “dark software factory as a service” that can autonomously execute large software programs across many sessions, repositories, models, and agent harnesses—while remaining auditable,
+  recoverable, secure, and governed by explicit human milestone contracts.
+
+  Your task is to produce the product and technical design. Do not implement it, edit files, create issues, or change GitHub state.
+
+  BACKGROUND AND INTENT
+
+  We have a repository-level prototype in:
+
+    /Users/jeromebanks/dev/cubism-rs
+
+  Inspect the exact current branch and commit:
+
+    branch: chore/checkpoint-sdlc-worktree-state
+    commit: 0cbaf2d3c92ea30eafe507a5460894f5322ccc69
+    base: main at 1ae95dd
+
+  The prototype evolved from two earlier workflows:
+
+  1. postscript_interpreter:
+     A relatively mature issue → isolated worktree → implementation →
+     independent cold review → PR → merge → cleanup lifecycle.
+
+  2. Cubism time-series development:
+     A long-running, multi-session implementation using very small slices,
+     advisor feedback, repeated verification, roadmap maintenance, explicit
+     “does not prove” evidence boundaries, and session handoffs. It succeeded
+     in maintaining continuity but accumulated too many bespoke handoffs,
+     used a shared long-lived branch, and did not originally have independent
+     cross-model review on every landed slice.
+
+  The desired operating model is:
+
+  - Humans establish product direction, constraints, risk tolerance, and
+    milestone contracts.
+  - Agents decompose and execute bounded vertical slices across many sessions.
+  - Multiple models and harnesses can implement, test, review, and challenge
+    one another.
+  - Routine PRs do not require human review.
+  - Human review happens at coherent product milestones.
+  - For each milestone, the factory generates an executive-quality presentation,
+    a reproducible or hosted demo, evidence of what was built and verified,
+    known gaps, important decisions, and a precise approval contract.
+  - Human approval or requested changes are durably recorded and bound to the
+    exact milestone being reviewed.
+  - The system should scale from a solo developer’s repository to larger
+    organizations, portfolios, and regulated environments.
+  - “Dark factory” must mean bounded autonomous operation with observable
+    controls—not invisible, unaccountable automation.
+
+  REPOSITORY EVIDENCE TO INSPECT
+
+  Start by reading:
+
+  - AGENTS.md
+  - CLAUDE.md
+  - SDLC.md
+  - .sdlc/config.json
+  - scripts/sdlc.py
+  - scripts/tests/test_sdlc.py
+  - scripts/quality-gate.sh
+  - .agents/skills/work-slice/SKILL.md
+  - .agents/skills/plan-epic/SKILL.md
+  - .agents/skills/review-milestone/SKILL.md
+  - .agents/skills/project-status/SKILL.md
+  - .github/ISSUE_TEMPLATE/epic.yml
+  - .github/ISSUE_TEMPLATE/slice.yml
+  - .github/ISSUE_TEMPLATE/feedback.yml
+  - .github/pull_request_template.md
+  - docs/sdlc/design.md
+  - docs/sdlc/HUMAN_TUTORIAL.md
+  - docs/sdlc/milestone-manifest.example.json
+  - docs/sdlc/overview-slides.html
+  - docs/project-status.html
+
+  Inspect the branch as a diff, not just as prose:
+
+    git show --stat 0cbaf2d3c92ea30eafe507a5460894f5322ccc69
+    git diff main...0cbaf2d3c92ea30eafe507a5460894f5322ccc69
+
+  For historical comparison, inspect:
+
+  - /Users/jeromebanks/dev/postscript_interpreter/SDLC.md
+  - /Users/jeromebanks/dev/postscript_interpreter/.claude/skills/work-issue/SKILL.md
+  - /Users/jeromebanks/dev/postscript_interpreter/.claude/skills/sdlcify/SKILL.md
+  - /Users/jeromebanks/dev/postscript_interpreter/.claude/skills/issue-summary/SKILL.md
+  - TIMESERIES_FINISH_PROMPT.md
+  - docs/sdlc-process-notes.md
+  - docs/TIMESERIES_ROADMAP.md
+
+  Do not read all historical time-series handoffs indiscriminately. Select only
+  representative handoffs needed to verify specific process claims.
+
+  KNOWN PROTOTYPE CONCERNS TO VERIFY
+
+  Treat these as leads, not unquestioned conclusions:
+
+  1. scripts/sdlc.py’s applied merge path appears to reference undefined
+     variables `add` and `remove`.
+
+  2. Review receipts are JSON embedded in ordinary PR comments. The gate checks
+     that the comment has an author and declares a reviewer, but does not
+     authenticate that the review came from an independent execution identity.
+     Determine whether the implementer can manufacture an acceptable receipt.
+
+  3. A remote branch named issue/N is described as an atomic distributed claim.
+     Analyze the race in which two workers observe the branch as absent and push
+     the same base SHA to that branch. Determine whether both may believe they
+     acquired it.
+
+  4. Claims have no strong owner identity, lease generation, heartbeat, TTL,
+     fencing token, or safe automated recovery protocol.
+
+  5. The merge decision and subsequent merge are separate operations. Analyze
+     head-SHA changes, base-branch changes, duplicated check names, check
+     provenance, and other TOCTOU cases.
+
+  6. Human approval is represented by labels and comments but is not signed or
+     cryptographically bound to an immutable milestone evidence bundle.
+
+  7. The generated milestone report is a useful narrative, but its evidence is
+     limited to closed issue membership. It does not bind source commits, PRs,
+     tests, build artifacts, runtime environments, demo results, recordings,
+     policy versions, or known-risk acceptance.
+
+  8. GitHub issues, labels, comments, branches, and local worktrees collectively
+     approximate a workflow engine. Evaluate what breaks under crashes,
+     duplicated events, partial failure, webhook reordering, rate limits,
+     concurrent workers, and multi-repository programs.
+
+  9. The current system names Codex as the required reviewer but does not define
+     a provider-neutral adversarial-review protocol or prove context isolation.
+
+  10. The current status page is manually regenerated and can become stale.
+
+  DESIGN OBJECTIVE
+
+  Design the productized platform—not merely a more elaborate repository script.
+
+  The design must clearly separate:
+
+  - Customer-facing product experience
+  - Control plane
+  - Execution/data plane
+  - Repository and tracker adapters
+  - Agent/model/harness adapters
+  - Durable workflow orchestration
+  - Policy and authorization
+  - Evidence, provenance, and audit
+  - Observability and economics
+  - Human milestone review and contractual approval
+
+  Do not assume that GitHub, Temporal, Kubernetes, OPA, a specific cloud, or any
+  model provider is automatically the correct answer. Evaluate build-versus-buy
+  and recommend concrete defaults.
+
+  REQUIRED DESIGN QUESTIONS
+
+  1. Product boundary
+
+  Define what the service owns and what remains owned by the customer, source
+  host, CI system, model provider, and human approver. Define “autonomous” and
+  “dark” operationally.
+
+  2. Work model
+
+  Define the hierarchy for portfolio, program, epic, milestone contract, slice,
+  attempt, review round, feedback item, release, and incident.
+
+  Show how a broad outcome becomes a dependency DAG of bounded vertical slices.
+  Explain readiness, prioritization, risk classification, architectural decisions,
+  replanning, and prevention of silent scope expansion.
+
+  3. Durable state machine
+
+  Provide explicit state machines for:
+
+  - Slice lifecycle
+  - Execution attempt
+  - Review round
+  - Merge/release
+  - Milestone review
+  - Human feedback
+  - Incident and recovery
+
+  For every transition, name:
+
+  - Actor
+  - Preconditions
+  - Durable event written
+  - Idempotency key
+  - Authorization
+  - Timeout/retry behavior
+  - Compensating or recovery action
+  - Evidence produced
+  - Terminal and non-terminal failure states
+
+  Identify the invariants that must never be entrusted only to an LLM prompt.
+
+  4. Scheduling and claims
+
+  Design safe concurrent scheduling across repositories and agents:
+
+  - Leases, heartbeats, fencing tokens, and abandonment recovery
+  - Duplicate delivery and idempotency
+  - Capability-aware model/runner selection
+  - Dependencies and critical paths
+  - Tenant quotas and budgets
+  - Fairness and priority
+  - Cancellation and preemption
+  - Workspace and branch isolation
+  - Prevention of two agents believing they own the same work
+  - Multi-repository transactions or explicitly non-transactional semantics
+
+  5. Multi-model execution
+
+  Define a provider-neutral adapter contract for Claude Code, Codex, Astra,
+  Meta Muse, OpenCode, and future harnesses.
+
+  Cover:
+
+  - Capabilities and tool permissions
+  - Context packaging and retrieval
+  - Session continuation and checkpointing
+  - Model/provider failover
+  - Determinism limits
+  - Token, time, and monetary budgets
+  - Structured outputs and evidence
+  - Versioning of model, harness, prompt, skills, tools, and policy
+  - How the system detects that an agent has stopped making progress
+
+  6. Adversarial review
+
+  Design a genuine adversarial review protocol rather than “ask another agent.”
+
+  At minimum address:
+
+  - Provable separation between implementer and reviewer identity
+  - Blind or selectively blinded context
+  - Different-model and same-model review modes
+  - Threat modeling, correctness, security, performance, maintainability,
+    test adequacy, and acceptance-criteria review
+  - Structured findings with severity and evidence
+  - Fix/re-review loops bound to immutable SHAs
+  - Handling disagreement between implementer and reviewer
+  - Escalation to a judge agent, policy rule, or human
+  - Reviewer rotation and anti-collusion measures
+  - False-positive and false-negative evaluation
+  - When one reviewer suffices and when N-version review is required
+  - How reviewer quality is measured over time
+
+  Distinguish:
+  - self-review,
+  - contextual advisor review,
+  - independent cold review,
+  - security-specialist review,
+  - deterministic verification,
+  - and human product review.
+
+  7. Trust, identity, and authorization
+
+  Provide a trust model and threat model for:
+
+  - Malicious or compromised agent runs
+  - Prompt injection from repositories, issues, tests, logs, and web content
+  - Forged review receipts
+  - Stolen credentials
+  - Tool misuse
+  - Secret exfiltration
+  - Dependency and build compromise
+  - Tenant boundary violations
+  - Policy tampering inside a PR
+  - Artifact substitution
+  - Bypassing a human gate
+  - A compromised orchestrator or runner
+
+  Design service identities, least-privilege GitHub Apps, short-lived credentials,
+  policy signatures, reviewer identity, and separation of duties.
+
+  Clarify which controls are preventive, detective, and recoverable.
+
+  8. Policy as code
+
+  Design a versioned policy model that can express:
+
+  - Required checks and their trusted issuer
+  - Required reviewer classes by path, risk, or change type
+  - Merge strategy and merge queue behavior
+  - Sensitive paths and operations
+  - Network and tool permissions
+  - Secret scopes
+  - Cost and time limits
+  - Required demonstrations and evidence
+  - Human gate placement
+  - Emergency stop and exception policy
+  - Release and deployment environments
+  - Data retention and privacy rules
+
+  Explain how policy is compiled into source-host protections, runner controls,
+  workflow checks, and UI explanations. A PR must not be able to weaken the policy
+  used to approve itself.
+
+  9. Evidence and provenance
+
+  Define an immutable evidence graph connecting:
+
+  intent → plan → slice → execution → commits → tests → review →
+  merge → build → deployment → demo → milestone → human decision
+
+  Propose schemas for:
+
+  - Execution attestation
+  - Review attestation
+  - Verification/test attestation
+  - Build/deployment provenance
+  - Milestone evidence bundle
+  - Human approval or requested-changes record
+
+  Bind evidence to content digests, source SHAs, policy versions, runner identity,
+  model/harness versions, timestamps, and artifact locations.
+
+  Evaluate SLSA/in-toto-compatible provenance and source-host artifact
+  attestations. Explain which evidence must be signed, by whom, and how it is
+  verified.
+
+  10. Human milestone contract
+
+  Turn milestone review into something analogous to contractual acceptance.
+
+  Define:
+
+  - Entry criteria
+  - Exact included scope
+  - Excluded and deferred scope
+  - Acceptance criteria
+  - Demonstrated user journeys
+  - Reproducible demo environment
+  - Test and review evidence
+  - Known limitations and accepted risks
+  - Operational readiness
+  - Cost/performance results where relevant
+  - Artifact and source digests
+  - Approval authority
+  - Expiration or supersession rules
+  - Approval, rejection, conditional approval, and requested-change semantics
+
+  The factory should generate:
+
+  - An executive narrative
+  - A presentation/deck
+  - A live or reproducible demo
+  - An evidence appendix
+  - A decision and risk register
+  - A human sign-off interface
+
+  The sign-off must be bound to the exact immutable evidence bundle. Explain what
+  changes invalidate approval and what changes can proceed without reopening it.
+
+  11. Architecture
+
+  Provide a concrete reference architecture with:
+
+  - Multi-tenant control plane
+  - Workflow/event store
+  - Scheduler
+  - Policy engine
+  - Identity and authorization service
+  - Agent gateway and provider adapters
+  - Isolated execution runners
+  - Repository/tracker/CI adapters
+  - Evidence and artifact store
+  - Observability pipeline
+  - Cost/accounting service
+  - Notification and human-review service
+  - Customer UI/API/CLI
+  - Audit and compliance boundary
+
+  Show trust boundaries and data flows. Address SaaS, customer-VPC, and hybrid
+  runner deployment models.
+
+  12. Reliability
+
+  Explain behavior under:
+
+  - Orchestrator restart
+  - Runner death
+  - Model timeout
+  - Provider outage
+  - Lost webhook
+  - Duplicate or reordered webhook
+  - Git host rate limiting
+  - CI hanging indefinitely
+  - Base branch moving during review
+  - Partial merge/deployment failure
+  - Human approval arriving twice
+  - Human approval referring to an obsolete bundle
+  - Region outage
+  - Database restore
+  - Customer revoking access mid-run
+
+  Specify delivery guarantees: at-most-once, at-least-once, or effectively-once
+  for every important operation.
+
+  13. Security and tenant isolation
+
+  Cover:
+
+  - Ephemeral workspaces
+  - Filesystem and network sandboxing
+  - Egress controls
+  - Secret brokerage
+  - Tenant-specific encryption keys
+  - Data retention
+  - Repository-content prompt injection
+  - Untrusted build/test execution
+  - Audit access
+  - Regional residency
+  - Customer-managed runners and keys
+  - Supply-chain security
+  - Break-glass controls and kill switches
+
+  14. Observability and learning
+
+  Define telemetry for:
+
+  - Programs, slices, attempts, sessions, models, tool calls, reviews, CI, merges,
+    deployments, milestones, and human feedback
+  - Lead time and autonomous completion rate
+  - Rework and review escape rate
+  - Defect and rollback rate
+  - Cost per accepted outcome
+  - Review precision/recall proxies
+  - Agent and model comparative performance
+  - Queue latency and resource utilization
+  - Human interruption rate
+  - Evidence freshness and policy compliance
+
+  Align with OpenTelemetry semantic conventions where useful, while explicitly
+  handling sensitive prompts, code, tool arguments, and model outputs.
+
+  Explain how retrospective evidence improves decomposition, model routing,
+  review policy, and estimates without silently changing customer policy.
+
+  15. Product experience
+
+  Design the key UI and API surfaces:
+
+  - Portfolio/program cockpit
+  - Work graph and active factory floor
+  - Slice/attempt timeline
+  - Review confrontation view
+  - Evidence explorer
+  - Cost and budget controls
+  - Policy editor/explainer
+  - Incident/recovery console
+  - Milestone presentation and demo room
+  - Contractual sign-off screen
+  - Audit export
+
+  Describe what a technical leader should understand within 30 seconds of opening
+  the cockpit.
+
+  16. Commercial productization
+
+  Address:
+
+  - Target customer and initial wedge
+  - Hosted SaaS versus customer-hosted runners
+  - Pricing metric
+  - Tenant onboarding
+  - Repository qualification
+  - Enterprise identity and audit
+  - SLAs/SLOs
+  - Support and incident responsibility
+  - Data/IP ownership
+  - Model-provider passthrough versus bundled usage
+  - A defensible product moat beyond “we call coding agents”
+
+  17. Migration and dogfooding
+
+  Give a staged path from this repository prototype to the product:
+
+  - Stage 0: make the existing Cubism workflow trustworthy enough to dogfood
+  - Stage 1: extract a single-repository local/control-plane kernel
+  - Stage 2: hosted multi-runner pilot
+  - Stage 3: multi-tenant beta
+  - Stage 4: enterprise-ready platform
+
+  For each stage give:
+
+  - Scope
+  - Architectural boundary
+  - Acceptance criteria
+  - Demonstration
+  - Human checkpoint
+  - Risks
+  - Explicit non-goals
+  - Exit/kill criteria
+
+  Do not propose a rewrite without identifying what prototype assets should be
+  retained, wrapped, replaced, or retired.
+
+  REQUIRED OUTPUT
+
+  Produce one coherent design document containing:
+
+  1. Executive thesis and product definition
+  2. Evidence-grounded assessment of the current prototype
+  3. “Retain / repair / replace / add” table for existing components
+  4. Product principles and non-negotiable invariants
+  5. Recommended reference architecture
+  6. Mermaid component and sequence diagrams
+  7. Domain model and durable event/state model
+  8. Scheduling and lease protocol
+  9. Adversarial-review protocol
+  10. Trust and threat model
+  11. Policy-as-code model
+  12. Evidence and attestation model
+  13. Human milestone-contract design
+  14. UI/API/CLI product surface
+  15. Reliability and disaster-recovery model
+  16. Security and multi-tenancy model
+  17. Observability, evaluation, and cost model
+  18. Build-versus-buy decisions
+  19. Migration roadmap with independently reviewable vertical slices
+  20. Top risks, open questions, and “what not to build”
+  21. A final list of recommended architectural decisions suitable for ADRs
+
+  Include small illustrative JSON or YAML examples for:
+
+  - A slice contract
+  - A lease with a fencing token
+  - A review attestation
+  - A milestone evidence bundle
+  - A human approval record
+  - A policy selecting review depth based on risk
+
+  QUALITY BAR
+
+  - Ground all observations about the prototype in exact file paths and line
+    numbers or diff hunks.
+  - Distinguish confirmed defects, architectural gaps, policy choices, and
+    unverified assumptions.
+  - Use current primary sources for external platform or security claims.
+  - Make explicit recommendations; do not hide every decision behind
+    “it depends.”
+  - For major choices, provide the strongest alternative and the reason it loses.
+  - Prefer platform-enforced invariants over prompt-enforced conventions.
+  - Assume duplicated events, partial failures, stale agents, hostile repository
+    content, and compromised credentials will eventually occur.
+  - Do not equate a different model name with independence.
+  - Do not claim cryptographic or transactional guarantees without showing the
+    trust root and operation boundary.
+  - Do not turn every operation into human approval. Preserve milestone-level
+    human governance and autonomous slice delivery.
+  - Do not produce a generic “AI agents + Kubernetes” diagram. Show protocols,
+    state transitions, identities, and evidence.
+  - Do not optimize only for the happy path.
+  - End with a concrete recommended architecture and staged execution plan, not
+    merely a menu of options.
+
+  If information is missing, state a reasonable assumption and complete the first
+  design. Put unresolved questions in a prioritized appendix rather than stopping
+  to ask for clarification.
