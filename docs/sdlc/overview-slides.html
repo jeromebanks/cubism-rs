@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cubism delivery system — human overview</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #627083;
+      --paper: #f5f1e8;
+      --white: #fffdf8;
+      --coral: #ef6a55;
+      --teal: #137c78;
+      --gold: #e3a72f;
+      --blue: #4d6bd8;
+      --line: #d8d2c5;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      overflow: hidden;
+      background: #111827;
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+    a { color: inherit; }
+    .deck { height: 100%; }
+    .slide {
+      display: none;
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      min-height: 640px;
+      padding: clamp(42px, 6vh, 76px) clamp(54px, 7vw, 118px);
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 92% 8%, rgba(227, 167, 47, .14), transparent 22%),
+        linear-gradient(135deg, var(--white), var(--paper));
+    }
+    .slide.active { display: flex; flex-direction: column; }
+    .slide::before {
+      content: "";
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 12px;
+      background: var(--accent, var(--coral));
+    }
+    .eyebrow {
+      margin: 0 0 18px;
+      color: var(--accent, var(--coral));
+      font-size: clamp(16px, 1.35vw, 22px);
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 {
+      max-width: 1050px;
+      margin-bottom: 28px;
+      font-size: clamp(58px, 6.2vw, 96px);
+      line-height: .98;
+      letter-spacing: -.055em;
+    }
+    h2 {
+      max-width: 1250px;
+      margin-bottom: 34px;
+      font-size: clamp(40px, 4vw, 64px);
+      line-height: 1.04;
+      letter-spacing: -.038em;
+    }
+    h3 {
+      margin-bottom: 10px;
+      font-size: clamp(24px, 2vw, 34px);
+      line-height: 1.14;
+    }
+    p, li {
+      font-size: clamp(20px, 1.65vw, 28px);
+      line-height: 1.38;
+    }
+    .lede {
+      max-width: 980px;
+      color: var(--muted);
+      font-size: clamp(25px, 2.25vw, 38px);
+      line-height: 1.3;
+    }
+    .grow { flex: 1; }
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: 16px;
+      letter-spacing: .03em;
+    }
+    .footer a { text-decoration-color: var(--line); text-underline-offset: 4px; }
+    .counter { font-variant-numeric: tabular-nums; }
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: clamp(42px, 6vw, 94px);
+      align-items: start;
+    }
+    .rule-block {
+      padding-top: 22px;
+      border-top: 5px solid var(--accent, var(--coral));
+    }
+    .rule-block p { color: var(--muted); }
+    .large-number {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--accent, var(--coral));
+      font-size: clamp(58px, 7vw, 104px);
+      font-weight: 850;
+      line-height: 1;
+      letter-spacing: -.06em;
+    }
+    .flow {
+      display: flex;
+      align-items: stretch;
+      gap: 16px;
+      margin: auto 0;
+    }
+    .flow .node {
+      flex: 1;
+      min-width: 0;
+      padding: 26px 22px;
+      border: 2px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .62);
+    }
+    .flow .node strong {
+      display: block;
+      margin-bottom: 9px;
+      color: var(--accent, var(--coral));
+      font-size: clamp(22px, 1.9vw, 32px);
+    }
+    .flow .node span {
+      color: var(--muted);
+      font-size: clamp(16px, 1.3vw, 22px);
+      line-height: 1.3;
+    }
+    .flow .arrow {
+      display: grid;
+      place-items: center;
+      color: var(--accent, var(--coral));
+      font-size: 38px;
+      font-weight: 800;
+    }
+    .stack {
+      display: grid;
+      gap: 18px;
+      max-width: 1120px;
+    }
+    .stack-row {
+      display: grid;
+      grid-template-columns: minmax(175px, .33fr) 1fr;
+      gap: 28px;
+      align-items: baseline;
+      padding: 18px 0;
+      border-bottom: 2px solid var(--line);
+    }
+    .stack-row strong {
+      color: var(--accent, var(--coral));
+      font-size: clamp(22px, 2vw, 32px);
+    }
+    .stack-row span {
+      color: var(--muted);
+      font-size: clamp(18px, 1.55vw, 25px);
+      line-height: 1.34;
+    }
+    .slide.dense h2 {
+      margin-bottom: 14px;
+      font-size: clamp(40px, 3.25vw, 52px);
+    }
+    .slide.dense .stack { gap: 0; }
+    .slide.dense .stack-row { padding: 8px 0; }
+    .slide.dense .stack-row strong { font-size: clamp(22px, 1.75vw, 28px); }
+    .slide.dense .stack-row span { font-size: clamp(18px, 1.3vw, 21px); }
+    .slide.dense .footer { margin-top: 12px; }
+    .quote {
+      max-width: 1250px;
+      margin: auto 0;
+      padding-left: 42px;
+      border-left: 8px solid var(--accent, var(--coral));
+      font-size: clamp(31px, 3.2vw, 52px);
+      font-weight: 680;
+      line-height: 1.22;
+      letter-spacing: -.025em;
+    }
+    .quote small {
+      display: block;
+      margin-top: 24px;
+      color: var(--muted);
+      font-size: clamp(18px, 1.5vw, 25px);
+      font-weight: 500;
+      letter-spacing: 0;
+    }
+    .loop {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 30px;
+      align-items: center;
+      margin: auto 0;
+    }
+    .loop-side {
+      padding: 34px;
+      border-top: 7px solid var(--accent, var(--coral));
+      background: rgba(255, 255, 255, .58);
+    }
+    .loop-side ul { margin: 18px 0 0; padding-left: 25px; }
+    .loop-side li { margin: 11px 0; color: var(--muted); }
+    .loop-center {
+      color: var(--accent, var(--coral));
+      font-size: 58px;
+      font-weight: 800;
+    }
+    .lanes {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 10px;
+      margin: auto 0 22px;
+    }
+    .lane {
+      display: flex;
+      min-height: 270px;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 18px 14px;
+      border-top: 7px solid var(--lane);
+      background: rgba(255, 255, 255, .66);
+    }
+    .lane strong { font-size: clamp(17px, 1.45vw, 24px); }
+    .lane span {
+      color: var(--lane);
+      font-size: clamp(36px, 4vw, 64px);
+      font-weight: 850;
+    }
+    .snapshot {
+      color: var(--muted);
+      font-size: clamp(16px, 1.3vw, 21px);
+    }
+    .guardrails {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      column-gap: 60px;
+      row-gap: 24px;
+      margin: auto 0;
+    }
+    .guardrail {
+      padding: 18px 0 18px 26px;
+      border-left: 5px solid var(--accent, var(--coral));
+    }
+    .guardrail strong { display: block; font-size: clamp(23px, 2vw, 32px); }
+    .guardrail span { color: var(--muted); font-size: clamp(17px, 1.45vw, 24px); }
+    .prompt {
+      margin: 14px 0 24px;
+      padding: 22px 26px;
+      border-left: 7px solid var(--accent, var(--coral));
+      background: rgba(255, 255, 255, .66);
+      font: 600 clamp(17px, 1.35vw, 22px)/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .controls {
+      position: fixed;
+      z-index: 10;
+      right: 18px;
+      bottom: 15px;
+      display: flex;
+      gap: 8px;
+    }
+    .controls button {
+      width: 42px;
+      height: 42px;
+      border: 1px solid rgba(255,255,255,.4);
+      border-radius: 50%;
+      background: rgba(17, 24, 39, .82);
+      color: white;
+      font-size: 20px;
+      cursor: pointer;
+    }
+    .controls button:focus-visible { outline: 3px solid var(--gold); }
+    @media (max-width: 900px) {
+      .slide { padding: 40px 44px; }
+      .two-col, .loop { grid-template-columns: 1fr; gap: 24px; }
+      .loop-center { transform: rotate(90deg); text-align: center; }
+      .lanes { grid-template-columns: repeat(3, 1fr); }
+      .lane { min-height: 135px; }
+      .flow { display: grid; grid-template-columns: 1fr; }
+      .flow .arrow { transform: rotate(90deg); height: 22px; }
+      .guardrails { grid-template-columns: 1fr; }
+    }
+    @media print {
+      @page { size: 16in 9in; margin: 0; }
+      html, body { height: auto; overflow: visible; background: white; }
+      .slide, .slide.active {
+        display: flex !important;
+        width: 16in;
+        height: 9in;
+        min-height: 0;
+        page-break-after: always;
+        break-after: page;
+      }
+      .controls { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="deck" aria-label="Cubism delivery system overview">
+    <section class="slide active" style="--accent: var(--coral)">
+      <p class="eyebrow">Cubism delivery system</p>
+      <div class="grow"></div>
+      <h1>Human-guided.<br>Agent-operated.</h1>
+      <p class="lede">A delivery system for long-running projects that keeps
+        sessions small, reviews independent, and product decisions human.</p>
+      <div class="grow"></div>
+      <div class="footer"><span>SDLC overview</span><span class="counter"></span></div>
+    </section>
+
+    <section class="slide" style="--accent: var(--teal)">
+      <p class="eyebrow">The operating contract</p>
+      <h2>Humans steer outcomes; agents run the delivery loop.</h2>
+      <div class="two-col grow">
+        <div class="rule-block">
+          <span class="large-number">3</span>
+          <h3>Human decisions</h3>
+          <p>Choose priorities. Review coherent demonstrations. Approve or give
+            product feedback.</p>
+        </div>
+        <div class="rule-block">
+          <span class="large-number">∞</span>
+          <h3>Agent-sized executions</h3>
+          <p>Plan, claim, implement, test, review, merge, and report—without
+            requiring a human at every pull request.</p>
+        </div>
+      </div>
+      <div class="footer"><span>The goal is low supervision, not low accountability.</span><span class="counter"></span></div>
+    </section>
+
+    <section class="slide" style="--accent: var(--blue)">
+      <p class="eyebrow">Context stays bounded</p>
+      <h2>One long project becomes a sequence of clean sessions.</h2>
+      <div class="flow">
+        <div class="node"><strong>Epic</strong><span>Long-term outcome and exit criteria</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Slice</strong><span>One observable, testable change</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Slice</strong><span>A fresh session with minimal context</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Checkpoint</strong><span>An integrated result worth human attention</span></div>
+      </div>
+      <p class="lede">The issue is the handoff. Historical phase documents stay
+        out of context unless a current slice links them explicitly.</p>
+      <div class="footer"><span>Vertical slices replace long-lived feature sessions.</span><span class="counter"></span></div>
+    </section>
+
+    <section class="slide dense" style="--accent: var(--coral)">
+      <p class="eyebrow">Every slice earns its merge</p>
+      <h2>Two review layers sit on top of deterministic checks.</h2>
+      <div class="stack grow">
+        <div class="stack-row"><strong>1 · Claim</strong><span>A stable `issue/N` branch prevents two sessions from owning the same work.</span></div>
+        <div class="stack-row"><strong>2 · Build</strong><span>The agent implements in an isolated worktree and runs focused plus repository checks.</span></div>
+        <div class="stack-row"><strong>3 · Advise</strong><span>Claude requests advisor review of the plan and diff when that facility is available.</span></div>
+        <div class="stack-row"><strong>4 · Review</strong><span>A fresh Codex session reviews the committed PR—not the implementer's description.</span></div>
+        <div class="stack-row"><strong>5 · Gate</strong><span>CI, issue type, merge state, and an exact-SHA review receipt must all pass.</span></div>
+      </div>
+      <div class="footer"><span>Passing slices merge without routine human review.</span><span class="counter"></span></div>
+    </section>
+
+    <section class="slide" style="--accent: var(--gold)">
+      <p class="eyebrow">Visibility without status meetings</p>
+      <h2>The cockpit shows where work is—and where attention belongs.</h2>
+      <div class="lanes">
+        <div class="lane" style="--lane:#23856d"><strong>Ready next</strong><span>0</span></div>
+        <div class="lane" style="--lane:#4d6bd8"><strong>In progress</strong><span>0</span></div>
+        <div class="lane" style="--lane:#7856c4"><strong>Agent review</strong><span>1</span></div>
+        <div class="lane" style="--lane:#d97706"><strong>Human review</strong><span>0</span></div>
+        <div class="lane" style="--lane:#c2416b"><strong>Human feedback</strong><span>0</span></div>
+        <div class="lane" style="--lane:#9b2c2c"><strong>Blocked</strong><span>0</span></div>
+      </div>
+      <p class="snapshot">Initial migration snapshot · 13 epics need decomposition · 22 open issues remain unmapped. The live HTML always wins over these illustrative numbers.</p>
+      <div class="footer"><a href="../project-status.html">Open the live delivery cockpit</a><span class="counter"></span></div>
+    </section>
+
+    <section class="slide" style="--accent: var(--teal)">
+      <p class="eyebrow">Human attention is a milestone gate</p>
+      <h2>Review the integrated outcome, not a stream of implementation details.</h2>
+      <div class="loop grow">
+        <div class="loop-side">
+          <h3>Agent prepares</h3>
+          <ul>
+            <li>achievement summary</li>
+            <li>decisions and known gaps</li>
+            <li>exact demo steps</li>
+          </ul>
+        </div>
+        <div class="loop-center">→</div>
+        <div class="loop-side">
+          <h3>Human decides</h3>
+          <ul>
+            <li>approve and continue</li>
+            <li>or request concrete changes</li>
+            <li>never approve by silence</li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer"><span>Ordinary epic work pauses while the gate is open.</span><span class="counter"></span></div>
+    </section>
+
+    <section class="slide" style="--accent: var(--coral)">
+      <p class="eyebrow">Feedback becomes durable work</p>
+      <h2>Human comments do not disappear into session history.</h2>
+      <div class="flow">
+        <div class="node"><strong>Observe</strong><span>“When I do X, I see Y.”</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Specify</strong><span>“I expected Z.”</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Track</strong><span>Create bounded `type:feedback` slices.</span></div>
+        <div class="arrow">→</div>
+        <div class="node"><strong>Re-review</strong><span>Generate a new report and demo.</span></div>
+      </div>
+      <p class="lede">Earlier reports remain versioned. Product feedback is
+        visible, attributable, and testable until approval.</p>
+      <div class="footer"><span>Feedback slices may run while unrelated epic work stays paused.</span><span class="counter"></span></div>
+    </section>
+
+    <section class="slide" style="--accent: var(--blue)">
+      <p class="eyebrow">Trust is encoded</p>
+      <h2>The scripts prevent the most tempting optimistic shortcuts.</h2>
+      <div class="guardrails grow">
+        <div class="guardrail"><strong>One issue, one claim</strong><span>Remote branch creation acts as a distributed lock.</span></div>
+        <div class="guardrail"><strong>One PR, one slice</strong><span>Ambiguous closing references block the merge.</span></div>
+        <div class="guardrail"><strong>Review follows code</strong><span>Any new commit invalidates the prior receipt.</span></div>
+        <div class="guardrail"><strong>Missing means blocked</strong><span>No agent guesses about CI, mergeability, or approval.</span></div>
+        <div class="guardrail"><strong>Humans own gates</strong><span>Approval and feedback are recorded on the epic.</span></div>
+        <div class="guardrail"><strong>GitHub owns state</strong><span>HTML is a readable snapshot, never a second tracker.</span></div>
+      </div>
+      <div class="footer"><span>Autonomy is safe because uncertainty fails closed.</span><span class="counter"></span></div>
+    </section>
+
+    <section class="slide" style="--accent: var(--teal)">
+      <p class="eyebrow">The human interface is conversational</p>
+      <h2>Three prompts cover most operating needs.</h2>
+      <div class="prompt">Plan epic #N into session-sized slices. Use `plan-epic`. Do not implement in this session.</div>
+      <div class="prompt">Implement the next ready slice using `work-slice`; continue through independent review and automatic merge.</div>
+      <div class="prompt">Refresh project status and explain what is active, blocked, awaiting my review, and still unmapped.</div>
+      <div class="footer"><a href="HUMAN_TUTORIAL.md">Open the complete human tutorial</a><span class="counter"></span></div>
+    </section>
+
+    <section class="slide" style="--accent: var(--coral)">
+      <p class="eyebrow">Start here</p>
+      <h2>Decompose one priority epic, then let the loop prove itself.</h2>
+      <blockquote class="quote">
+        “Plan epic #N into session-sized slices. Show me the first coherent
+        checkpoint and the demonstration I will receive.”
+        <small>Then begin a fresh `work-slice` session for the first ready issue.</small>
+      </blockquote>
+      <div class="footer"><span>Direction remains human. Delivery becomes repeatable.</span><span class="counter"></span></div>
+    </section>
+  </main>
+
+  <nav class="controls" aria-label="Slide navigation">
+    <button id="previous" type="button" aria-label="Previous slide">←</button>
+    <button id="next" type="button" aria-label="Next slide">→</button>
+  </nav>
+  <script>
+    (() => {
+      const slides = [...document.querySelectorAll('.slide')];
+      let index = Math.max(0, Math.min(slides.length - 1,
+        Number.parseInt(location.hash.slice(1), 10) - 1 || 0));
+
+      function show(nextIndex) {
+        index = Math.max(0, Math.min(slides.length - 1, nextIndex));
+        slides.forEach((slide, i) => slide.classList.toggle('active', i === index));
+        document.querySelectorAll('.counter').forEach((counter, i) => {
+          counter.textContent = `${i + 1} / ${slides.length}`;
+        });
+        history.replaceState(null, '', `#${index + 1}`);
+        document.getElementById('previous').disabled = index === 0;
+        document.getElementById('next').disabled = index === slides.length - 1;
+      }
+
+      document.getElementById('previous').addEventListener('click', () => show(index - 1));
+      document.getElementById('next').addEventListener('click', () => show(index + 1));
+      addEventListener('keydown', (event) => {
+        if (['ArrowRight', 'PageDown', ' '].includes(event.key)) show(index + 1);
+        if (['ArrowLeft', 'PageUp'].includes(event.key)) show(index - 1);
+        if (event.key === 'Home') show(0);
+        if (event.key === 'End') show(slides.length - 1);
+      });
+      addEventListener('hashchange', () => {
+        const requested = Number.parseInt(location.hash.slice(1), 10) - 1;
+        if (Number.isInteger(requested)) show(requested);
+      });
+      show(index);
+    })();
+  </script>
+</body>
+</html>
