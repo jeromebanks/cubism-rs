@@ -454,7 +454,10 @@ def implementer_identity(head_message: str | None) -> str | None:
     # commit, must not be able to manufacture an implementer identity and so
     # escape the fail-closed branch below.
     blocks = re.split(r"\n\s*\n", (head_message or "").strip())
-    matches = AGENT_SESSION_RE.findall(blocks[-1]) if blocks else []
+    # `git interpret-trailers` recognises a trailer block only as a paragraph
+    # separate from the subject, so a one-paragraph message has no trailers at
+    # all — not even when its only line reads `Agent-Session: x`.
+    matches = AGENT_SESSION_RE.findall(blocks[-1]) if len(blocks) > 1 else []
     if not matches:
         return None
     # Last trailer wins: `git commit --amend` and trailer tooling append.

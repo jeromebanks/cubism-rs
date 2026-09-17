@@ -181,6 +181,11 @@ Read one file.
         message = "subject\n\nThe convention is `Agent-Session: someone`.\n\nplain closing prose"
         self.assertIsNone(sdlc.implementer_identity(message))
 
+    def test_a_one_paragraph_message_has_no_trailers(self):
+        # `git interpret-trailers --parse` finds nothing in either of these.
+        self.assertIsNone(sdlc.implementer_identity("Agent-Session: solo"))
+        self.assertIsNone(sdlc.implementer_identity("subject\nAgent-Session: no-blank"))
+
     def test_only_the_final_trailer_block_is_authoritative(self):
         message = ("subject\n\nAgent-Session: mentioned-in-body\n\n"
                    "Co-Authored-By: x\nAgent-Session: real-session")
