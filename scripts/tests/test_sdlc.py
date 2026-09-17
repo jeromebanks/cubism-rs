@@ -170,6 +170,35 @@ Read one file.
         self.assertEqual(1, code)
         self.assertEqual([], calls)
 
+    # --- on-the-wire protocol identifiers ---
+
+    def test_comment_markers_are_pinned_and_project_neutral(self):
+        # These strings are format, not branding. They are written into GitHub
+        # comment bodies and parsed back out, so changing one orphans every
+        # receipt and gate record already posted. Pinned deliberately: if this
+        # test fails, the change needs a migration, not a new expectation.
+        self.assertEqual("<!-- nightshift-review ", sdlc.REVIEW_PREFIX)
+        self.assertEqual(" -->", sdlc.REVIEW_SUFFIX)
+        self.assertEqual("<!-- nightshift-gate ", sdlc.GATE_PREFIX)
+        self.assertEqual(" -->", sdlc.GATE_SUFFIX)
+        for marker in (sdlc.REVIEW_PREFIX, sdlc.GATE_PREFIX):
+            self.assertNotIn("cubism", marker)
+
+    def test_receipt_round_trips_through_its_marker(self):
+        body = sdlc.review_marker("codex", "abc123", "pass", "fresh-codex")
+        [receipt] = sdlc.parse_review_receipts([{"body": body, "user": {"login": "r"}}])
+        self.assertEqual(
+            ("codex", "abc123", "pass", "fresh-codex"),
+            (receipt["kind"], receipt["head_sha"], receipt["verdict"], receipt["reviewer"]),
+        )
+
+    def test_cockpit_title_names_the_repository_it_describes(self):
+        page = sdlc.render_status(sdlc.build_model({
+            "repository": "acme/widgets", "generated_at": "now",
+            "issues": [self.epic, self.slice], "pulls": [],
+        }, self.config))
+        self.assertIn("<title>acme/widgets delivery cockpit</title>", page)
+
     # --- status projection ---
 
     def test_status_projection_drops_prose_but_keeps_state(self):
