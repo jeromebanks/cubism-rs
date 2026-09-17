@@ -17,9 +17,12 @@ Prefix shell commands with `rtk`. In command chains, prefix each segment. Use
 - Required review comes from a fresh agent. A self-review is not an independent
   review receipt.
 - Every agent commit records the session that wrote it with an
-  `Agent-Session: <agent/session>` trailer. The merge gate compares it to the
-  reviewer named in the review receipt, so a commit without it cannot prove the
-  review came from a different agent and fails closed. `Claude-Session:` is
+  `Agent-Session: <agent/session>` trailer. When the receipt and the pull
+  request share a GitHub account — the normal case here — the merge gate
+  compares that trailer to the reviewer named in the receipt, so a commit
+  without one cannot prove the review came from a different agent and fails
+  closed. A receipt from a different account establishes independence on its
+  own and is accepted without consulting trailers. `Claude-Session:` is
   accepted as an equivalent for existing history.
 - Do not ask for routine human PR review. When CI and the required agent review
   pass, use the deterministic merge command in `SDLC.md`.
