@@ -449,7 +449,12 @@ def implementer_identity(head_message: str | None) -> str | None:
     for it: a single operator drives several agents from one account, so equal
     logins say nothing about whether two different contexts saw the change.
     """
-    matches = AGENT_SESSION_RE.findall(head_message or "")
+    # Only git's trailer block — the final paragraph — is authoritative. A
+    # message that merely mentions `Agent-Session:` in prose, or quotes another
+    # commit, must not be able to manufacture an implementer identity and so
+    # escape the fail-closed branch below.
+    blocks = re.split(r"\n\s*\n", (head_message or "").strip())
+    matches = AGENT_SESSION_RE.findall(blocks[-1]) if blocks else []
     if not matches:
         return None
     # Last trailer wins: `git commit --amend` and trailer tooling append.
@@ -604,7 +609,16 @@ def evaluate_merge_gate(pr: dict[str, Any], comments: list[dict[str, Any]], issu
                     f"agent `{implementer}`; a self-review is not an independent review"
                 )
         independent = [receipt for receipt in candidates if receipt not in dependent]
-        latest = latest_receipt(independent, kind, head) if pr_author else None
+        # Independence gates *authorization*, not *objection*. A failing receipt
+        # is a veto, and an implementer who finds a defect in their own work
+        # must be able to stop the merge with it. Dropping dependent failures
+        # here would let an older independent pass outrank a newer self-reported
+        # failure, defeating newest-first resolution.
+        considered = [
+            receipt for receipt in candidates
+            if receipt in independent or receipt.get("verdict") == "fail"
+        ]
+        latest = latest_receipt(considered, kind, head) if pr_author else None
         if latest is None:
             if reasons:
                 errors.append(reasons[-1])

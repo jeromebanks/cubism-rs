@@ -150,6 +150,50 @@ Read one file.
         self.assertEqual("second", sdlc.implementer_identity(message))
         self.assertIsNone(sdlc.implementer_identity("no trailer here"))
 
+    def test_newer_self_review_failure_outranks_an_older_independent_pass(self):
+        # A veto needs no independence. Regression test for the case where
+        # filtering dependent receipts before resolution discarded a newer
+        # failure and let a stale pass authorize the merge.
+        comments = [
+            self._receipt(self.ONE_ACCOUNT, "pass", reviewer="codex-cli fresh exec session",
+                          created_at="2026-01-01T00:00:00Z"),
+            self._receipt(self.ONE_ACCOUNT, "fail", reviewer=self.IMPLEMENTED_BY,
+                          created_at="2026-01-02T00:00:00Z"),
+        ]
+        errors = sdlc.evaluate_merge_gate(
+            self._passing_pr(author=self.ONE_ACCOUNT), comments,
+            self.slice, self.config, self.HEAD_COMMIT)
+        self.assertTrue(any("is `fail`, not `pass`" in e for e in errors), errors)
+
+    def test_a_dependent_pass_still_cannot_authorize(self):
+        comments = [
+            self._receipt(self.ONE_ACCOUNT, "fail", reviewer="codex-cli fresh exec session",
+                          created_at="2026-01-01T00:00:00Z"),
+            self._receipt(self.ONE_ACCOUNT, "pass", reviewer=self.IMPLEMENTED_BY,
+                          created_at="2026-01-02T00:00:00Z"),
+        ]
+        errors = sdlc.evaluate_merge_gate(
+            self._passing_pr(author=self.ONE_ACCOUNT), comments,
+            self.slice, self.config, self.HEAD_COMMIT)
+        self.assertTrue(errors, "a newer self-authored pass must not clear an independent failure")
+
+    def test_trailer_in_prose_does_not_create_an_identity(self):
+        message = "subject\n\nThe convention is `Agent-Session: someone`.\n\nplain closing prose"
+        self.assertIsNone(sdlc.implementer_identity(message))
+
+    def test_only_the_final_trailer_block_is_authoritative(self):
+        message = ("subject\n\nAgent-Session: mentioned-in-body\n\n"
+                   "Co-Authored-By: x\nAgent-Session: real-session")
+        self.assertEqual("real-session", sdlc.implementer_identity(message))
+
+    def test_prose_trailer_still_fails_closed_at_the_gate(self):
+        message = "subject\n\nAgent-Session: fake\n\njust prose, no trailer block"
+        errors = sdlc.evaluate_merge_gate(
+            self._passing_pr(author=self.ONE_ACCOUNT),
+            [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
+            self.slice, self.config, message)
+        self.assertTrue(any("Agent-Session:" in e for e in errors), errors)
+
     def test_unknown_pr_author_fails_closed(self):
         pr = self._passing_pr()
         del pr["author"]
