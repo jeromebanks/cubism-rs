@@ -440,6 +440,22 @@ def review_marker(kind: str, head_sha: str, verdict: str, reviewer: str) -> str:
     return f"{REVIEW_PREFIX}{payload}{REVIEW_SUFFIX}"
 
 
+TRAILER_LINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*:\s|^\s")
+
+
+def _is_trailer_block(block: str) -> bool:
+    """Whether a paragraph is a git trailer block.
+
+    Git accepts a final paragraph of all trailers, or one that is at least a
+    quarter trailers *and* contains a known trailer. Only the first, stricter
+    rule is implemented: requiring every line to be a trailer (or a folded
+    continuation) is easy to reason about, and erring toward rejection keeps
+    the gate failing closed, which is the property that matters here.
+    """
+    lines = [line for line in block.splitlines() if line.strip()]
+    return bool(lines) and all(TRAILER_LINE_RE.match(line) for line in lines)
+
+
 def implementer_identity(head_message: str | None) -> str | None:
     """The agent session that wrote the head commit, from its trailers.
 
@@ -457,7 +473,7 @@ def implementer_identity(head_message: str | None) -> str | None:
     # `git interpret-trailers` recognises a trailer block only as a paragraph
     # separate from the subject, so a one-paragraph message has no trailers at
     # all — not even when its only line reads `Agent-Session: x`.
-    matches = AGENT_SESSION_RE.findall(blocks[-1]) if len(blocks) > 1 else []
+    matches = AGENT_SESSION_RE.findall(blocks[-1]) if len(blocks) > 1 and _is_trailer_block(blocks[-1]) else []
     if not matches:
         return None
     # Last trailer wins: `git commit --amend` and trailer tooling append.
