@@ -443,11 +443,16 @@ TRAILER_LINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*:\s|^\s")
 def _is_trailer_block(block: str) -> bool:
     """Whether a paragraph is a git trailer block.
 
-    Git accepts a final paragraph of all trailers, or one that is at least a
-    quarter trailers *and* contains a known trailer. Only the first, stricter
-    rule is implemented: requiring every line to be a trailer (or a folded
-    continuation) is easy to reason about, and erring toward rejection keeps
-    the gate failing closed, which is the property that matters here.
+    Two conditions: it opens with a real trailer rather than a folded
+    continuation, and every non-blank line is either a trailer or such a
+    continuation. Folding the continuations into their values is the caller's
+    job, not this predicate's.
+
+    Git is more permissive — it also accepts a paragraph that is at least a
+    quarter trailers *and* contains a known trailer — and the narrower rule is
+    deliberate. Erring toward rejection keeps the gate failing closed, which is
+    the property being defended; the fuzz test in the suite asserts only that
+    direction, never strict parity.
     """
     lines = [line for line in block.splitlines() if line.strip()]
     if not lines or lines[0][:1].isspace():
