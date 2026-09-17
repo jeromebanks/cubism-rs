@@ -42,9 +42,6 @@ HEADING_RE = re.compile(r"(?m)^#{2,3}\s+(.+?)\s*$")
 # commits are not retroactively unmergeable. Harness names already appear in
 # this file (`advisor`, `codex`), so naming them here introduces no new coupling.
 AGENT_SESSION_TRAILERS = ("Agent-Session", "Claude-Session")
-AGENT_SESSION_RE = re.compile(
-    r"(?im)^\s*(?:" + "|".join(AGENT_SESSION_TRAILERS) + r")\s*:\s*(\S.*?)\s*$"
-)
 FAIL_CONCLUSIONS = {
     "ACTION_REQUIRED", "CANCELLED", "ERROR", "FAILURE", "STALE",
     "STARTUP_FAILURE", "TIMED_OUT",
@@ -453,7 +450,11 @@ def _is_trailer_block(block: str) -> bool:
     the gate failing closed, which is the property that matters here.
     """
     lines = [line for line in block.splitlines() if line.strip()]
-    return bool(lines) and all(TRAILER_LINE_RE.match(line) for line in lines)
+    if not lines or lines[0][:1].isspace():
+        # A block opening with a folded continuation has nothing to fold into,
+        # so git does not recognise it as a trailer block at all.
+        return False
+    return all(TRAILER_LINE_RE.match(line) for line in lines)
 
 
 def implementer_identity(head_message: str | None) -> str | None:
@@ -465,15 +466,26 @@ def implementer_identity(head_message: str | None) -> str | None:
     for it: a single operator drives several agents from one account, so equal
     logins say nothing about whether two different contexts saw the change.
     """
-    # Only git's trailer block — the final paragraph — is authoritative. A
-    # message that merely mentions `Agent-Session:` in prose, or quotes another
-    # commit, must not be able to manufacture an implementer identity and so
-    # escape the fail-closed branch below.
+    # Only git's trailer block — the final paragraph, and only when it is a
+    # real trailer block — is authoritative. A message that mentions
+    # `Agent-Session:` in prose, or quotes another commit, must not be able to
+    # manufacture an identity and so escape the fail-closed branch.
     blocks = re.split(r"\n\s*\n", (head_message or "").strip())
-    # `git interpret-trailers` recognises a trailer block only as a paragraph
-    # separate from the subject, so a one-paragraph message has no trailers at
-    # all — not even when its only line reads `Agent-Session: x`.
-    matches = AGENT_SESSION_RE.findall(blocks[-1]) if len(blocks) > 1 and _is_trailer_block(blocks[-1]) else []
+    if len(blocks) < 2 or not _is_trailer_block(blocks[-1]):
+        return None
+    keys = {key.lower() for key in AGENT_SESSION_TRAILERS}
+    trailers: list[list[str]] = []
+    for line in blocks[-1].splitlines():
+        if not line.strip():
+            continue
+        if line[:1].isspace() and trailers:
+            # Git folds an indented line into the preceding trailer, preserving
+            # the whitespace on both sides of the join.
+            trailers[-1][1] += " " + line.strip()
+            continue
+        key, _, value = line.partition(":")
+        trailers.append([key.strip().lower(), value.lstrip()])
+    matches = [value.strip() for key, value in trailers if key in keys and value.strip()]
     if not matches:
         return None
     # Last trailer wins: `git commit --amend` and trailer tooling append.

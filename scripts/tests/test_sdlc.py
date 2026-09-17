@@ -217,10 +217,61 @@ Read one file.
                     input=message, capture_output=True, text=True).stdout
                 values = [
                     line.split(":", 1)[1].strip() for line in parsed.splitlines()
-                    if line.split(":", 1)[0] in sdlc.AGENT_SESSION_TRAILERS
+                    if line.split(":", 1)[0].lower()
+                    in {key.lower() for key in sdlc.AGENT_SESSION_TRAILERS}
                 ]
                 self.assertEqual(values[-1] if values else None,
                                  sdlc.implementer_identity(message))
+
+    def test_implementer_identity_never_diverges_from_git_under_fuzzing(self):
+        """Randomised differential test against git, fixed seed.
+
+        Four review rounds were each spent on one more hand-found shape where a
+        hand-rolled approximation disagreed with git. Enumerating shapes loses
+        that game; sampling the space closes it. The seed is fixed so a failure
+        is reproducible, and any divergence is printed with the offending
+        message.
+        """
+        import random, shutil, subprocess
+        if not shutil.which("git"):
+            self.skipTest("git is unavailable")
+        pieces = [
+            "subject", "", "body prose", "Other: x", " continued", "\ttabbed",
+            "Co-Authored-By: someone <a@b.c>", "Agent-Session: one",
+            "Claude-Session: https://example/s", "Agent-Session: two",
+            "Closes #1", "Agent-Session:", "Agent-Session:    spaced   ",
+            "agent-session: lower", "prose Agent-Session: inline", "   ",
+        ]
+        rng = random.Random(20260917)
+        for _ in range(400):
+            message = "\n".join(rng.choice(pieces) for _ in range(rng.randint(1, 7)))
+            parsed = subprocess.run(
+                ["git", "interpret-trailers", "--parse"],
+                input=message, capture_output=True, text=True).stdout
+            values = [
+                line.split(":", 1)[1].strip() for line in parsed.splitlines()
+                if line.split(":", 1)[0].lower()
+                in {key.lower() for key in sdlc.AGENT_SESSION_TRAILERS}
+            ]
+            expected = values[-1] if values else None
+            actual = sdlc.implementer_identity(message)
+            # One-directional on purpose. The property the gate needs is that we
+            # never *invent* an identity git would not produce: under-rejecting
+            # merges unreviewed work, while over-rejecting only emits an
+            # actionable "add an Agent-Session: trailer" error. So a stricter
+            # answer than git's is acceptable; a different or invented one is
+            # not. (Git accepts a subject-less paragraph of pure trailers, which
+            # `implementer_identity` declines; real commit messages have a
+            # subject, and declining is the safe side.)
+            self.assertIn(
+                actual, (expected, None),
+                f"invented an identity git does not produce, for message: {message!r}",
+            )
+
+    def test_a_folded_continuation_line_is_not_a_trailer(self):
+        # git folds an indented line into the preceding trailer.
+        self.assertIsNone(
+            sdlc.implementer_identity("subject\n\nOther: x\n Agent-Session: invented"))
 
     def test_prose_mixed_into_the_final_paragraph_is_not_a_trailer_block(self):
         # `git interpret-trailers --parse` finds nothing here either.
