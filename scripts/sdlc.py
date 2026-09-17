@@ -36,6 +36,12 @@ PART_OF_RE = re.compile(r"(?im)^\s*part of\s+#(\d+)\b.*$")
 CHECKBOX_CHILD_RE = re.compile(r"(?im)^\s*-\s*\[[ xX]\]\s*#(\d+)\b")
 CLOSE_RE = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b")
 HEADING_RE = re.compile(r"(?m)^#{2,3}\s+(.+?)\s*$")
+# Which agent session produced a commit. `Agent-Session` is the harness-neutral
+# spelling every harness should write; `Claude-Session` is the convention
+# already present in this repository's history and stays valid so that existing
+# commits are not retroactively unmergeable. Harness names already appear in
+# this file (`advisor`, `codex`), so naming them here introduces no new coupling.
+AGENT_SESSION_TRAILERS = ("Agent-Session", "Claude-Session")
 FAIL_CONCLUSIONS = {
     "ACTION_REQUIRED", "CANCELLED", "ERROR", "FAILURE", "STALE",
     "STARTUP_FAILURE", "TIMED_OUT",
@@ -431,6 +437,66 @@ def review_marker(kind: str, head_sha: str, verdict: str, reviewer: str) -> str:
     return f"{REVIEW_PREFIX}{payload}{REVIEW_SUFFIX}"
 
 
+TRAILER_LINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*:\s|^\s")
+
+
+def _is_trailer_block(block: str) -> bool:
+    """Whether a paragraph is a git trailer block.
+
+    Two conditions: it opens with a real trailer rather than a folded
+    continuation, and every non-blank line is either a trailer or such a
+    continuation. Folding the continuations into their values is the caller's
+    job, not this predicate's.
+
+    Git is more permissive — it also accepts a paragraph that is at least a
+    quarter trailers *and* contains a known trailer — and the narrower rule is
+    deliberate. Erring toward rejection keeps the gate failing closed, which is
+    the property being defended; the fuzz test in the suite asserts only that
+    direction, never strict parity.
+    """
+    lines = [line for line in block.splitlines() if line.strip()]
+    if not lines or lines[0][:1].isspace():
+        # A block opening with a folded continuation has nothing to fold into,
+        # so git does not recognise it as a trailer block at all.
+        return False
+    return all(TRAILER_LINE_RE.match(line) for line in lines)
+
+
+def implementer_identity(head_message: str | None) -> str | None:
+    """The agent session that wrote the head commit, from its trailers.
+
+    This is the other half of review independence. The receipt records who
+    reviewed; the commit records who implemented. Both are agent identities,
+    which is what `AGENTS.md` asks about. The GitHub account is a poor proxy
+    for it: a single operator drives several agents from one account, so equal
+    logins say nothing about whether two different contexts saw the change.
+    """
+    # Only git's trailer block — the final paragraph, and only when it is a
+    # real trailer block — is authoritative. A message that mentions
+    # `Agent-Session:` in prose, or quotes another commit, must not be able to
+    # manufacture an identity and so escape the fail-closed branch.
+    blocks = re.split(r"\n\s*\n", (head_message or "").strip())
+    if len(blocks) < 2 or not _is_trailer_block(blocks[-1]):
+        return None
+    keys = {key.lower() for key in AGENT_SESSION_TRAILERS}
+    trailers: list[list[str]] = []
+    for line in blocks[-1].splitlines():
+        if not line.strip():
+            continue
+        if line[:1].isspace() and trailers:
+            # Git folds an indented line into the preceding trailer, preserving
+            # the whitespace on both sides of the join.
+            trailers[-1][1] += " " + line.strip()
+            continue
+        key, _, value = line.partition(":")
+        trailers.append([key.strip().lower(), value.lstrip()])
+    matches = [value.strip() for key, value in trailers if key in keys and value.strip()]
+    if not matches:
+        return None
+    # Last trailer wins: `git commit --amend` and trailer tooling append.
+    return matches[-1].strip() or None
+
+
 def parse_review_receipts(comments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     receipts = []
     pattern = re.compile(re.escape(REVIEW_PREFIX) + r"(\{.*?\})" + re.escape(REVIEW_SUFFIX))
@@ -503,7 +569,7 @@ def fetch_comments(number: int, config: dict[str, Any]) -> list[dict[str, Any]]:
     return run_json(["gh", "api", "--paginate", f"repos/{config['repository']}/issues/{number}/comments"])
 
 
-def evaluate_merge_gate(pr: dict[str, Any], comments: list[dict[str, Any]], issue: dict[str, Any] | None, config: dict[str, Any]) -> list[str]:
+def evaluate_merge_gate(pr: dict[str, Any], comments: list[dict[str, Any]], issue: dict[str, Any] | None, config: dict[str, Any], head_message: str | None = None) -> list[str]:
     errors: list[str] = []
     head = pr.get("headRefOid")
     if pr.get("state") != "OPEN":
@@ -534,29 +600,64 @@ def evaluate_merge_gate(pr: dict[str, Any], comments: list[dict[str, Any]], issu
             errors.append(f"required check `{required}` is {outcomes.get(required, 'missing')}")
 
     receipts = parse_review_receipts(comments)
-    # An implementer must not be able to write their own passing receipt, so
-    # independence is checked against the PR author. An unknown author is
-    # ambiguous evidence about independence, and ambiguity fails closed.
+    # An implementer must not be able to write their own passing receipt.
+    # Independence is established at the account level when it can be — a
+    # receipt from a different GitHub account is the strongest evidence
+    # available — and otherwise at the agent level, which is what `AGENTS.md`
+    # actually requires: "review comes from a fresh agent". One operator
+    # driving several agents from one account satisfies that, and equal logins
+    # are not evidence against it. Ambiguity on both axes fails closed.
     pr_author = ((pr.get("author") or {}).get("login") or "").strip()
     if not pr_author:
         errors.append("pull request author is unknown; review independence cannot be established")
+    implementer = implementer_identity(head_message)
     for kind in config["review"]["required"]:
-        self_authored = [
+        candidates = [
             receipt for receipt in receipts
             if receipt.get("schema") == 1
             and receipt.get("kind") == kind
             and receipt.get("head_sha") == head
-            and pr_author
-            and (receipt.get("author") or "").lower() == pr_author.lower()
         ]
-        independent = [receipt for receipt in receipts if receipt not in self_authored]
-        latest = latest_receipt(independent, kind, head) if pr_author else None
-        if latest is None:
-            if self_authored:
-                errors.append(
-                    f"`{kind}` receipt for head {head} was written by the PR author "
-                    f"`{pr_author}`; a self-review is not an independent review"
+        dependent: list[dict[str, Any]] = []
+        reasons: list[str] = []
+        for receipt in candidates:
+            if pr_author and (receipt.get("author") or "").lower() != pr_author.lower():
+                continue  # Separate accounts: independent, no trailer needed.
+            reviewer = (receipt.get("reviewer") or "").strip()
+            if not reviewer:
+                dependent.append(receipt)
+                reasons.append(
+                    f"`{kind}` receipt for head {head} names no reviewer; "
+                    "re-record it with `review-receipt --reviewer <agent/session>`"
                 )
+            elif implementer is None:
+                dependent.append(receipt)
+                reasons.append(
+                    f"`{kind}` receipt for head {head} shares the PR author "
+                    f"`{pr_author}`, and head commit {head} records no implementing "
+                    f"agent; add an `{AGENT_SESSION_TRAILERS[0]}:` trailer to the "
+                    "commit so the two agents can be told apart"
+                )
+            elif reviewer.lower() == implementer.lower():
+                dependent.append(receipt)
+                reasons.append(
+                    f"`{kind}` receipt for head {head} was written by the implementing "
+                    f"agent `{implementer}`; a self-review is not an independent review"
+                )
+        independent = [receipt for receipt in candidates if receipt not in dependent]
+        # Independence gates *authorization*, not *objection*. A failing receipt
+        # is a veto, and an implementer who finds a defect in their own work
+        # must be able to stop the merge with it. Dropping dependent failures
+        # here would let an older independent pass outrank a newer self-reported
+        # failure, defeating newest-first resolution.
+        considered = [
+            receipt for receipt in candidates
+            if receipt in independent or receipt.get("verdict") == "fail"
+        ]
+        latest = latest_receipt(considered, kind, head) if pr_author else None
+        if latest is None:
+            if reasons:
+                errors.append(reasons[-1])
             else:
                 errors.append(f"missing clean `{kind}` review receipt for head {head}")
         elif latest.get("verdict") != "pass":
@@ -767,17 +868,25 @@ def command_review_receipt(args: argparse.Namespace, config: dict[str, Any]) -> 
     return 0
 
 
-def load_gate_inputs(pr_number: int, config: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]:
+def fetch_commit_message(sha: str, config: dict[str, Any]) -> str:
+    commit = run_json(["gh", "api", f"repos/{config['repository']}/commits/{sha}"])
+    return ((commit.get("commit") or {}).get("message")) or ""
+
+
+def load_gate_inputs(pr_number: int, config: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None, str]:
     pr = fetch_pr(pr_number, config)
     comments = fetch_comments(pr_number, config)
     linked = linked_issue_numbers(pr)
     issue = fetch_issue(next(iter(linked)), config) if len(linked) == 1 else None
-    return pr, comments, issue
+    # The head commit carries the implementing agent's identity in a trailer.
+    # Fetched here so `evaluate_merge_gate` stays a pure function of its inputs.
+    head_message = fetch_commit_message(pr["headRefOid"], config) if pr.get("headRefOid") else ""
+    return pr, comments, issue, head_message
 
 
 def command_merge_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    pr, comments, issue = load_gate_inputs(args.pr, config)
-    errors = evaluate_merge_gate(pr, comments, issue, config)
+    pr, comments, issue, head_message = load_gate_inputs(args.pr, config)
+    errors = evaluate_merge_gate(pr, comments, issue, config, head_message)
     if errors:
         for error in errors:
             print(f"BLOCKED: {error}")
