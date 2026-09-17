@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic controls for Cubism's issue-to-milestone SDLC.
+"""Deterministic controls for an issue-to-milestone delivery lifecycle.
 
 The CLI intentionally uses only the Python standard library and the
 authenticated GitHub CLI. Agents should run it instead of reimplementing
@@ -23,8 +23,14 @@ from typing import Any, Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / ".sdlc" / "config.json"
-REVIEW_PREFIX = "<!-- cubism-sdlc-review "
+# On-the-wire protocol identifiers. These are stamped into GitHub comment
+# bodies and parsed back out, so they are format, not branding: renaming one
+# orphans every receipt or gate record already posted. Project-neutral because
+# one engine is intended to serve every project it manages, not just this one.
+REVIEW_PREFIX = "<!-- nightshift-review "
 REVIEW_SUFFIX = " -->"
+GATE_PREFIX = "<!-- nightshift-gate "
+GATE_SUFFIX = " -->"
 PARENT_RE = re.compile(r"(?im)^\s*(?:parent(?:\s+epic)?|parent lifecycle epic):\s*#(\d+)\b.*$")
 PART_OF_RE = re.compile(r"(?im)^\s*part of\s+#(\d+)\b.*$")
 CHECKBOX_CHILD_RE = re.compile(r"(?im)^\s*-\s*\[[ xX]\]\s*#(\d+)\b")
@@ -339,7 +345,7 @@ def render_status(model: dict[str, Any]) -> str:
     repository = esc(model["repository"])
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Cubism delivery cockpit</title>
+<title>{repository} delivery cockpit</title>
 <style>
 :root{{--ink:#172026;--muted:#66737d;--paper:#f5f3ed;--card:#fff;--line:#d9d6cd;--accent:#19647e;--green:#2e7d5b;--amber:#b56b12;--red:#a23b3b;--violet:#6d4aa2}}
 *{{box-sizing:border-box}} body{{margin:0;background:var(--paper);color:var(--ink);font:15px/1.45 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
@@ -846,7 +852,7 @@ def command_set_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
         print(note)
         return 0
     run_text(command)
-    marker = f"<!-- cubism-sdlc-gate state={args.state} -->"
+    marker = f"{GATE_PREFIX}state={args.state}{GATE_SUFFIX}"
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
         handle.write(f"{marker}\n\n{note}\n")
         temp_name = handle.name
