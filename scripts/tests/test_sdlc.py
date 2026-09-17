@@ -84,29 +84,71 @@ Read one file.
             "statusCheckRollup": [{"name": "CI required checks", "conclusion": "SUCCESS"}],
         }
 
-    def _receipt(self, author, verdict="pass", head="abc123", created_at=None):
+    def _receipt(self, author, verdict="pass", head="abc123", created_at=None, reviewer="fresh-codex"):
         return {
-            "body": sdlc.review_marker("codex", head, verdict, "fresh-codex"),
+            "body": sdlc.review_marker("codex", head, verdict, reviewer),
             "user": {"login": author},
             "created_at": created_at,
         }
+
+    # One human account drives several agents, so the GitHub login is the same
+    # on both sides of the review and the agent identities are what differ.
+    ONE_ACCOUNT = "implementer"
+    IMPLEMENTED_BY = "Claude Opus 5 session_abc"
+    HEAD_COMMIT = "docs: a change\n\nAgent-Session: " + IMPLEMENTED_BY
 
     def test_independent_passing_receipt_satisfies_the_gate(self):
         errors = sdlc.evaluate_merge_gate(
             self._passing_pr(), [self._receipt("fresh-codex")], self.slice, self.config)
         self.assertEqual([], errors)
 
-    def test_self_authored_receipt_cannot_satisfy_the_gate(self):
+    def test_different_agents_on_one_account_satisfy_the_gate(self):
         errors = sdlc.evaluate_merge_gate(
-            self._passing_pr(author="implementer"),
-            [self._receipt("implementer")], self.slice, self.config)
+            self._passing_pr(author=self.ONE_ACCOUNT),
+            [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
+            self.slice, self.config, self.HEAD_COMMIT)
+        self.assertEqual([], errors)
+
+    def test_claude_session_trailer_is_still_accepted(self):
+        head = "docs: a change\n\nClaude-Session: " + self.IMPLEMENTED_BY
+        errors = sdlc.evaluate_merge_gate(
+            self._passing_pr(author=self.ONE_ACCOUNT),
+            [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
+            self.slice, self.config, head)
+        self.assertEqual([], errors)
+
+    def test_same_agent_reviewing_itself_is_rejected(self):
+        errors = sdlc.evaluate_merge_gate(
+            self._passing_pr(author=self.ONE_ACCOUNT),
+            [self._receipt(self.ONE_ACCOUNT, reviewer=self.IMPLEMENTED_BY)],
+            self.slice, self.config, self.HEAD_COMMIT)
         self.assertTrue(any("a self-review is not an independent review" in e for e in errors), errors)
 
-    def test_self_authored_receipt_is_rejected_case_insensitively(self):
+    def test_same_agent_is_rejected_case_insensitively(self):
         errors = sdlc.evaluate_merge_gate(
             self._passing_pr(author="Implementer"),
-            [self._receipt("implementer")], self.slice, self.config)
+            [self._receipt(self.ONE_ACCOUNT, reviewer=self.IMPLEMENTED_BY.upper())],
+            self.slice, self.config, self.HEAD_COMMIT)
         self.assertTrue(any("self-review" in e for e in errors), errors)
+
+    def test_missing_agent_trailer_fails_closed_with_an_actionable_error(self):
+        errors = sdlc.evaluate_merge_gate(
+            self._passing_pr(author=self.ONE_ACCOUNT),
+            [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
+            self.slice, self.config, "docs: a change with no trailer")
+        self.assertTrue(any("Agent-Session:" in e for e in errors), errors)
+
+    def test_separate_accounts_need_no_trailer(self):
+        errors = sdlc.evaluate_merge_gate(
+            self._passing_pr(author=self.ONE_ACCOUNT),
+            [self._receipt("reviewer-bot", reviewer="codex-cli fresh exec session")],
+            self.slice, self.config, "docs: a change with no trailer")
+        self.assertEqual([], errors)
+
+    def test_implementer_identity_reads_the_last_trailer(self):
+        message = "x\n\nAgent-Session: first\nAgent-Session: second"
+        self.assertEqual("second", sdlc.implementer_identity(message))
+        self.assertIsNone(sdlc.implementer_identity("no trailer here"))
 
     def test_unknown_pr_author_fails_closed(self):
         pr = self._passing_pr()
@@ -143,7 +185,7 @@ Read one file.
         calls = []
         pr = self._passing_pr()
         original_inputs, original_run = sdlc.load_gate_inputs, sdlc.run_text
-        sdlc.load_gate_inputs = lambda number, config: (pr, [self._receipt("fresh-codex")], self.slice)
+        sdlc.load_gate_inputs = lambda number, config: (pr, [self._receipt("fresh-codex")], self.slice, self.HEAD_COMMIT)
         sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
         try:
             import argparse
@@ -160,7 +202,9 @@ Read one file.
         calls = []
         original_inputs, original_run = sdlc.load_gate_inputs, sdlc.run_text
         sdlc.load_gate_inputs = lambda number, config: (
-            self._passing_pr(), [self._receipt("implementer")], self.slice)
+            self._passing_pr(author=self.ONE_ACCOUNT),
+            [self._receipt(self.ONE_ACCOUNT, reviewer=self.IMPLEMENTED_BY)],
+            self.slice, self.HEAD_COMMIT)
         sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
         try:
             import argparse

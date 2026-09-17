@@ -88,6 +88,15 @@ need for more.
    The implementer may not impersonate this reviewer. Findings are fixed or
    explicitly resolved, then the updated head is reviewed again. The reviewer
    records a SHA-bound receipt with `rtk python3 scripts/sdlc.py review-receipt`.
+
+   Independence is between **agent sessions**, not GitHub accounts: one operator
+   drives several agents from one account, so equal logins are not evidence that
+   the same context reviewed its own work. The gate compares the receipt's
+   `--reviewer` against the head commit's `Agent-Session:` trailer, and treats a
+   receipt from a different GitHub account as independent without consulting
+   either. The reviewer string is self-declared. It prevents a session from
+   grading its own work; it is not an anti-fraud control, and the durable
+   guarantee is that a human can read the receipt and the reviewer's session log.
 9. **Merge automatically.** Run `rtk python3 scripts/sdlc.py merge --pr P --apply`. It
    refuses to merge unless the PR closes one slice, required CI is green, the
    branch is current and conflict-free, and every required review has a clean

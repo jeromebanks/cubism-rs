@@ -16,6 +16,11 @@ Prefix shell commands with `rtk`. In command chains, prefix each segment. Use
 - Preserve unrelated worktree changes.
 - Required review comes from a fresh agent. A self-review is not an independent
   review receipt.
+- Every agent commit records the session that wrote it with an
+  `Agent-Session: <agent/session>` trailer. The merge gate compares it to the
+  reviewer named in the review receipt, so a commit without it cannot prove the
+  review came from a different agent and fails closed. `Claude-Session:` is
+  accepted as an equivalent for existing history.
 - Do not ask for routine human PR review. When CI and the required agent review
   pass, use the deterministic merge command in `SDLC.md`.
 - Stop ordinary work under an epic labeled `gate:human-review` or
