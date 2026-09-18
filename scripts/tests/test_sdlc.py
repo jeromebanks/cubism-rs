@@ -356,6 +356,22 @@ Read one file.
 
     # --- review receipt: SHA binding ---
 
+    class _StubReport:
+        """A --body-file that needs no filesystem.
+
+        command_review_receipt only ever calls read_text() on it, and the
+        refusal path does not even do that. An earlier version of these tests
+        wrote a real temporary file, which made all three error out wherever
+        tempfile has no writable directory to offer -- a read-only review
+        sandbox being the case that actually bit.
+        """
+
+        def __init__(self, text):
+            self.text = text
+
+        def read_text(self, encoding=None):
+            return self.text
+
     def _record_receipt(self, expect_sha, actual_sha, dry_run=False):
         """Run command_review_receipt against a PR whose head is actual_sha.
 
@@ -365,15 +381,10 @@ Read one file.
         import contextlib
         import io
         calls = []
-        # Everything that can raise happens before the globals are replaced.
-        # Patching first and then creating the temp file leaves sdlc.fetch_pr
-        # and sdlc.run_text stubbed for every later test if the file cannot be
-        # written -- which is exactly what a sandbox without a writable TMPDIR
-        # does.
-        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as handle:
-            handle.write("1. `a.py:1` something\n\nVERDICT: pass\n")
-            report = Path(handle.name)
+        report = self._StubReport("1. `a.py:1` something\n\nVERDICT: pass\n")
         out = io.StringIO()
+        # Nothing between here and the try can raise, so the finally always has
+        # the real functions to restore.
         original_fetch, original_run = sdlc.fetch_pr, sdlc.run_text
         sdlc.fetch_pr = lambda number, config: {"headRefOid": actual_sha}
         sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
@@ -385,7 +396,6 @@ Read one file.
                 ), self.config)
         finally:
             sdlc.fetch_pr, sdlc.run_text = original_fetch, original_run
-            report.unlink(missing_ok=True)
         return code, calls, out.getvalue()
 
     def test_receipt_is_refused_when_the_head_moved_under_the_review(self):
@@ -405,6 +415,15 @@ Read one file.
         self.assertIn("moved", out)
 
     def test_receipt_records_when_the_head_still_matches(self):
+        # Only this path reaches command_review_receipt's own NamedTemporaryFile,
+        # so only this test needs a writable temp dir. Same idiom as the git
+        # differential test above: state the dependency, skip loudly, never
+        # silently pass. The two refusal tests stay hermetic and always run.
+        try:
+            with tempfile.NamedTemporaryFile():
+                pass
+        except OSError as exc:
+            self.skipTest(f"no writable temporary directory: {exc}")
         code, calls, out = self._record_receipt(expect_sha="same", actual_sha="same")
         self.assertEqual(0, code)
         self.assertEqual(1, len(calls))
