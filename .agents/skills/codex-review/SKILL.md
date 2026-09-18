@@ -182,7 +182,7 @@ for _ in 1 2 3 4 5; do
   [ "$HEAD_SHA" = "$(rtk proxy git rev-parse HEAD)" ] && break
   sleep 4
 done
-[ "$HEAD_SHA" = "$(rtk proxy git rev-parse HEAD)" ] \\
+[ "$HEAD_SHA" = "$(rtk proxy git rev-parse HEAD)" ] \
   || { echo "GitHub still reports a different head; not reviewing yet"; exit 1; }
 ```
 
@@ -190,9 +190,10 @@ Capturing once after a rebase is the specific way this goes wrong: the reviewer
 is handed a stale SHA, refuses to review a head that does not match, and the
 result looks like a review failure rather than a race.
 
-The same race applies to the first capture, where `work-slice` step 7 produces
-`$HEAD_SHA` right after creating the pull request. The loop above is cheap;
-use it there too rather than assuming the first read is settled.
+This is also how `$HEAD_SHA` is produced in the first place. `work-slice` step 7
+creates the pull request and then calls this section for the capture rather than
+reading `headRefOid` once, because the same race applies to a freshly created
+PR. There is one capture procedure, here, used every time the value is needed.
 
 ## Failure modes this step has actually hit
 

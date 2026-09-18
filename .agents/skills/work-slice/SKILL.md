@@ -51,8 +51,11 @@ needed for implementation.
    ```bash
    rtk proxy gh pr create --base main --head "issue/N" --body-file <pr-body>
    PR=$(rtk proxy gh pr view --json number -q .number)
-   HEAD_SHA=$(rtk proxy gh pr view "$PR" --json headRefOid -q .headRefOid)
    ```
+
+   Capture `$HEAD_SHA` with the procedure in
+   [`codex-review`](../codex-review/SKILL.md) section 5, which owns it. Reading
+   `headRefOid` once can return a head GitHub has not settled on yet.
 
    Then move the issue from `in-progress` to `in-review`. No `sdlc.py` command
    owns this transition yet, so run it directly:
