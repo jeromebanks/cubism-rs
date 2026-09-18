@@ -51,8 +51,11 @@ needed for implementation.
    ```bash
    rtk proxy gh pr create --base main --head "issue/N" --body-file <pr-body>
    PR=$(rtk proxy gh pr view --json number -q .number)
-   HEAD_SHA=$(rtk proxy gh pr view "$PR" --json headRefOid -q .headRefOid)
    ```
+
+   Capture `$HEAD_SHA` with the procedure in
+   [`codex-review`](../codex-review/SKILL.md) section 5, which owns it. Reading
+   `headRefOid` once can return a head GitHub has not settled on yet.
 
    Then move the issue from `in-progress` to `in-review`. No `sdlc.py` command
    owns this transition yet, so run it directly:
@@ -60,104 +63,22 @@ needed for implementation.
    ```bash
    rtk proxy gh issue edit N --add-label in-review --remove-label in-progress
    ```
-8. Have a fresh Codex agent/session review the committed PR diff. It must not
-   be this session, and this session must not write its verdict.
+8. Have a fresh Codex agent/session review the committed PR diff, following
+   [`.agents/skills/codex-review/SKILL.md`](../codex-review/SKILL.md). That file
+   owns the invocation, the prompt contract, the reviewer-identity derivation,
+   and the receipt.
 
-   ```bash
-   REPORT="${TMPDIR:-/tmp}/review-pr$PR.md"
-   codex exec --sandbox read-only --skip-git-repo-check "<review prompt>" \
-     < /dev/null > "$REPORT" 2> "$REPORT.err" \
-     || { echo "review did not run; see $REPORT.err"; exit 1; }
-   test -s "$REPORT" || { echo "empty report; see $REPORT.err"; exit 1; }
-   ```
+   Two rules this step cannot delegate:
 
-   All three redirections matter.
+   - The reviewer must not be this session, and this session must not author the
+     verdict. It runs the command and derives the verdict from the run's own
+     output; those are not the same thing.
+   - Every round's verdict is recorded when obtained, `fail` included. A failing
+     receipt is a veto the gate honours and the next reviewer reads.
 
-   `< /dev/null` is required, not tidiness. `codex exec` appends stdin to the
-   positional prompt, so whenever the caller leaves stdin open rather than
-   closing it or attaching a terminal, the command blocks indefinitely on
-   `Reading additional input from stdin...` and produces nothing.
+   Supply the skill with `$PR`, the issue number, `$HEAD_SHA`, and the verdicts
+   of any previous rounds. It owns what happens after a fix commit.
 
-   The two output streams go to separate files. `codex exec` writes progress,
-   configuration and token counts to stderr, so folding it into stdout corrupts
-   the report the receipt records; discarding it instead turns a failed run into
-   a silent pass. Stdout alone is exactly the review.
-
-   Those two guards are not decoration. Without them a review that never ran
-   is indistinguishable from one that passed.
-
-   **Bind the review to the commit.** Two guards at opposite ends of the step,
-   both required.
-
-   At the reviewer's end: put `$HEAD_SHA` in the prompt and require the reviewer
-   to confirm `HEAD` matches it and stop if it does not. That keeps a reviewer
-   from reporting on a tree other than the one under review.
-
-   At the recording end: pass `--expect-sha "$HEAD_SHA"` to `review-receipt`.
-   It compares that against the head GitHub reports at recording time and
-   refuses — non-zero, posting nothing — when they differ. That comparison used
-   to be a manual `test` a careless session could skip, which is exactly the
-   session that needed it; it is now in the tool, so there is no manual check to
-   run here.
-
-   A refusal means the head moved during the review: the report describes a
-   commit that is no longer this branch's head, and the review must be run again
-   against the new head.
-
-   The prompt should tell the reviewer to obtain the diff and the issue itself
-   (`git show HEAD`, `git diff origin/main...HEAD`, `gh issue view N`) rather
-   than
-   trusting anything this session pastes, name what to check, and require it to
-   report numbered findings citing `file:line` and then end with exactly one
-   final line, `VERDICT: pass` or `VERDICT: fail`. Findings come first; the
-   verdict is the last line of the response. `review-receipt` does not parse it
-   — the snippet below does, which is precisely why the contract has to be
-   unambiguous.
-
-   After any fix commit, push it and then **re-capture `HEAD_SHA` before
-   re-running this step**:
-
-   ```bash
-   HEAD_SHA=$(rtk proxy gh pr view "$PR" --json headRefOid -q .headRefOid)
-   ```
-
-   Skipping that leaves the next reviewer comparing the new head against the
-   old SHA and stopping, which looks like a review failure and is not one — and
-   if the reviewer does not catch it, `--expect-sha` refuses the receipt.
-
-   Both the reviewer's identity and its verdict come from the run itself, never
-   from this session's judgement. Derive them, and refuse to record if either is
-   missing — an empty identity string is still non-empty enough for the gate to
-   accept, so check the parts, not the result:
-
-   ```bash
-   MODEL=$(sed -n 's/^model: //p' "$REPORT.err" | head -1)
-   SESSION=$(sed -n 's/^session id: //p' "$REPORT.err" | head -1)
-   [ -n "$MODEL" ] && [ -n "$SESSION" ] \
-     || { echo "cannot identify the reviewer; refusing to record"; exit 1; }
-   REVIEWER="Codex $MODEL / $SESSION"
-
-   VERDICT=$(grep -E '^VERDICT: (pass|fail)$' "$REPORT" | tail -1 | cut -d' ' -f2)
-   [ -n "$VERDICT" ] \
-     || { echo "no verdict line in report; refusing to record"; exit 1; }
-
-   rtk python3 scripts/sdlc.py review-receipt --pr "$PR" --kind codex \
-     --verdict "$VERDICT" --reviewer "$REVIEWER" --body-file "$REPORT" \
-     --expect-sha "$HEAD_SHA"
-   ```
-
-   Record a `fail` rather than discarding it — a failing receipt is a veto the
-   gate honours, and the next round's reviewer reads it.
-
-   A harness may also ship its own Codex review command — Claude Code's `codex`
-   plugin has `/codex:review` and `/codex:adversarial-review`. Both set
-   `disable-model-invocation: true`, which makes them user-invocable only, so no
-   automated step may depend on one; run them as an extra pass if you like. This
-   is not about SHA binding: `codex exec` reads local git state exactly as they
-   do, which is why the explicit `$HEAD_SHA` check above is what actually ties a
-   review to a commit. #79 tracks whether that tooling can be reused here.
-   `codex:rescue` is a different job again: it delegates investigation and
-   fixes, not review.
 9. Wait for CI, then run `rtk python3 scripts/sdlc.py merge --pr "$PR" --apply`.
    Treat every `BLOCKED` result as authoritative; do not bypass the gate or ask
    for routine human review.
@@ -173,8 +94,11 @@ needed for implementation.
 
    Rebase onto `origin/main`, not a local `main` that may itself be stale. Do
    **not** use `gh pr update-branch`: it writes a GitHub-authored merge commit
-   carrying no `Agent-Session:` trailer, which the gate then refuses. Either way
-   the head SHA changes, so re-capture `HEAD_SHA` and run step 8 again.
+   carrying no `Agent-Session:` trailer, which the gate then refuses.
+
+   Either way the head SHA changes, which invalidates the review. Follow
+   [`codex-review`](../codex-review/SKILL.md) section 5 — it owns head changes
+   for rebases exactly as for fix commits — then run step 8 again.
 10. GitHub closes the issue on merge but leaves its `in-review` label, and no
     command clears it yet. Clear it **before** regenerating status, or the
     status view is built from the stale label. Then run cleanup from `$PRIMARY`
