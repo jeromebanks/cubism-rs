@@ -354,6 +354,54 @@ Read one file.
         self.assertEqual(1, code)
         self.assertEqual([], calls)
 
+    # --- review receipt: SHA binding ---
+
+    def _record_receipt(self, expect_sha, actual_sha, dry_run=False):
+        """Run command_review_receipt against a PR whose head is actual_sha.
+
+        Returns (exit code, gh commands invoked, stdout).
+        """
+        import argparse
+        import contextlib
+        import io
+        calls = []
+        original_fetch, original_run = sdlc.fetch_pr, sdlc.run_text
+        sdlc.fetch_pr = lambda number, config: {"headRefOid": actual_sha}
+        sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as handle:
+            handle.write("1. `a.py:1` something\n\nVERDICT: pass\n")
+            report = Path(handle.name)
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                code = sdlc.command_review_receipt(argparse.Namespace(
+                    pr=99, kind="codex", verdict="pass", reviewer="fresh-codex",
+                    body_file=report, dry_run=dry_run, expect_sha=expect_sha,
+                ), self.config)
+        finally:
+            sdlc.fetch_pr, sdlc.run_text = original_fetch, original_run
+            report.unlink(missing_ok=True)
+        return code, calls, out.getvalue()
+
+    def test_receipt_is_refused_when_the_head_moved_under_the_review(self):
+        # The hole this closes: the reviewer read `reviewed`, something pushed
+        # `moved`, and the receipt would otherwise attest to a commit nobody read.
+        code, calls, _ = self._record_receipt(expect_sha="reviewed", actual_sha="moved")
+        self.assertEqual(1, code)
+        self.assertEqual([], calls)
+
+    def test_refusal_names_the_reviewed_and_the_current_sha(self):
+        _, _, out = self._record_receipt(expect_sha="reviewed", actual_sha="moved")
+        self.assertIn("reviewed", out)
+        self.assertIn("moved", out)
+
+    def test_receipt_records_when_the_head_still_matches(self):
+        code, calls, out = self._record_receipt(expect_sha="same", actual_sha="same")
+        self.assertEqual(0, code)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(["gh", "pr", "comment", "99"], calls[0][:4])
+        self.assertIn("RECORDED: codex=pass for same", out)
+
     # --- on-the-wire protocol identifiers ---
 
     def test_comment_markers_are_pinned_and_project_neutral(self):

@@ -86,18 +86,23 @@ needed for implementation.
    Those two guards are not decoration. Without them a review that never ran
    is indistinguishable from one that passed.
 
-   **Bind the review to the commit.** The reviewer reads local git state, and
-   `review-receipt` stamps whatever GitHub reports as the head at recording
-   time. Nothing in the tooling compares the two, so this step must. Put
-   `$HEAD_SHA` in the prompt and require the reviewer to confirm `HEAD` matches
-   it and stop if it does not; then re-check before recording:
+   **Bind the review to the commit.** Two guards at opposite ends of the step,
+   both required.
 
-   ```bash
-   test "$(rtk proxy gh pr view "$PR" --json headRefOid -q .headRefOid)" = "$HEAD_SHA"
-   ```
+   At the reviewer's end: put `$HEAD_SHA` in the prompt and require the reviewer
+   to confirm `HEAD` matches it and stop if it does not. That keeps a reviewer
+   from reporting on a tree other than the one under review.
 
-   If that fails the head moved during review: the report describes a commit
-   that is no longer the head, and the review must be run again.
+   At the recording end: pass `--expect-sha "$HEAD_SHA"` to `review-receipt`.
+   It compares that against the head GitHub reports at recording time and
+   refuses — non-zero, posting nothing — when they differ. That comparison used
+   to be a manual `test` a careless session could skip, which is exactly the
+   session that needed it; it is now in the tool, so there is no manual check to
+   run here.
+
+   A refusal means the head moved during the review: the report describes a
+   commit that is no longer this branch's head, and the review must be run again
+   against the new head.
 
    The prompt should tell the reviewer to obtain the diff and the issue itself
    (`git show HEAD`, `git diff origin/main...HEAD`, `gh issue view N`) rather
@@ -117,7 +122,8 @@ needed for implementation.
    ```
 
    Skipping that leaves the next reviewer comparing the new head against the
-   old SHA and stopping, which looks like a review failure and is not one.
+   old SHA and stopping, which looks like a review failure and is not one — and
+   if the reviewer does not catch it, `--expect-sha` refuses the receipt.
 
    Both the reviewer's identity and its verdict come from the run itself, never
    from this session's judgement. Derive them, and refuse to record if either is
@@ -136,7 +142,8 @@ needed for implementation.
      || { echo "no verdict line in report; refusing to record"; exit 1; }
 
    rtk python3 scripts/sdlc.py review-receipt --pr "$PR" --kind codex \
-     --verdict "$VERDICT" --reviewer "$REVIEWER" --body-file "$REPORT"
+     --verdict "$VERDICT" --reviewer "$REVIEWER" --body-file "$REPORT" \
+     --expect-sha "$HEAD_SHA"
    ```
 
    Record a `fail` rather than discarding it — a failing receipt is a veto the

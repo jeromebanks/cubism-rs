@@ -851,8 +851,17 @@ def command_cleanup(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
 def command_review_receipt(args: argparse.Namespace, config: dict[str, Any]) -> int:
     pr = fetch_pr(args.pr, config)
+    head = pr["headRefOid"]
+    # Before --dry-run deliberately: a preview built for a head the reviewer
+    # never read is exactly the misleading output this check exists to stop.
+    if head != args.expect_sha:
+        print(f"BLOCKED: the review read {args.expect_sha} but PR #{args.pr} is now at {head}")
+        print("The head moved during review, so the report describes a commit that is no")
+        print("longer this branch's head. Re-run the review against the new head, then")
+        print(f"record it with --expect-sha {head}.")
+        return 1
     report = args.body_file.read_text(encoding="utf-8")
-    marker = review_marker(args.kind, pr["headRefOid"], args.verdict, args.reviewer)
+    marker = review_marker(args.kind, head, args.verdict, args.reviewer)
     body = f"{marker}\n\n## {args.kind.title()} review\n\n{report.strip()}\n"
     if args.dry_run:
         print(body)
@@ -864,7 +873,7 @@ def command_review_receipt(args: argparse.Namespace, config: dict[str, Any]) -> 
         run_text(["gh", "pr", "comment", str(args.pr), "--repo", config["repository"], "--body-file", temp_name])
     finally:
         Path(temp_name).unlink(missing_ok=True)
-    print(f"RECORDED: {args.kind}={args.verdict} for {pr['headRefOid']}")
+    print(f"RECORDED: {args.kind}={args.verdict} for {head}")
     return 0
 
 
@@ -1079,6 +1088,10 @@ def build_parser() -> argparse.ArgumentParser:
     receipt.add_argument("--kind", choices=["advisor", "codex"], required=True)
     receipt.add_argument("--verdict", choices=["pass", "fail"], required=True)
     receipt.add_argument("--reviewer", required=True, help="agent/session identity shown in the receipt")
+    receipt.add_argument(
+        "--expect-sha", required=True,
+        help="full head SHA the review actually read; recording is refused if the PR head has moved",
+    )
     receipt.add_argument("--body-file", type=Path, required=True)
     receipt.add_argument("--dry-run", action="store_true")
     receipt.set_defaults(func=command_review_receipt)
