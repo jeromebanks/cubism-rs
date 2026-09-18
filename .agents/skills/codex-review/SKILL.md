@@ -156,9 +156,13 @@ veto the gate honours and the next round's reviewer reads. An unrecorded verdict
 is indistinguishable from a review that never happened — a later reviewer told
 "round 2 passed" will correctly refuse to rely on a receipt it cannot find.
 
-## 5. After a fix commit
+## 5. After the head changes
 
-Push it, then **re-capture `$HEAD_SHA` before running this skill again**:
+This section owns **every** way the head moves -- a fix commit, a rebase onto
+the default branch, an amend, anything. `work-slice` defers here rather than
+repeating it, because two copies drifted once already.
+
+Push, then **re-capture `$HEAD_SHA` before running this skill again**:
 
 ```bash
 HEAD_SHA=$(rtk proxy gh pr view "$PR" --json headRefOid -q .headRefOid)
@@ -168,8 +172,27 @@ Skipping that leaves the next reviewer comparing the new head against the old
 SHA and stopping, which looks like a review failure and is not one — and if the
 reviewer does not catch it, `--expect-sha` refuses the receipt.
 
-GitHub's API can report the pre-push head for several seconds. Re-query until it
-agrees with `git rev-parse HEAD` rather than recording against a stale read.
+GitHub's API can report the pre-push head for several seconds, so a single
+capture can return the SHA you just replaced. Re-query until it agrees with
+local `HEAD`:
+
+```bash
+for _ in 1 2 3 4 5; do
+  HEAD_SHA=$(rtk proxy gh pr view "$PR" --json headRefOid -q .headRefOid)
+  [ "$HEAD_SHA" = "$(rtk proxy git rev-parse HEAD)" ] && break
+  sleep 4
+done
+[ "$HEAD_SHA" = "$(rtk proxy git rev-parse HEAD)" ] \\
+  || { echo "GitHub still reports a different head; not reviewing yet"; exit 1; }
+```
+
+Capturing once after a rebase is the specific way this goes wrong: the reviewer
+is handed a stale SHA, refuses to review a head that does not match, and the
+result looks like a review failure rather than a race.
+
+The same race applies to the first capture, where `work-slice` step 7 produces
+`$HEAD_SHA` right after creating the pull request. The loop above is cheap;
+use it there too rather than assuming the first read is settled.
 
 ## Failure modes this step has actually hit
 
@@ -197,32 +220,47 @@ underlying script has no such restriction.
 Resolve the plugin by the companion file, never by a hardcoded version:
 
 ```bash
-COMPANION=$(find "$HOME/.claude/plugins/cache/openai-codex/codex" \
-  -maxdepth 3 -name codex-companion.mjs -type f -exec ls -t {} + 2>/dev/null | head -1)
-if [ -n "$COMPANION" ] && [ -f "$COMPANION" ]; then
+COMPANION=$(python3 - <<'PY' 2>/dev/null
+import json, pathlib
+cfg = pathlib.Path.home() / ".claude/plugins/installed_plugins.json"
+try:
+    plugins = json.loads(cfg.read_text()).get("plugins") or {}
+except (OSError, ValueError):
+    raise SystemExit
+for name, entries in plugins.items():
+    if name.split("@", 1)[0] != "codex":
+        continue
+    for entry in entries:
+        path = pathlib.Path(entry.get("installPath", "")) / "scripts/codex-companion.mjs"
+        if path.is_file():
+            print(path)
+            raise SystemExit
+PY
+)
+if [ -n "$COMPANION" ]; then
   node "$COMPANION" adversarial-review --wait --scope branch --base origin/main
 else
   echo "supplementary adversarial pass: skipped, Codex plugin not found"
 fi
 ```
 
-Test the file, not the directory name, and **do not try to pick a version**.
-Plugin directories are not guaranteed to be semver — several installed here are
-git SHAs — and a lexical sort is wrong even for semver, ordering `1.0.10` before
-`1.0.9`. `ls -t` picks the most recently installed copy, which needs no
-interpretation of the name. This pass is advisory, so "a working companion" is
-the requirement; if you ever need *the* active plugin, read `installPath` from
-`~/.claude/plugins/installed_plugins.json` instead of inferring it from a path.
+**Resolve from `installed_plugins.json`, never from the filesystem.** That file's
+`installPath` is what the harness actually loaded; everything else is a guess.
+Two earlier attempts here were both wrong, and the second looked right:
 
-`-exec ls -t {} +` does not run at all when nothing matches, so there is no bare
-`ls -t` listing the current directory by accident.
+- A version sort over the cache directories. Plugin directories are not
+  guaranteed semver -- several installed here are git SHAs -- and a lexical sort
+  is wrong even for semver, ordering `1.0.10` before `1.0.9`.
+- Newest file by `ls -t`. That is modification time, not installation time. A
+  cache that preserves timestamps, or any later touch, selects a stale version
+  whose subcommands may differ from the one in use.
 
-Use `find`, not a glob. Under zsh's default `nomatch`, an unmatched glob aborts
-the whole command rather than expanding to nothing, and `2>/dev/null` on the
-command does not suppress it because the shell expands before running anything.
-`find` against a missing directory simply prints nothing. Both the non-empty and
-the `-f` test are still needed, because an empty `COMPANION` would otherwise make
-`-f ""` the thing that decides.
+The non-empty test still matters, but existence only proves a file is there, not
+that it is the active plugin. Reading `installPath` proves both.
+
+The block degrades to one printed line when the config is absent, unparseable,
+or lists no `codex` plugin, and `python3` is already required by this
+repository's tooling.
 
 ## What is ours and what is OpenAI's
 
@@ -234,5 +272,17 @@ format — `model:` and `session id:` are scraped in section 3 and a rename brea
 identity derivation; `codex-companion.mjs` subcommands; the
 `disable-model-invocation` frontmatter.
 
-A session upgrading the plugin should re-check section 3's two `sed` patterns
-and the companion's subcommand list before assuming this file still holds.
+These are **two independently versioned things, and they break different
+steps**:
+
+- Upgrading the **Codex CLI** (`codex exec`) can change the stderr labels that
+  section 3 scrapes. That breaks identity derivation and makes receipts
+  unrecordable -- the required path. A plugin upgrade cannot validate this, and
+  a CLI upgrade happens without touching the plugin at all.
+- Upgrading the **Claude Code plugin** can change `codex-companion.mjs`
+  subcommands or the `disable-model-invocation` frontmatter. That affects only
+  the optional pass in the previous section.
+
+So: after a CLI upgrade, re-check section 3's two `sed` patterns. After a plugin
+upgrade, re-check the companion's subcommand list. Doing only the second is the
+easy mistake, because the plugin is the thing that looks like a dependency.

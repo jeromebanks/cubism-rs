@@ -91,8 +91,11 @@ needed for implementation.
 
    Rebase onto `origin/main`, not a local `main` that may itself be stale. Do
    **not** use `gh pr update-branch`: it writes a GitHub-authored merge commit
-   carrying no `Agent-Session:` trailer, which the gate then refuses. Either way
-   the head SHA changes, so re-capture `HEAD_SHA` and run step 8 again.
+   carrying no `Agent-Session:` trailer, which the gate then refuses.
+
+   Either way the head SHA changes, which invalidates the review. Follow
+   [`codex-review`](../codex-review/SKILL.md) section 5 — it owns head changes
+   for rebases exactly as for fix commits — then run step 8 again.
 10. GitHub closes the issue on merge but leaves its `in-review` label, and no
     command clears it yet. Clear it **before** regenerating status, or the
     status view is built from the stale label. Then run cleanup from `$PRIMARY`
