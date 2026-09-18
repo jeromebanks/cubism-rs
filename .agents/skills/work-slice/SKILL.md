@@ -74,9 +74,7 @@ needed for implementation.
      receipt is a veto the gate honours and the next reviewer reads.
 
    Supply the skill with `$PR`, the issue number, `$HEAD_SHA`, and the verdicts
-   of any previous rounds. After a fix commit, push and re-capture `$HEAD_SHA`
-   before running it again — the receipt is bound to the head the reviewer read,
-   and `review-receipt --expect-sha` refuses a mismatch.
+   of any previous rounds. It owns what happens after a fix commit.
 
 9. Wait for CI, then run `rtk python3 scripts/sdlc.py merge --pr "$PR" --apply`.
    Treat every `BLOCKED` result as authoritative; do not bypass the gate or ask

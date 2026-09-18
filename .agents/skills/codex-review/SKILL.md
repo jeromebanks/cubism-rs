@@ -123,10 +123,20 @@ SESSION=$(sed -n 's/^session id: //p' "$REPORT.err" | head -1)
   || { echo "cannot identify the reviewer; refusing to record"; exit 1; }
 REVIEWER="Codex $MODEL / $SESSION"
 
-VERDICT=$(grep -E '^VERDICT: (pass|fail)$' "$REPORT" | tail -1 | cut -d' ' -f2)
-[ -n "$VERDICT" ] \
-  || { echo "no verdict line in report; refusing to record"; exit 1; }
+LAST=$(awk 'NF {line=$0} END {print line}' "$REPORT")
+case "$LAST" in
+  "VERDICT: pass") VERDICT=pass ;;
+  "VERDICT: fail") VERDICT=fail ;;
+  *) echo "report does not end with a verdict line; refusing to record"; exit 1 ;;
+esac
 ```
+
+Match the **last non-empty line**, not any line that looks like a verdict.
+Searching the whole report accepts one that says `VERDICT: pass` and then keeps
+talking, which is a malformed report whose real conclusion is unknown. The
+contract in section 2 says the verdict is the final line; this is where that is
+enforced, so a reviewer that ignores the contract fails closed instead of having
+a verdict guessed for it.
 
 ## 4. Record the receipt
 
@@ -188,7 +198,7 @@ Resolve the plugin by the companion file, never by a hardcoded version:
 
 ```bash
 COMPANION=$(find "$HOME/.claude/plugins/cache/openai-codex/codex" \
-  -maxdepth 3 -name codex-companion.mjs -type f 2>/dev/null | sort | tail -1)
+  -maxdepth 3 -name codex-companion.mjs -type f -exec ls -t {} + 2>/dev/null | head -1)
 if [ -n "$COMPANION" ] && [ -f "$COMPANION" ]; then
   node "$COMPANION" adversarial-review --wait --scope branch --base origin/main
 else
@@ -196,9 +206,16 @@ else
 fi
 ```
 
-Test the file, not the directory name: plugin version directories are not
-guaranteed to be semver — some are git SHAs — so a version sort is unreliable,
-and `find` locates the companion wherever it landed.
+Test the file, not the directory name, and **do not try to pick a version**.
+Plugin directories are not guaranteed to be semver — several installed here are
+git SHAs — and a lexical sort is wrong even for semver, ordering `1.0.10` before
+`1.0.9`. `ls -t` picks the most recently installed copy, which needs no
+interpretation of the name. This pass is advisory, so "a working companion" is
+the requirement; if you ever need *the* active plugin, read `installPath` from
+`~/.claude/plugins/installed_plugins.json` instead of inferring it from a path.
+
+`-exec ls -t {} +` does not run at all when nothing matches, so there is no bare
+`ls -t` listing the current directory by accident.
 
 Use `find`, not a glob. Under zsh's default `nomatch`, an unmatched glob aborts
 the whole command rather than expanding to nothing, and `2>/dev/null` on the
