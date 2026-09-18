@@ -354,6 +354,82 @@ Read one file.
         self.assertEqual(1, code)
         self.assertEqual([], calls)
 
+    # --- review receipt: SHA binding ---
+
+    class _StubReport:
+        """A --body-file that needs no filesystem.
+
+        command_review_receipt only ever calls read_text() on it, and the
+        refusal path does not even do that. An earlier version of these tests
+        wrote a real temporary file, which made all three error out wherever
+        tempfile has no writable directory to offer -- a read-only review
+        sandbox being the case that actually bit.
+        """
+
+        def __init__(self, text):
+            self.text = text
+
+        def read_text(self, encoding=None):
+            return self.text
+
+    def _record_receipt(self, expect_sha, actual_sha, dry_run=False):
+        """Run command_review_receipt against a PR whose head is actual_sha.
+
+        Returns (exit code, gh commands invoked, stdout).
+        """
+        import argparse
+        import contextlib
+        import io
+        calls = []
+        report = self._StubReport("1. `a.py:1` something\n\nVERDICT: pass\n")
+        out = io.StringIO()
+        # Nothing between here and the try can raise, so the finally always has
+        # the real functions to restore.
+        original_fetch, original_run = sdlc.fetch_pr, sdlc.run_text
+        sdlc.fetch_pr = lambda number, config: {"headRefOid": actual_sha}
+        sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
+        try:
+            with contextlib.redirect_stdout(out):
+                code = sdlc.command_review_receipt(argparse.Namespace(
+                    pr=99, kind="codex", verdict="pass", reviewer="fresh-codex",
+                    body_file=report, dry_run=dry_run, expect_sha=expect_sha,
+                ), self.config)
+        finally:
+            sdlc.fetch_pr, sdlc.run_text = original_fetch, original_run
+        return code, calls, out.getvalue()
+
+    def test_receipt_is_refused_when_the_head_moved_under_the_review(self):
+        # The hole this closes: the reviewer read `reviewed`, something pushed
+        # `moved`, and the receipt would otherwise attest to a commit nobody read.
+        code, calls, _ = self._record_receipt(expect_sha="reviewed", actual_sha="moved")
+        self.assertEqual(1, code)
+        self.assertEqual([], calls)
+
+    def test_refusal_names_the_reviewed_and_the_current_sha(self):
+        code, _, out = self._record_receipt(expect_sha="reviewed", actual_sha="moved")
+        # Assert the refusal, not just the strings: both SHAs appearing in a
+        # success path would otherwise satisfy this test vacuously.
+        self.assertEqual(1, code)
+        self.assertIn("BLOCKED:", out)
+        self.assertIn("reviewed", out)
+        self.assertIn("moved", out)
+
+    def test_receipt_records_when_the_head_still_matches(self):
+        # Only this path reaches command_review_receipt's own NamedTemporaryFile,
+        # so only this test needs a writable temp dir. Same idiom as the git
+        # differential test above: state the dependency, skip loudly, never
+        # silently pass. The two refusal tests stay hermetic and always run.
+        try:
+            with tempfile.NamedTemporaryFile():
+                pass
+        except OSError as exc:
+            self.skipTest(f"no writable temporary directory: {exc}")
+        code, calls, out = self._record_receipt(expect_sha="same", actual_sha="same")
+        self.assertEqual(0, code)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(["gh", "pr", "comment", "99"], calls[0][:4])
+        self.assertIn("RECORDED: codex=pass for same", out)
+
     # --- on-the-wire protocol identifiers ---
 
     def test_comment_markers_are_pinned_and_project_neutral(self):
