@@ -365,13 +365,18 @@ Read one file.
         import contextlib
         import io
         calls = []
-        original_fetch, original_run = sdlc.fetch_pr, sdlc.run_text
-        sdlc.fetch_pr = lambda number, config: {"headRefOid": actual_sha}
-        sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
+        # Everything that can raise happens before the globals are replaced.
+        # Patching first and then creating the temp file leaves sdlc.fetch_pr
+        # and sdlc.run_text stubbed for every later test if the file cannot be
+        # written -- which is exactly what a sandbox without a writable TMPDIR
+        # does.
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as handle:
             handle.write("1. `a.py:1` something\n\nVERDICT: pass\n")
             report = Path(handle.name)
         out = io.StringIO()
+        original_fetch, original_run = sdlc.fetch_pr, sdlc.run_text
+        sdlc.fetch_pr = lambda number, config: {"headRefOid": actual_sha}
+        sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
         try:
             with contextlib.redirect_stdout(out):
                 code = sdlc.command_review_receipt(argparse.Namespace(
@@ -391,7 +396,11 @@ Read one file.
         self.assertEqual([], calls)
 
     def test_refusal_names_the_reviewed_and_the_current_sha(self):
-        _, _, out = self._record_receipt(expect_sha="reviewed", actual_sha="moved")
+        code, _, out = self._record_receipt(expect_sha="reviewed", actual_sha="moved")
+        # Assert the refusal, not just the strings: both SHAs appearing in a
+        # success path would otherwise satisfy this test vacuously.
+        self.assertEqual(1, code)
+        self.assertIn("BLOCKED:", out)
         self.assertIn("reviewed", out)
         self.assertIn("moved", out)
 

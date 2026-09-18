@@ -627,8 +627,8 @@ def evaluate_merge_gate(pr: dict[str, Any], comments: list[dict[str, Any]], issu
             if not reviewer:
                 dependent.append(receipt)
                 reasons.append(
-                    f"`{kind}` receipt for head {head} names no reviewer; "
-                    "re-record it with `review-receipt --reviewer <agent/session>`"
+                    f"`{kind}` receipt for head {head} names no reviewer; re-record it with "
+                    f"`review-receipt --reviewer <agent/session> --expect-sha {head}`"
                 )
             elif implementer is None:
                 dependent.append(receipt)
