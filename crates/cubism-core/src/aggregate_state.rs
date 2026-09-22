@@ -955,4 +955,29 @@ mod tests {
             "unexpected error: {err}"
         );
     }
+
+    #[test]
+    fn average_genuinely_empty_state_still_decodes() {
+        // The counterpart to `average_rejects_zero_count_with_nonzero_sum`:
+        // count == 0 with sum == 0.0 is the genuinely empty state, and the
+        // new guard must not reject it. Every other round-trip test in this
+        // file accumulates at least one value first, so none of them would
+        // catch a guard that was accidentally `count == 0` alone.
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(AVG_MAGIC);
+        v1.push(FORMAT_V1);
+        v1.extend_from_slice(&0.0f64.to_le_bytes());
+        v1.extend_from_slice(&0u64.to_le_bytes());
+        let decoded = AverageState::decode(&v1).expect("v1 empty state must still decode");
+        assert_eq!(decoded, AverageState::new());
+
+        let mut v2 = Vec::new();
+        v2.extend_from_slice(AVG_MAGIC);
+        v2.push(FORMAT_V2);
+        v2.extend_from_slice(&0.0f64.to_le_bytes());
+        v2.extend_from_slice(&0u64.to_le_bytes());
+        let v2 = finish_v2(v2);
+        let decoded = AverageState::decode(&v2).expect("v2 empty state must still decode");
+        assert_eq!(decoded, AverageState::new());
+    }
 }
