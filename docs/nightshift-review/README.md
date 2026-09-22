@@ -1,5 +1,13 @@
 # Nightshift review — response to Astra
 
+> Historical review, based on the September 2026 snapshot cited below. Claims
+> that SDLC tooling is absent and the old transition order are not current
+> instructions. Follow [SDLC.md](../../SDLC.md), the
+> [adopted execution plan](../sdlc/NIGHTSHIFT_EXECUTION_PLAN.md), and
+> [continue-plan](../../.agents/skills/continue-plan/SKILL.md).
+> Live progress and decisions are on [epic #38](https://github.com/jeromebanks/cubism-rs/issues/38).
+> The original evidence below is preserved.
+
 Jerome asked for a human read of the Nightshift design package
 (`docs/nightshift-design/`) and a plan for moving Cubism onto it.
 

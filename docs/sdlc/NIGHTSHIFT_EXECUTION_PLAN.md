@@ -2,6 +2,13 @@
 
 Prepared for Jerome · 19 September 2026
 
+Adopted roadmap: [continuation entry point](../../.agents/skills/continue-plan/SKILL.md).
+Live stage, issue mapping and completion evidence belong to
+[epic #38](https://github.com/jeromebanks/cubism-rs/issues/38).
+The reviewed baseline and bootstrap prompt below are retained as provenance;
+proposed repairs and Nightshift capabilities become available only when their
+implementation and validation evidence lands.
+
 ## Intended outcome
 
 Start Claude Code or Codex in `jeromebanks/cubism-rs`, invoke one continuation skill or prompt, and have the session reconstruct progress, select the next justified action, implement a bounded slice, run validation, obtain independent review, merge when permitted, and report exactly what happens next.

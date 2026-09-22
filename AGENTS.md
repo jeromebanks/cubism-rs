@@ -34,6 +34,12 @@ Prefix shell commands with `rtk`. In command chains, prefix each segment. Use
 
 ## Orientation by task
 
+- Continue the Cubism-to-Nightshift plan: [`.agents/skills/continue-plan/SKILL.md`](.agents/skills/continue-plan/SKILL.md)
+  (`$continue-plan` in Codex). If shorthand is unavailable, say:
+  “Continue the Cubism-to-Nightshift plan. Complete the next eligible slice
+  through validation, independent review, and merge under repository policy.
+  Reconcile existing work first. End with the exact next step.”
+
 - Current project state: run `rtk python3 scripts/sdlc.py status` (writes an
   untracked local page) or `status --json` for the projection.
 - Issue implementation: [`.agents/skills/work-slice/SKILL.md`](.agents/skills/work-slice/SKILL.md).

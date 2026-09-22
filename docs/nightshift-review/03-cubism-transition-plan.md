@@ -1,5 +1,13 @@
 # Moving Cubism onto Nightshift
 
+> Historical transition proposal, not the current execution order. Its tooling
+> baseline and PostgreSQL-first direction are superseded by the
+> [adopted execution plan](../sdlc/NIGHTSHIFT_EXECUTION_PLAN.md).
+> Follow [SDLC.md](../../SDLC.md) and
+> [continue-plan](../../.agents/skills/continue-plan/SKILL.md); reconstruct
+> progress from [epic #38](https://github.com/jeromebanks/cubism-rs/issues/38).
+> Preserve the evidence below; do not execute these old steps as current policy.
+
 Ordered, with a stated end state per step. Step 0 is a prerequisite the design
 does not mention.
 
