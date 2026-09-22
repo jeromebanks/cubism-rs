@@ -28,6 +28,10 @@ Process and project definition live at the repository root and in
   for a human operator.
 - [`sdlc/design.md`](sdlc/design.md) — why the lifecycle is shaped this way, and
   the maintenance boundaries.
+- [`sdlc/NIGHTSHIFT_EXECUTION_PLAN.md`](sdlc/NIGHTSHIFT_EXECUTION_PLAN.md) —
+  adopted roadmap, with proposed capabilities distinguished from what runs;
+  [continue-plan](../.agents/skills/continue-plan/SKILL.md) resumes delivery
+  using live GitHub progress.
 - [`sdlc/overview-slides.html`](sdlc/overview-slides.html) — the same operating
   model as a browser deck.
 - [`sdlc/milestone-manifest.example.json`](sdlc/milestone-manifest.example.json)
