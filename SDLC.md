@@ -100,7 +100,20 @@ need for more.
 9. **Merge automatically.** Run `rtk python3 scripts/sdlc.py merge --pr P --apply`. It
    refuses to merge unless the PR closes one slice, required CI is green, the
    branch is current and conflict-free, and every required review has a clean
-   receipt for the exact head SHA. There is no routine human PR gate and no
+   receipt for the exact head SHA. The merge command retains that evaluated SHA
+   and submits it with `gh pr merge --match-head-commit`; a moved head is refused
+   without an unguarded fallback. After every submission, including a command
+   error or lost response, it reads GitHub to verify the merged PR, candidate,
+   target branch, and resulting commit identity. For the configured merge-commit
+   method it also verifies the candidate is the second parent. An unknown or
+   pending outcome is blocked, with no automatic retry. Inspect GitHub before
+   retrying; a command error can occur after a successful remote merge.
+
+   Recheck parent gates and prerequisites immediately before invoking merge.
+   GitHub cannot atomically bind an epic-label update to a PR merge: the
+   expected-head precondition protects the candidate, not cross-object gates.
+   Automated parent-gate/dependency admission remains the R2/R3 repair scope.
+   There is no routine human PR gate and no
    size-based exception to the requested auto-merge policy.
 10. **Reconcile.** Confirm the issue closed, run
     `rtk python3 scripts/sdlc.py cleanup N`, regenerate the project cockpit, and

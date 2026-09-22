@@ -18,7 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -893,30 +893,93 @@ def load_gate_inputs(pr_number: int, config: dict[str, Any]) -> tuple[dict[str, 
     return pr, comments, issue, head_message
 
 
-def command_merge_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    pr, comments, issue, head_message = load_gate_inputs(args.pr, config)
+class MergeEligibility(NamedTuple):
+    head_sha: str
+    errors: tuple[str, ...]
+
+
+def merge_eligibility(pr_number: int, config: dict[str, Any]) -> MergeEligibility:
+    pr, comments, issue, head_message = load_gate_inputs(pr_number, config)
     errors = evaluate_merge_gate(pr, comments, issue, config, head_message)
-    if errors:
-        for error in errors:
+    head = pr.get("headRefOid") or ""
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        errors.append("evaluated candidate is not a full commit SHA")
+    return MergeEligibility(head, tuple(errors))
+
+
+def print_merge_eligibility(pr_number: int, result: MergeEligibility) -> None:
+    if result.errors:
+        for error in result.errors:
             print(f"BLOCKED: {error}")
-        return 1
-    print(f"ELIGIBLE: PR #{args.pr} may be merged at {pr['headRefOid']}")
-    return 0
+    else:
+        print(f"ELIGIBLE: PR #{pr_number} may be merged at {result.head_sha}")
+
+
+def command_merge_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    result = merge_eligibility(args.pr, config)
+    print_merge_eligibility(args.pr, result)
+    return int(bool(result.errors))
+
+
+def confirm_merge(pr_number: int, head_sha: str, config: dict[str, Any]) -> str:
+    """Read GitHub after every submission, even a failed/lost response.
+
+    No write is retried here. An unreadable, pending, or inconsistent result
+    remains blocked until a later read can establish what happened.
+    """
+    pr = run_json([
+        "gh", "pr", "view", str(pr_number), "--repo", config["repository"],
+        "--json", "state,headRefOid,baseRefName,mergedAt,mergeCommit",
+    ])
+    if pr.get("state") != "MERGED":
+        raise SdlcError(
+            f"PR #{pr_number} is not confirmed merged (state={pr.get('state')}, "
+            f"head={pr.get('headRefOid')}); inspect GitHub before any retry"
+        )
+    if pr.get("headRefOid") != head_sha or pr.get("baseRefName") != config["default_branch"]:
+        raise SdlcError("merged PR does not match the evaluated candidate and target branch")
+    merge_sha = (pr.get("mergeCommit") or {}).get("oid") or ""
+    if not pr.get("mergedAt") or not re.fullmatch(r"[0-9a-f]{40}", merge_sha):
+        raise SdlcError("merged PR has no confirmed merge timestamp and full resulting commit SHA")
+    commit = run_json(["gh", "api", f"repos/{config['repository']}/commits/{merge_sha}"])
+    if commit.get("sha") != merge_sha:
+        raise SdlcError("resulting commit identity could not be verified")
+    if config["merge"]["method"] == "merge":
+        parents = [parent.get("sha") for parent in commit.get("parents", [])]
+        if len(parents) != 2 or parents[1] != head_sha:
+            raise SdlcError("resulting merge commit does not have the evaluated candidate as its second parent")
+    return merge_sha
 
 
 def command_merge(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    gate_args = argparse.Namespace(pr=args.pr)
-    if command_merge_gate(gate_args, config) != 0:
+    result = merge_eligibility(args.pr, config)
+    print_merge_eligibility(args.pr, result)
+    if result.errors:
         return 1
     if not args.apply:
         print("DRY RUN: pass --apply to merge")
         return 0
     method = config["merge"]["method"]
-    command = ["gh", "pr", "merge", str(args.pr), "--repo", config["repository"], f"--{method}"]
+    command = [
+        "gh", "pr", "merge", str(args.pr), "--repo", config["repository"],
+        f"--{method}", "--match-head-commit", result.head_sha,
+    ]
     if config["merge"].get("delete_branch"):
         command.append("--delete-branch")
-    run_text(command)
-    print(f"MERGED: PR #{args.pr}")
+    submission_error = None
+    try:
+        run_text(command)
+    except (SdlcError, OSError) as exc:
+        submission_error = str(exc)
+        print(f"MERGE RESPONSE: {submission_error}; reconciling with GitHub")
+    try:
+        merge_sha = confirm_merge(args.pr, result.head_sha, config)
+    except (SdlcError, OSError) as exc:
+        print(f"BLOCKED: merge outcome not verified: {exc}")
+        return 1
+    if submission_error:
+        print("RECONCILED: GitHub confirms the merge despite the command error")
+    print(f"MERGED: PR #{args.pr} candidate {result.head_sha} commit {merge_sha}")
     return 0
 
 

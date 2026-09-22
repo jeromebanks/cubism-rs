@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -321,29 +322,158 @@ Read one file.
 
     # --- applied merge ---
 
-    def test_applied_merge_builds_the_exact_gh_command(self):
-        calls = []
-        pr = self._passing_pr()
-        original_inputs, original_run = sdlc.load_gate_inputs, sdlc.run_text
-        sdlc.load_gate_inputs = lambda number, config: (pr, [self._receipt("fresh-codex")], self.slice, self.HEAD_COMMIT)
-        sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
-        try:
-            import argparse
-            code = sdlc.command_merge(argparse.Namespace(pr=99, apply=True), self.config)
-        finally:
-            sdlc.load_gate_inputs, sdlc.run_text = original_inputs, original_run
-        self.assertEqual(0, code)
+    CANDIDATE = "a" * 40
+    MERGE_COMMIT = "b" * 40
+
+    def _merged_result(self):
+        return {
+            "state": "MERGED", "headRefOid": self.CANDIDATE,
+            "baseRefName": "main", "mergedAt": "2026-09-22T00:00:00Z",
+            "mergeCommit": {"oid": self.MERGE_COMMIT},
+        }
+
+    def _result_commit(self):
+        return {"sha": self.MERGE_COMMIT, "parents": [
+            {"sha": "c" * 40}, {"sha": self.CANDIDATE},
+        ]}
+
+    def _merge_attempt(self, *, response=None, reads=None, apply=True, head=None):
+        import argparse
+        import contextlib
+        import io
+        head = self.CANDIDATE if head is None else head
+        pr = self._passing_pr(head=head)
+        events = []
+
+        def submit(command):
+            events.append(("write", command))
+            if callable(response):
+                return response(command)
+            if response is not None:
+                raise response
+            return ""
+
+        results = iter(reads if reads is not None else [self._merged_result(), self._result_commit()])
+
+        def read(command):
+            events.append(("read", command))
+            result = next(results)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        out = io.StringIO()
+        with patch.object(sdlc, "load_gate_inputs", return_value=(
+            pr, [self._receipt("fresh-codex", head=head)], self.slice, self.HEAD_COMMIT,
+        )) as inputs, patch.object(sdlc, "run_text", side_effect=submit), \
+                patch.object(sdlc, "run_json", side_effect=read), contextlib.redirect_stdout(out):
+            code = sdlc.command_merge(argparse.Namespace(pr=99, apply=apply), self.config)
+        inputs.assert_called_once_with(99, self.config)
+        return code, events, out.getvalue()
+
+    def test_applied_merge_binds_candidate_and_verifies_result(self):
+        code, events, output = self._merge_attempt()
+        self.assertEqual(0, code, output)
         self.assertEqual(
-            [["gh", "pr", "merge", "99", "--repo", self.config["repository"], "--merge", "--delete-branch"]],
-            calls,
+            ["gh", "pr", "merge", "99", "--repo", self.config["repository"],
+             "--merge", "--match-head-commit", self.CANDIDATE, "--delete-branch"],
+            events[0][1],
         )
+        self.assertEqual(["write", "read", "read"], [kind for kind, _ in events])
+        self.assertIn("mergeCommit", events[1][1][-1])
+        self.assertEqual(f"repos/{self.config['repository']}/commits/{self.MERGE_COMMIT}", events[2][1][-1])
+        self.assertIn(f"candidate {self.CANDIDATE} commit {self.MERGE_COMMIT}", output)
+
+    def test_head_moving_after_evaluation_is_rejected_without_fallback(self):
+        moved = "d" * 40
+
+        def github_merge(command):
+            # Model the server precondition: removing it would merge the new,
+            # unreviewed head. Assert the effect itself is prevented.
+            expected = command[command.index("--match-head-commit") + 1] if "--match-head-commit" in command else moved
+            self.assertNotEqual(moved, expected, "unreviewed candidate would merge")
+            raise sdlc.SdlcError("head does not match --match-head-commit")
+
+        code, events, output = self._merge_attempt(
+            response=github_merge, reads=[{"state": "OPEN", "headRefOid": moved}],
+        )
+        self.assertEqual(1, code)
+        self.assertEqual(["write", "read"], [kind for kind, _ in events])
+        self.assertIn("BLOCKED", output)
+        self.assertNotIn("MERGED:", output)
+
+    def test_failed_submission_is_read_before_returning_blocked(self):
+        code, events, output = self._merge_attempt(
+            response=sdlc.SdlcError("permission denied"),
+            reads=[{"state": "OPEN", "headRefOid": self.CANDIDATE}],
+        )
+        self.assertEqual(1, code)
+        self.assertEqual(["write", "read"], [kind for kind, _ in events])
+        self.assertIn("permission denied", output)
+        self.assertNotIn("MERGED:", output)
+
+    def test_lost_response_with_confirmed_merge_is_success_without_retry(self):
+        code, events, output = self._merge_attempt(response=sdlc.SdlcError("connection lost"))
+        self.assertEqual(0, code, output)
+        self.assertEqual(["write", "read", "read"], [kind for kind, _ in events])
+        self.assertIn("RECONCILED:", output)
+        self.assertIn(self.MERGE_COMMIT, output)
+
+    def test_unreadable_outcome_blocks_after_success_or_error_response(self):
+        for response in (None, sdlc.SdlcError("connection lost"), OSError("executor failed")):
+            with self.subTest(response=response):
+                code, events, output = self._merge_attempt(
+                    response=response, reads=[sdlc.SdlcError("GitHub unavailable")],
+                )
+                self.assertEqual(1, code)
+                self.assertEqual(["write", "read"], [kind for kind, _ in events])
+                self.assertIn("outcome not verified", output)
+                self.assertNotIn("MERGED:", output)
+
+    def test_incomplete_or_different_merge_result_never_reports_success(self):
+        cases = [
+            {"state": "OPEN"}, {"state": "CLOSED"},
+            {"headRefOid": "d" * 40}, {"baseRefName": "other"},
+            {"mergedAt": None}, {"mergeCommit": None}, {"mergeCommit": {"oid": "short"}},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                code, events, output = self._merge_attempt(reads=[{**self._merged_result(), **changes}])
+                self.assertEqual(1, code)
+                self.assertEqual(["write", "read"], [kind for kind, _ in events])
+                self.assertNotIn("MERGED:", output)
+
+    def test_resulting_commit_must_exist_and_contain_candidate(self):
+        for commit in (
+            sdlc.SdlcError("commit unavailable"),
+            {**self._result_commit(), "sha": "d" * 40},
+            {"sha": self.MERGE_COMMIT, "parents": []},
+            {"sha": self.MERGE_COMMIT, "parents": [{"sha": self.CANDIDATE}, {"sha": "d" * 40}]},
+        ):
+            with self.subTest(commit=commit):
+                code, events, output = self._merge_attempt(reads=[self._merged_result(), commit])
+                self.assertEqual(1, code)
+                self.assertEqual(["write", "read", "read"], [kind for kind, _ in events])
+                self.assertNotIn("MERGED:", output)
+
+    def test_dry_run_does_not_submit_or_reconcile(self):
+        code, events, output = self._merge_attempt(apply=False)
+        self.assertEqual(0, code)
+        self.assertEqual([], events)
+        self.assertIn("DRY RUN", output)
+
+    def test_incomplete_candidate_cannot_authorize_merge(self):
+        code, events, output = self._merge_attempt(head="abc123")
+        self.assertEqual(1, code)
+        self.assertEqual([], events)
+        self.assertIn("full commit SHA", output)
 
     def test_blocked_merge_never_invokes_gh(self):
         calls = []
         original_inputs, original_run = sdlc.load_gate_inputs, sdlc.run_text
         sdlc.load_gate_inputs = lambda number, config: (
-            self._passing_pr(author=self.ONE_ACCOUNT),
-            [self._receipt(self.ONE_ACCOUNT, reviewer=self.IMPLEMENTED_BY)],
+            self._passing_pr(head=self.CANDIDATE, author=self.ONE_ACCOUNT),
+            [self._receipt(self.ONE_ACCOUNT, head=self.CANDIDATE, reviewer=self.IMPLEMENTED_BY)],
             self.slice, self.HEAD_COMMIT)
         sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
         try:
