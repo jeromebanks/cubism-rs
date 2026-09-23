@@ -17,6 +17,14 @@ body:
       placeholder: "Parent epic: #"
     validations:
       required: true
+  - type: input
+    id: decision
+    attributes:
+      label: Feedback decision
+      description: The GATE_RECORD URL printed by `set-gate --state changes-requested`.
+      placeholder: "Feedback decision: https://github.com/OWNER/REPO/issues/N#issuecomment-ID"
+    validations:
+      required: true
   - type: textarea
     id: scope
     attributes:

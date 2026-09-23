@@ -32,7 +32,8 @@ epic outcome
 - **Feedback slice** — human milestone feedback converted into a
   `type:feedback` issue. It follows the same implementation and review loop as
   a normal slice and is allowed to run while its parent epic is in a
-  changes-requested gate.
+  changes-requested gate, provided it cites that decision with one
+  `Feedback decision: <gate record URL>` line.
 - **Checkpoint** — a coherent set of merged slices that is useful for a human
   to review. It need not close the whole epic.
 
@@ -109,10 +110,14 @@ need for more.
    pending outcome is blocked, with no automatic retry. Inspect GitHub before
    retrying; a command error can occur after a successful remote merge.
 
-   Recheck parent gates and prerequisites immediately before invoking merge.
-   GitHub cannot atomically bind an epic-label update to a PR merge: the
-   expected-head precondition protects the candidate, not cross-object gates.
-   Automated parent-gate/dependency admission remains the R2/R3 repair scope.
+   The gate reloads the linked issue's parent epic and its gate records and
+   applies the same human-gate admission as `check-slice` and `claim`, so a
+   pause recorded after the claim blocks the merge. An unknown or unreadable
+   parent blocks. Dependency/prerequisite admission is not automated yet (R3);
+   recheck prerequisites before invoking merge. A race remains: GitHub cannot
+   atomically bind an epic-label update to a PR merge, so a gate changed between
+   evaluation and `gh pr merge` is not seen. The expected-head precondition
+   protects the candidate, not cross-object gates.
    There is no routine human PR gate and no
    size-based exception to the requested auto-merge policy.
 10. **Reconcile.** Confirm the issue closed, run
@@ -128,7 +133,8 @@ link, or merge-state uncertainty fails closed.
 Agents choose a checkpoint when merged slices form a coherent user-visible or
 architecturally meaningful result—not after an arbitrary count. At that point:
 
-1. Add `gate:human-review` to the epic. Normal slices under that epic pause.
+1. Add `gate:human-review` to the epic with `set-gate --state review`. Normal
+   slices under that epic pause.
 2. Create `docs/milestones/epic-N/<checkpoint>.json` from the manifest template.
    The narrative is agent-authored; the included issue numbers and demo steps
    must be concrete.
@@ -138,16 +144,51 @@ architecturally meaningful result—not after an arbitrary count. At that point:
 4. Link the report and demo from the epic issue. The project cockpit shows the
    epic in its Human review lane.
 5. Record the human response on the epic:
-   - approval adds `gate:approved` and removes the pause so the next checkpoint
-     may proceed;
-   - feedback adds `gate:changes-requested`, creates linked feedback slices,
-     and retains the pause for ordinary roadmap work.
+   - approval (`set-gate --state approved --decided-by <human>`) replaces the
+     pause with `gate:approved` so the next checkpoint may proceed;
+   - feedback (`set-gate --state changes-requested --decided-by <human>`)
+     replaces it with `gate:changes-requested`, and each linked feedback slice
+     cites the printed `GATE_RECORD=` URL. Ordinary roadmap work stays paused.
 6. After feedback slices merge, regenerate the report/demo and request review
    again. Keep the prior report in git as checkpoint history.
 
 Human approval is about the integrated outcome, product direction, and demo.
 The individual implementation PRs remain agent-reviewed and automatically
 merged.
+
+### Gate admission
+
+Gate labels are mutually exclusive, and `set-gate` owns every transition.
+An epic with more than one gate label blocks all of its work until the actual
+human decision is recorded with `set-gate`. Each transition posts a gate record
+comment — state, checkpoint reference, the human who decided, and their words —
+and prints its URL as `GATE_RECORD=`. It writes in a fail-closed order: it adds
+the new label before removing old ones, so an interrupted edit leaves
+conflicting labels rather than none; `review` applies its label before its
+record; a decision posts its record before relaxing the label. A failure at any
+point leaves the epic paused.
+
+| Epic gate | Ordinary slice | Feedback citing the current decision | Other feedback |
+| --- | --- | --- | --- |
+| none or `gate:approved` | proceeds | proceeds | proceeds |
+| `gate:human-review` | paused | paused | paused |
+| `gate:changes-requested` | paused | proceeds | paused |
+| conflicting labels, or parent unreadable | blocked | blocked | blocked |
+
+"The current decision" is the epic's newest gate record, which must be a
+`changes-requested` record; a feedback issue cites it with exactly one
+`Feedback decision: <URL>` line. The same predicate runs at `next`,
+`check-slice`, `claim` and `merge`.
+
+`--decided-by` is attribution, not proof. With one GitHub account, the tool
+cannot tell a human's decision from an agent's claim of one. An agent records
+only a decision a human actually gave it; silence or an individual PR approval
+is never a decision. Stronger identity is the R6 trust-boundary work.
+
+A decision answers a checkpoint under review, so more feedback after a
+`changes-requested` decision means requesting review again and recording a new
+decision. Open feedback issues that cite the earlier record are then blocked,
+at claim and at merge, until they cite the new one.
 
 ## Visibility
 

@@ -45,6 +45,16 @@ Read one file.
             "url": "https://example.test/11", "updatedAt": "2026-01-01T00:00:00Z",
         }
 
+    def _open_parent(self):
+        # The parent as `load_gate_inputs` reloads it: an ungated epic whose
+        # gate records were read successfully.
+        return sdlc.ParentGate(10, self.epic, [])
+
+    def _evaluate(self, *args, parent=None, **kwargs):
+        return sdlc.evaluate_merge_gate(
+            *args, parent=self._open_parent() if parent is None else parent, **kwargs,
+        )
+
     def test_slice_contract_accepts_one_session_issue(self):
         issues = {10: self.epic, 11: self.slice}
         self.assertEqual([], sdlc.validate_slice(self.slice, issues, self.config))
@@ -71,7 +81,7 @@ Read one file.
             "headRefOid": "different", "body": "Closes #11",
             "statusCheckRollup": [{"name": "CI required checks", "conclusion": "SUCCESS"}],
         }
-        errors = sdlc.evaluate_merge_gate(pr, [{"body": marker}], self.slice, self.config)
+        errors = self._evaluate(pr, [{"body": marker}], self.slice, self.config)
         self.assertTrue(any("missing clean `codex`" in error for error in errors))
 
     # --- merge gate: review independence and history resolution ---
@@ -99,12 +109,12 @@ Read one file.
     HEAD_COMMIT = "docs: a change\n\nAgent-Session: " + IMPLEMENTED_BY
 
     def test_independent_passing_receipt_satisfies_the_gate(self):
-        errors = sdlc.evaluate_merge_gate(
+        errors = self._evaluate(
             self._passing_pr(), [self._receipt("fresh-codex")], self.slice, self.config)
         self.assertEqual([], errors)
 
     def test_different_agents_on_one_account_satisfy_the_gate(self):
-        errors = sdlc.evaluate_merge_gate(
+        errors = self._evaluate(
             self._passing_pr(author=self.ONE_ACCOUNT),
             [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
             self.slice, self.config, self.HEAD_COMMIT)
@@ -112,35 +122,35 @@ Read one file.
 
     def test_claude_session_trailer_is_still_accepted(self):
         head = "docs: a change\n\nClaude-Session: " + self.IMPLEMENTED_BY
-        errors = sdlc.evaluate_merge_gate(
+        errors = self._evaluate(
             self._passing_pr(author=self.ONE_ACCOUNT),
             [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
             self.slice, self.config, head)
         self.assertEqual([], errors)
 
     def test_same_agent_reviewing_itself_is_rejected(self):
-        errors = sdlc.evaluate_merge_gate(
+        errors = self._evaluate(
             self._passing_pr(author=self.ONE_ACCOUNT),
             [self._receipt(self.ONE_ACCOUNT, reviewer=self.IMPLEMENTED_BY)],
             self.slice, self.config, self.HEAD_COMMIT)
         self.assertTrue(any("a self-review is not an independent review" in e for e in errors), errors)
 
     def test_same_agent_is_rejected_case_insensitively(self):
-        errors = sdlc.evaluate_merge_gate(
+        errors = self._evaluate(
             self._passing_pr(author="Implementer"),
             [self._receipt(self.ONE_ACCOUNT, reviewer=self.IMPLEMENTED_BY.upper())],
             self.slice, self.config, self.HEAD_COMMIT)
         self.assertTrue(any("self-review" in e for e in errors), errors)
 
     def test_missing_agent_trailer_fails_closed_with_an_actionable_error(self):
-        errors = sdlc.evaluate_merge_gate(
+        errors = self._evaluate(
             self._passing_pr(author=self.ONE_ACCOUNT),
             [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
             self.slice, self.config, "docs: a change with no trailer")
         self.assertTrue(any("Agent-Session:" in e for e in errors), errors)
 
     def test_separate_accounts_need_no_trailer(self):
-        errors = sdlc.evaluate_merge_gate(
+        errors = self._evaluate(
             self._passing_pr(author=self.ONE_ACCOUNT),
             [self._receipt("reviewer-bot", reviewer="codex-cli fresh exec session")],
             self.slice, self.config, "docs: a change with no trailer")
@@ -161,7 +171,7 @@ Read one file.
             self._receipt(self.ONE_ACCOUNT, "fail", reviewer=self.IMPLEMENTED_BY,
                           created_at="2026-01-02T00:00:00Z"),
         ]
-        errors = sdlc.evaluate_merge_gate(
+        errors = self._evaluate(
             self._passing_pr(author=self.ONE_ACCOUNT), comments,
             self.slice, self.config, self.HEAD_COMMIT)
         self.assertTrue(any("is `fail`, not `pass`" in e for e in errors), errors)
@@ -173,7 +183,7 @@ Read one file.
             self._receipt(self.ONE_ACCOUNT, "pass", reviewer=self.IMPLEMENTED_BY,
                           created_at="2026-01-02T00:00:00Z"),
         ]
-        errors = sdlc.evaluate_merge_gate(
+        errors = self._evaluate(
             self._passing_pr(author=self.ONE_ACCOUNT), comments,
             self.slice, self.config, self.HEAD_COMMIT)
         self.assertTrue(errors, "a newer self-authored pass must not clear an independent failure")
@@ -285,7 +295,7 @@ Read one file.
 
     def test_prose_trailer_still_fails_closed_at_the_gate(self):
         message = "subject\n\nAgent-Session: fake\n\njust prose, no trailer block"
-        errors = sdlc.evaluate_merge_gate(
+        errors = self._evaluate(
             self._passing_pr(author=self.ONE_ACCOUNT),
             [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
             self.slice, self.config, message)
@@ -294,7 +304,7 @@ Read one file.
     def test_unknown_pr_author_fails_closed(self):
         pr = self._passing_pr()
         del pr["author"]
-        errors = sdlc.evaluate_merge_gate(pr, [self._receipt("fresh-codex")], self.slice, self.config)
+        errors = self._evaluate(pr, [self._receipt("fresh-codex")], self.slice, self.config)
         self.assertTrue(any("author is unknown" in e for e in errors), errors)
 
     def test_later_failure_supersedes_an_earlier_pass(self):
@@ -302,7 +312,7 @@ Read one file.
             self._receipt("fresh-codex", "pass", created_at="2026-01-01T00:00:00Z"),
             self._receipt("fresh-codex", "fail", created_at="2026-01-02T00:00:00Z"),
         ]
-        errors = sdlc.evaluate_merge_gate(self._passing_pr(), comments, self.slice, self.config)
+        errors = self._evaluate(self._passing_pr(), comments, self.slice, self.config)
         self.assertTrue(any("is `fail`, not `pass`" in e for e in errors), errors)
 
     def test_pass_after_a_failure_clears_the_gate(self):
@@ -310,14 +320,14 @@ Read one file.
             self._receipt("fresh-codex", "fail", created_at="2026-01-01T00:00:00Z"),
             self._receipt("fresh-codex", "pass", created_at="2026-01-02T00:00:00Z"),
         ]
-        self.assertEqual([], sdlc.evaluate_merge_gate(
+        self.assertEqual([], self._evaluate(
             self._passing_pr(), comments, self.slice, self.config))
 
     def test_receipt_order_falls_back_to_comment_sequence(self):
         # No created_at (older comments, or a non-paginated fetch): ascending
         # API order still resolves newest-last.
         comments = [self._receipt("fresh-codex", "pass"), self._receipt("fresh-codex", "fail")]
-        errors = sdlc.evaluate_merge_gate(self._passing_pr(), comments, self.slice, self.config)
+        errors = self._evaluate(self._passing_pr(), comments, self.slice, self.config)
         self.assertTrue(any("is `fail`, not `pass`" in e for e in errors), errors)
 
     # --- applied merge ---
@@ -337,7 +347,7 @@ Read one file.
             {"sha": "c" * 40}, {"sha": self.CANDIDATE},
         ]}
 
-    def _merge_attempt(self, *, response=None, reads=None, apply=True, head=None):
+    def _merge_attempt(self, *, response=None, reads=None, apply=True, head=None, parent=None):
         import argparse
         import contextlib
         import io
@@ -363,8 +373,9 @@ Read one file.
             return result
 
         out = io.StringIO()
-        with patch.object(sdlc, "load_gate_inputs", return_value=(
+        with patch.object(sdlc, "load_gate_inputs", return_value=sdlc.GateInputs(
             pr, [self._receipt("fresh-codex", head=head)], self.slice, self.HEAD_COMMIT,
+            self._open_parent() if parent is None else parent,
         )) as inputs, patch.object(sdlc, "run_text", side_effect=submit), \
                 patch.object(sdlc, "run_json", side_effect=read), contextlib.redirect_stdout(out):
             code = sdlc.command_merge(argparse.Namespace(pr=99, apply=apply), self.config)
@@ -471,10 +482,10 @@ Read one file.
     def test_blocked_merge_never_invokes_gh(self):
         calls = []
         original_inputs, original_run = sdlc.load_gate_inputs, sdlc.run_text
-        sdlc.load_gate_inputs = lambda number, config: (
+        sdlc.load_gate_inputs = lambda number, config: sdlc.GateInputs(
             self._passing_pr(head=self.CANDIDATE, author=self.ONE_ACCOUNT),
             [self._receipt(self.ONE_ACCOUNT, head=self.CANDIDATE, reviewer=self.IMPLEMENTED_BY)],
-            self.slice, self.HEAD_COMMIT)
+            self.slice, self.HEAD_COMMIT, self._open_parent())
         sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
         try:
             import argparse
@@ -666,21 +677,396 @@ Read one file.
 
     # --- human gates ---
 
+    CHECKPOINT = "docs/milestones/epic-10/checkpoint-1.html"
+
+    def _gate_comment(self, state, comment_id, created_at, decided_by="Jerome (human)"):
+        return {
+            "id": comment_id,
+            "html_url": f"https://github.com/{self.config['repository']}/issues/10#issuecomment-{comment_id}",
+            "created_at": created_at,
+            "body": sdlc.gate_marker(state, self.CHECKPOINT, decided_by) + "\n\nThe human's words.\n",
+        }
+
+    def _decision_url(self, comment_id, epic=10, repository=None):
+        repository = repository or self.config["repository"]
+        return f"https://github.com/{repository}/issues/{epic}#issuecomment-{comment_id}"
+
+    def _as_feedback(self, cite=None):
+        self.slice["labels"] = [{"name": "type:feedback"}, {"name": "status:ready"}]
+        if cite is not None:
+            self.slice["body"] += f"\nFeedback decision: {cite}\n"
+
+    # Older changes-requested decision (400), a re-review (450), and the
+    # current changes-requested decision (500).
+    def _decision_history(self):
+        return sdlc.parse_gate_records([
+            self._gate_comment("changes-requested", 400, "2026-09-01T00:00:00Z"),
+            self._gate_comment("review", 450, "2026-09-02T00:00:00Z"),
+            self._gate_comment("changes-requested", 500, "2026-09-03T00:00:00Z"),
+        ])
+
+    def _admission(self, records):
+        """Gate errors from readiness and from merge, which must agree."""
+        issues = {10: self.epic, 11: self.slice}
+        ready = [e for e in sdlc.validate_slice(self.slice, issues, self.config, lambda n: records)]
+        merge = sdlc.evaluate_merge_gate(
+            self._passing_pr(), [self._receipt("fresh-codex")], self.slice, self.config,
+            parent=sdlc.ParentGate(10, self.epic, records),
+        )
+        return ready, merge
+
+    def test_gate_admission_matrix(self):
+        gates = {
+            "none": [],
+            "review": ["gate:human-review"],
+            "changes-requested": ["gate:changes-requested"],
+            "approved": ["gate:approved"],
+            "conflicting": ["gate:human-review", "gate:changes-requested"],
+        }
+        issues = {
+            "ordinary": lambda: None,
+            "linked feedback": lambda: self._as_feedback(self._decision_url(500)),
+            "unlinked feedback": lambda: self._as_feedback(),
+            "stale-decision feedback": lambda: self._as_feedback(self._decision_url(400)),
+        }
+        # Only a pause restricts work (AGENTS.md). With no gate or after
+        # approval, feedback proceeds like any slice; during changes-requested
+        # only feedback citing the current human decision proceeds.
+        admitted = {
+            "none": set(issues), "approved": set(issues),
+            "review": set(), "conflicting": set(),
+            "changes-requested": {"linked feedback"},
+        }
+        for gate, gate_label_list in gates.items():
+            for kind, prepare in issues.items():
+                with self.subTest(gate=gate, issue=kind):
+                    self.setUp()
+                    self.epic["labels"] = [{"name": name} for name in gate_label_list]
+                    prepare()
+                    ready, merge = self._admission(self._decision_history())
+                    if kind in admitted[gate]:
+                        self.assertEqual([], ready)
+                        self.assertEqual([], merge)
+                    else:
+                        self.assertTrue(ready, "readiness admitted a gated issue")
+                        self.assertTrue(merge, "merge admitted a gated issue")
+                        self.assertEqual(ready, merge)
+
+    def test_conflicting_gate_labels_name_the_reconciliation(self):
+        self.epic["labels"] = [{"name": "gate:human-review"}, {"name": "gate:approved"}]
+        ready, _ = self._admission([])
+        self.assertIn("conflicting gate labels", ready[0])
+        self.assertIn("set-gate --epic 10", ready[0])
+
     def test_feedback_slice_may_not_bypass_human_review(self):
         self.epic["labels"] = [{"name": "gate:human-review"}]
-        self.slice["labels"] = [{"name": "type:feedback"}]
-        errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config)
-        self.assertTrue(any("no slice, including feedback, may proceed" in e for e in errors), errors)
+        self._as_feedback(self._decision_url(500))
+        ready, merge = self._admission(self._decision_history())
+        self.assertTrue(any("no slice, including feedback, may proceed" in e for e in ready), ready)
+        self.assertEqual(ready, merge)
 
-    def test_feedback_slice_may_proceed_during_changes_requested(self):
+    def test_unlinked_feedback_label_is_not_authority_during_changes_requested(self):
+        # Formerly `test_feedback_slice_may_proceed_during_changes_requested`,
+        # which hand-built the label and so never saw the dual-label bug.
         self.epic["labels"] = [{"name": "gate:changes-requested"}]
-        self.slice["labels"] = [{"name": "type:feedback"}]
-        self.assertEqual([], sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config))
+        self._as_feedback()
+        ready, _ = self._admission(self._decision_history())
+        self.assertTrue(any("must cite exactly one `Feedback decision:" in e for e in ready), ready)
 
     def test_ordinary_slice_pauses_during_changes_requested(self):
         self.epic["labels"] = [{"name": "gate:changes-requested"}]
         errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config)
         self.assertTrue(any("only `type:feedback` slices may proceed" in e for e in errors), errors)
+
+    def test_feedback_citing_another_epic_or_repository_is_refused(self):
+        self.epic["labels"] = [{"name": "gate:changes-requested"}]
+        for cite in (
+            self._decision_url(500, epic=38),
+            self._decision_url(500, repository="someone/else"),
+            "https://github.com/x/y/pull/10#issuecomment-500",
+        ):
+            with self.subTest(cite=cite):
+                self.setUp()
+                self.epic["labels"] = [{"name": "gate:changes-requested"}]
+                self._as_feedback(cite)
+                ready, merge = self._admission(self._decision_history())
+                self.assertTrue(any("is not a gate record comment" in e for e in ready), ready)
+                self.assertEqual(ready, merge)
+
+    def test_feedback_citing_two_decisions_is_refused(self):
+        self.epic["labels"] = [{"name": "gate:changes-requested"}]
+        self._as_feedback(self._decision_url(500))
+        self.slice["body"] += f"Feedback decision: {self._decision_url(400)}\n"
+        ready, _ = self._admission(self._decision_history())
+        self.assertTrue(any("found 2" in e for e in ready), ready)
+
+    def test_unreadable_gate_records_block_feedback(self):
+        self.epic["labels"] = [{"name": "gate:changes-requested"}]
+        self._as_feedback(self._decision_url(500))
+        ready, merge = self._admission(None)
+        self.assertTrue(any("could not be read" in e for e in ready), ready)
+        self.assertEqual(ready, merge)
+        # Readiness without a loader (e.g. an offline bundle) fails closed too.
+        errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config)
+        self.assertTrue(any("could not be read" in e for e in errors), errors)
+
+    def test_label_without_a_matching_record_blocks_feedback(self):
+        self.epic["labels"] = [{"name": "gate:changes-requested"}]
+        self._as_feedback(self._decision_url(450))
+        records = sdlc.parse_gate_records([self._gate_comment("review", 450, "2026-09-02T00:00:00Z")])
+        ready, _ = self._admission(records)
+        self.assertTrue(any("newest gate record is not" in e for e in ready), ready)
+
+    def test_legacy_gate_record_cannot_authorize_feedback(self):
+        self.epic["labels"] = [{"name": "gate:changes-requested"}]
+        self._as_feedback(self._decision_url(7))
+        records = sdlc.parse_gate_records([{
+            "id": 7, "html_url": self._decision_url(7), "created_at": "2026-09-01T00:00:00Z",
+            "body": f"{sdlc.GATE_PREFIX}state=changes-requested{sdlc.GATE_SUFFIX}\n\nnote",
+        }])
+        self.assertEqual([0], [record["schema"] for record in records])
+        ready, _ = self._admission(records)
+        self.assertTrue(any("schema-1 changes-requested" in e for e in ready), ready)
+
+    def test_quoted_marker_is_not_a_newer_gate_record(self):
+        comments = [self._gate_comment("changes-requested", 500, "2026-09-03T00:00:00Z")]
+        quoted = sdlc.gate_marker("approved", self.CHECKPOINT, "forged")
+        comments += [
+            {"id": 600, "created_at": "2026-09-04T00:00:00Z",
+             "body": f"Continuation note. The record reads:\n```\n{quoted}\n```"},
+            {"id": 601, "created_at": "2026-09-05T00:00:00Z", "body": f"> {quoted}"},
+        ]
+        records = sdlc.parse_gate_records(comments)
+        self.assertEqual([500], [record["id"] for record in records])
+        self.assertEqual(500, sdlc.latest_gate_record(records)["id"])
+
+    def test_gate_records_order_by_time_then_sequence(self):
+        records = sdlc.parse_gate_records([
+            self._gate_comment("changes-requested", 2, "2026-09-03T00:00:00Z"),
+            self._gate_comment("review", 1, "2026-09-01T00:00:00Z"),
+            self._gate_comment("approved", 3, None),
+            self._gate_comment("review", 4, None),
+        ])
+        self.assertEqual(2, sdlc.latest_gate_record(records)["id"])
+        same_time = sdlc.parse_gate_records([
+            self._gate_comment("review", 1, "2026-09-01T00:00:00Z"),
+            self._gate_comment("changes-requested", 2, "2026-09-01T00:00:00Z"),
+        ])
+        self.assertEqual(2, sdlc.latest_gate_record(same_time)["id"])
+
+    # --- merge re-evaluates the parent gate ---
+
+    def test_merge_gate_requires_an_explicit_parent(self):
+        with self.assertRaises(TypeError):
+            sdlc.evaluate_merge_gate(self._passing_pr(), [self._receipt("fresh-codex")], self.slice, self.config)
+
+    def test_unknown_or_unreadable_parent_blocks_merge(self):
+        for parent, expected in (
+            (sdlc.ParentGate(None, None, None), "exactly one parent epic"),
+            (sdlc.ParentGate(10, None, None), "could not be loaded as an epic"),
+            (sdlc.ParentGate(10, {"number": 10, "title": "Not an epic", "labels": []}, []), "could not be loaded as an epic"),
+        ):
+            with self.subTest(parent=parent):
+                errors = self._evaluate(
+                    self._passing_pr(), [self._receipt("fresh-codex")], self.slice, self.config, parent=parent)
+                self.assertTrue(any(expected in e for e in errors), errors)
+
+    def test_load_parent_gate_reloads_the_parent_and_fails_closed(self):
+        calls = []
+
+        def fail_comments(number, config):
+            calls.append(("comments", number))
+            raise sdlc.SdlcError("HTTP 502")
+
+        with patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: calls.append(("issue", n)) or self.epic), \
+                patch.object(sdlc, "fetch_comments", side_effect=fail_comments):
+            parent = sdlc.load_parent_gate(self.slice, self.config)
+        self.assertEqual([("issue", 10), ("comments", 10)], calls)
+        self.assertEqual(sdlc.ParentGate(10, self.epic, None), parent)
+        with patch.object(sdlc, "fetch_issue", side_effect=sdlc.SdlcError("HTTP 404")), \
+                patch.object(sdlc, "fetch_comments", return_value=[]):
+            self.assertEqual(sdlc.ParentGate(10, None, []), sdlc.load_parent_gate(self.slice, self.config))
+        self.assertEqual(sdlc.ParentGate(None, None, None), sdlc.load_parent_gate(None, self.config))
+
+    def test_pause_after_claim_blocks_the_merge(self):
+        issues = {10: self.epic, 11: self.slice}
+        self.assertEqual([], sdlc.validate_slice(self.slice, issues, self.config, lambda n: []))
+        # A checkpoint pause is recorded after the claim and before merge.
+        paused = dict(self.epic, labels=[{"name": "gate:human-review"}])
+        code, events, output = self._merge_attempt(parent=sdlc.ParentGate(10, paused, []))
+        self.assertEqual(1, code)
+        self.assertEqual([], events, "a paused epic must not reach gh pr merge")
+        self.assertIn("paused for human review", output)
+
+    # --- set-gate transitions ---
+
+    def _set_gate(self, state, labels, *, decided_by="Jerome (human)", checkpoint=None,
+                  apply=True, fail=None):
+        """Run the real command against a mocked GitHub; return what it did."""
+        import argparse
+        import contextlib
+        import io
+        epic = dict(self.epic, labels=[{"name": name} for name in labels])
+        writes = []
+
+        applied = []
+
+        def run_text(command):
+            kind = "add" if "--add-label" in command else "remove"
+            writes.append(("labels", command))
+            if fail in {"labels", kind}:
+                raise sdlc.SdlcError(f"label {kind} failed")
+            applied.append(command)
+            return ""
+
+        def run_json(command):
+            body = json.loads(Path(command[command.index("--input") + 1]).read_text())["body"]
+            writes.append(("record", command, body))
+            if fail == "record":
+                raise sdlc.SdlcError("comment post failed")
+            if fail == "no-url":
+                return {"id": 900}
+            return {"id": 900, "html_url": self._decision_url(900)}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("The human's words.\n", encoding="utf-8")
+            args = argparse.Namespace(
+                epic=10, state=state, note_file=note, apply=apply,
+                checkpoint=self.CHECKPOINT if checkpoint is None else checkpoint,
+                decided_by=decided_by,
+            )
+            out = io.StringIO()
+            with patch.object(sdlc, "fetch_issue", return_value=epic), \
+                    patch.object(sdlc, "run_text", side_effect=run_text), \
+                    patch.object(sdlc, "run_json", side_effect=run_json), \
+                    contextlib.redirect_stdout(out):
+                try:
+                    code = sdlc.command_set_gate(args, self.config)
+                except sdlc.SdlcError as exc:
+                    code, out = exc, out
+        # Apply the label edits that succeeded to compute the resulting epic.
+        resulting = set(labels)
+        for command in applied:
+            for flag, name in zip(command, command[1:]):
+                if flag == "--add-label":
+                    resulting.add(name)
+                elif flag == "--remove-label":
+                    resulting.discard(name)
+        records = [
+            {"id": 900, "html_url": self._decision_url(900), "created_at": "2026-09-10T00:00:00Z", "body": write[2]}
+            for write in writes if write[0] == "record" and fail not in {"record", "no-url"}
+        ]
+        return code, writes, resulting, records, out.getvalue()
+
+    def _admits(self, resulting_labels, records, cite=None, feedback=True):
+        self.setUp()
+        self.epic["labels"] = [{"name": name} for name in sorted(resulting_labels)]
+        if feedback:
+            self._as_feedback(cite)
+        ready, merge = self._admission(sdlc.parse_gate_records(records))
+        self.assertEqual(ready, merge)
+        return not ready
+
+    def test_command_generated_changes_requested_admits_its_feedback(self):
+        code, writes, labels, records, output = self._set_gate("changes-requested", ["gate:human-review"])
+        self.assertEqual(0, code, output)
+        self.assertEqual({"gate:changes-requested"}, labels)
+        self.assertIn(f"GATE_RECORD={self._decision_url(900)}", output)
+        [record] = sdlc.parse_gate_records(records)
+        self.assertEqual(
+            (1, "changes-requested", self.CHECKPOINT, "Jerome (human)"),
+            (record["schema"], record["state"], record["checkpoint"], record["decided_by"]),
+        )
+        self.assertIn("The human's words.", records[0]["body"])
+        self.assertTrue(self._admits(labels, records, cite=self._decision_url(900)))
+        self.assertFalse(self._admits(labels, records, cite=None))
+        self.assertFalse(self._admits(labels, records, feedback=False))
+
+    def test_transitions_leave_exactly_one_gate_label(self):
+        for state, before in (
+            ("review", []), ("review", ["gate:approved"]), ("review", ["gate:changes-requested"]),
+            ("changes-requested", ["gate:human-review"]),
+            ("approved", ["gate:human-review"]),
+            # Reconciling the legacy dual-label state by recording the decision.
+            ("changes-requested", ["gate:human-review", "gate:changes-requested"]),
+            ("approved", ["gate:human-review", "gate:changes-requested"]),
+        ):
+            with self.subTest(state=state, before=before):
+                code, _, labels, _, output = self._set_gate(state, before)
+                self.assertEqual(0, code, output)
+                self.assertEqual({sdlc.gate_labels(self.config)[state]}, labels)
+
+    def test_decisions_require_a_checkpoint_under_review(self):
+        for state, before in (
+            ("changes-requested", []), ("approved", []),
+            ("approved", ["gate:changes-requested"]), ("changes-requested", ["gate:approved"]),
+        ):
+            with self.subTest(state=state, before=before):
+                code, writes, _, _, _ = self._set_gate(state, before)
+                self.assertIsInstance(code, sdlc.SdlcError)
+                self.assertIn("request review first", str(code))
+                self.assertEqual([], writes)
+
+    def test_a_decision_must_name_the_human_who_made_it(self):
+        for state in ("changes-requested", "approved"):
+            with self.subTest(state=state):
+                code, writes, _, _, _ = self._set_gate(state, ["gate:human-review"], decided_by="  ")
+                self.assertIsInstance(code, sdlc.SdlcError)
+                self.assertIn("--decided-by", str(code))
+                self.assertEqual([], writes)
+        code, _, _, _, output = self._set_gate("review", [], decided_by=None)
+        self.assertEqual(0, code, output)
+
+    def test_gate_record_fields_cannot_break_the_marker(self):
+        for field in ({"checkpoint": "report --> x"}, {"decided_by": "a\nb"}, {"checkpoint": " "}):
+            with self.subTest(field=field):
+                code, writes, _, _, _ = self._set_gate("approved", ["gate:human-review"], **field)
+                self.assertIsInstance(code, sdlc.SdlcError)
+                self.assertEqual([], writes)
+
+    def test_dry_run_writes_nothing(self):
+        code, writes, _, _, output = self._set_gate("approved", ["gate:human-review"], apply=False)
+        self.assertEqual(0, code)
+        self.assertEqual([], writes)
+        self.assertIn("DRY RUN:", output)
+
+    def test_partial_failure_leaves_the_epic_paused(self):
+        # Tighten first, relax last. Whichever write fails, the resulting
+        # state admits no ordinary slice and no uncited feedback.
+        for state, before, fail in (
+            ("review", [], "record"),
+            ("review", ["gate:changes-requested"], "add"),
+            ("review", ["gate:changes-requested"], "remove"),
+            ("review", ["gate:changes-requested"], "record"),
+            ("changes-requested", ["gate:human-review"], "add"),
+            ("changes-requested", ["gate:human-review"], "remove"),
+            ("changes-requested", ["gate:human-review"], "record"),
+            ("changes-requested", ["gate:human-review"], "no-url"),
+            ("approved", ["gate:human-review"], "add"),
+            ("approved", ["gate:human-review"], "remove"),
+            ("approved", ["gate:human-review"], "record"),
+            ("approved", ["gate:human-review"], "no-url"),
+        ):
+            with self.subTest(state=state, fail=fail):
+                code, writes, labels, records, _ = self._set_gate(state, before, fail=fail)
+                self.assertIsInstance(code, sdlc.SdlcError)
+                self.assertFalse(self._admits(labels, records, feedback=False))
+                self.assertFalse(self._admits(labels, records, cite=self._decision_url(900)))
+                order = [write[0] for write in writes]
+                self.assertEqual("labels" if state == "review" else "record", order[0])
+                if fail == "remove":
+                    # Add succeeded, remove failed: a conflict, never no gate.
+                    self.assertEqual(2, len(labels & set(sdlc.gate_labels(self.config).values())))
+
+    def test_label_writes_add_before_they_remove(self):
+        _, writes, _, _, _ = self._set_gate("changes-requested", ["gate:human-review"])
+        commands = [write[1] for write in writes if write[0] == "labels"]
+        self.assertEqual(2, len(commands))
+        self.assertIn("--add-label", commands[0])
+        self.assertNotIn("--remove-label", commands[0])
+        self.assertIn("--remove-label", commands[1])
+        self.assertNotIn("--add-label", commands[1])
 
     def test_status_maps_epic_children_and_renders_html(self):
         data = {

@@ -242,9 +242,10 @@ Describe the observed result and desired result in plain language:
 > expected Z. Track this feedback as bounded feedback slices, pause unrelated
 > epic work, and show me a revised checkpoint after they merge.
 
-The agent preserves the feedback, applies `gate:changes-requested`, and creates
-one or more `type:feedback` issues. Those correction slices may proceed while
-ordinary roadmap slices remain paused. You receive a new report/demo after the
+The agent preserves the feedback, records it with `set-gate`, which replaces
+`gate:human-review` with `gate:changes-requested`, and creates one or more
+`type:feedback` issues citing that recorded decision. Those correction slices
+may proceed while ordinary roadmap slices remain paused. You receive a new report/demo after the
 feedback merges; earlier reports remain in git as history.
 
 Silence, a PR approval, or a casual positive comment is not milestone approval.
