@@ -345,6 +345,11 @@ impl AggregateState for AverageState {
                 "decoded average sum is not finite".into(),
             ));
         }
+        if count == 0 && sum != 0.0 {
+            return Err(CubismError::AggregateState(
+                "empty average state must have zero sum".into(),
+            ));
+        }
         Ok(Self { sum, count })
     }
 
@@ -915,5 +920,64 @@ mod tests {
                 "a {keep}-byte prefix must not decode"
             );
         }
+    }
+
+    #[test]
+    fn average_rejects_zero_count_with_nonzero_sum() {
+        // An orphaned sum with count == 0 is semantically impossible: `mean`
+        // reports it as empty, but `merge` still folds the sum into every
+        // aggregate above it (issue #53). V1 carries no checksum by design,
+        // so this semantic check is the only defence on that path — cover
+        // both framing versions rather than just the harder-to-corrupt V2
+        // one, to prove it isn't short-circuited by the checksum path.
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(AVG_MAGIC);
+        v1.push(FORMAT_V1);
+        v1.extend_from_slice(&1.5f64.to_le_bytes());
+        v1.extend_from_slice(&0u64.to_le_bytes());
+        let err = AverageState::decode(&v1).expect_err("v1 impossible state must be rejected");
+        assert!(
+            err.to_string()
+                .contains("empty average state must have zero sum"),
+            "unexpected error: {err}"
+        );
+
+        let mut v2 = Vec::new();
+        v2.extend_from_slice(AVG_MAGIC);
+        v2.push(FORMAT_V2);
+        v2.extend_from_slice(&1.5f64.to_le_bytes());
+        v2.extend_from_slice(&0u64.to_le_bytes());
+        let v2 = finish_v2(v2);
+        let err = AverageState::decode(&v2).expect_err("v2 impossible state must be rejected");
+        assert!(
+            err.to_string()
+                .contains("empty average state must have zero sum"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn average_genuinely_empty_state_still_decodes() {
+        // The counterpart to `average_rejects_zero_count_with_nonzero_sum`:
+        // count == 0 with sum == 0.0 is the genuinely empty state, and the
+        // new guard must not reject it. Every other round-trip test in this
+        // file accumulates at least one value first, so none of them would
+        // catch a guard that was accidentally `count == 0` alone.
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(AVG_MAGIC);
+        v1.push(FORMAT_V1);
+        v1.extend_from_slice(&0.0f64.to_le_bytes());
+        v1.extend_from_slice(&0u64.to_le_bytes());
+        let decoded = AverageState::decode(&v1).expect("v1 empty state must still decode");
+        assert_eq!(decoded, AverageState::new());
+
+        let mut v2 = Vec::new();
+        v2.extend_from_slice(AVG_MAGIC);
+        v2.push(FORMAT_V2);
+        v2.extend_from_slice(&0.0f64.to_le_bytes());
+        v2.extend_from_slice(&0u64.to_le_bytes());
+        let v2 = finish_v2(v2);
+        let decoded = AverageState::decode(&v2).expect("v2 empty state must still decode");
+        assert_eq!(decoded, AverageState::new());
     }
 }
