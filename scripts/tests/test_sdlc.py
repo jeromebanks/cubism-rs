@@ -905,6 +905,57 @@ Read one file.
             self.assertEqual(sdlc.ParentGate(10, None, []), sdlc.load_parent_gate(self.slice, self.config))
         self.assertEqual(sdlc.ParentGate(None, None, None), sdlc.load_parent_gate(None, self.config))
 
+    def test_offline_check_slice_uses_bundled_gate_records(self):
+        # Round-2 finding 6: an offline bundle can still pass when complete.
+        import argparse
+        import contextlib
+        import io
+        for bundle, expected in (
+            ({"gate_comments": {"10": []}}, 0),
+            ({}, 1),
+            ({"gate_comments": {"38": []}}, 1),
+        ):
+            with self.subTest(bundle=bundle):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "bundle.json"
+                    path.write_text(json.dumps(dict(bundle, issues=[self.epic, self.slice], pulls=[])))
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        code = sdlc.command_check_slice(argparse.Namespace(issue=11, input=path), self.config)
+                self.assertEqual(expected, code, out.getvalue())
+
+    def test_real_merge_inputs_reload_a_pause_recorded_after_claim(self):
+        # Round-2 finding 7: drive the real `load_gate_inputs` wiring, patching
+        # only GitHub reads, so removing the parent reload turns this red.
+        import argparse
+        import contextlib
+        import io
+        pr = dict(self._passing_pr(head=self.CANDIDATE), number=99, headRefName="issue/11")
+        paused = dict(self.epic, labels=[{"name": "gate:human-review"}])
+        issues = {10: paused, 11: self.slice}
+        comments = {99: [self._receipt("fresh-codex", head=self.CANDIDATE)], 10: []}
+        writes = []
+        out = io.StringIO()
+        with patch.object(sdlc, "fetch_pr", return_value=pr), \
+                patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
+                patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
+                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT), \
+                patch.object(sdlc, "run_text", side_effect=lambda command, **k: writes.append(command) or ""), \
+                contextlib.redirect_stdout(out):
+            code = sdlc.command_merge(argparse.Namespace(pr=99, apply=True), self.config)
+        self.assertEqual(1, code)
+        self.assertEqual([], writes)
+        self.assertIn("paused for human review", out.getvalue())
+        # And the same wiring admits it once the epic is ungated.
+        issues[10] = self.epic
+        with patch.object(sdlc, "fetch_pr", return_value=pr), \
+                patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
+                patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
+                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT):
+            inputs = sdlc.load_gate_inputs(99, self.config)
+            self.assertEqual((), sdlc.merge_eligibility(99, self.config).errors)
+        self.assertEqual(sdlc.ParentGate(10, self.epic, []), inputs.parent)
+
     def test_pause_after_claim_blocks_the_merge(self):
         issues = {10: self.epic, 11: self.slice}
         self.assertEqual([], sdlc.validate_slice(self.slice, issues, self.config, lambda n: []))
@@ -1116,6 +1167,17 @@ Read one file.
                 if fail == "remove":
                     # Add succeeded, remove failed: a conflict, never no gate.
                     self.assertEqual(2, len(labels & set(sdlc.gate_labels(self.config).values())))
+
+    def test_failed_first_write_never_loosens_the_prior_state(self):
+        # Round-2 finding 5: a failed `review` cannot pause, but must fail
+        # loudly and leave exactly the prior state, never a looser one.
+        for before in ([], ["gate:approved"]):
+            with self.subTest(before=before):
+                code, writes, labels, records, _ = self._set_gate("review", before, fail="add")
+                self.assertIsInstance(code, sdlc.SdlcError)
+                self.assertEqual(set(before), labels)
+                self.assertEqual([], records)
+                self.assertEqual(["labels"], [write[0] for write in writes])
 
     def test_label_writes_add_before_they_remove(self):
         _, writes, _, _, _ = self._set_gate("changes-requested", ["gate:human-review"])

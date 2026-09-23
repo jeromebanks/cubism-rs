@@ -544,6 +544,21 @@ def no_gate_records(_parent_number: int) -> None:
     return None
 
 
+def bundle_gate_records(data: dict[str, Any]) -> GateRecordLoader:
+    """Gate records from an offline bundle's `gate_comments` map.
+
+    The map is `{"<epic number>": [issue comment, ...]}` as the comments API
+    returns them. An epic absent from it is unknown, and so blocks.
+    """
+    stored = data.get("gate_comments")
+
+    def load(parent_number: int) -> list[dict[str, Any]] | None:
+        comments = stored.get(str(parent_number)) if isinstance(stored, dict) else None
+        return parse_gate_records(comments) if isinstance(comments, list) else None
+
+    return load
+
+
 def validate_slice(
     issue: dict[str, Any],
     all_issues: dict[int, dict[str, Any]],
@@ -929,9 +944,9 @@ def command_check_slice(args: argparse.Namespace, config: dict[str, Any]) -> int
     if not issue:
         print(f"BLOCKED: issue #{args.issue} was not found", file=sys.stderr)
         return 1
-    # An offline bundle holds no comments, so a feedback decision cannot be
-    # verified from one; `no_gate_records` makes that case fail closed.
-    loader = no_gate_records if args.input else (lambda number: fetch_gate_records(number, config))
+    # An offline bundle supplies gate records through `gate_comments`; one
+    # without the parent's comments leaves the gate unknown and blocks.
+    loader = bundle_gate_records(data) if args.input else (lambda number: fetch_gate_records(number, config))
     errors = validate_slice(issue, issues, config, loader)
     if errors:
         for error in errors:

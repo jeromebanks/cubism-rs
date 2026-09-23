@@ -165,8 +165,11 @@ comment — state, checkpoint reference, the human who decided, and their words 
 and prints its URL as `GATE_RECORD=`. It writes in a fail-closed order: it adds
 the new label before removing old ones, so an interrupted edit leaves
 conflicting labels rather than none; `review` applies its label before its
-record; a decision posts its record before relaxing the label. A failure at any
-point leaves the epic paused.
+record; a decision posts its record before relaxing the label. A failed
+command exits non-zero and never leaves the epic less restricted than it was
+before the command began, and a decision never relaxes the pause without its
+record. It cannot pause an epic whose label write fails: a `review` whose first
+write fails leaves the prior, unpaused state, and must be retried.
 
 | Epic gate | Ordinary slice | Feedback citing the current decision | Other feedback |
 | --- | --- | --- | --- |
@@ -179,7 +182,8 @@ point leaves the epic paused.
 `changes-requested` record; a feedback issue cites it with exactly one
 `Feedback decision: <URL>` line. The same predicate runs at `next`,
 `check-slice`, `claim` and `merge`, and unreadable gate records block even an
-ungated epic. `check-slice --input` reads no comments, so it cannot pass.
+ungated epic. An offline `check-slice --input` bundle supplies them as
+`"gate_comments": {"<epic>": [<issue comments>]}`; without them it blocks.
 
 A decision answers the checkpoint actually under review: `approved` and
 `changes-requested` require the epic's newest record to be a `review` record
