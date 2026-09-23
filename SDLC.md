@@ -179,7 +179,9 @@ write fails leaves the prior, unpaused state, and must be retried.
 | conflicting labels, or parent unreadable | blocked | blocked | blocked |
 
 "The current decision" is the epic's newest gate record, which must be a
-`changes-requested` record; a feedback issue cites it with exactly one
+complete schema-1 `changes-requested` record (non-empty checkpoint and
+`decided_by`, as `set-gate` writes it). An incomplete or legacy newest record
+authorizes nothing; a feedback issue cites it with exactly one
 `Feedback decision: <URL>` line. The same predicate runs at `next`,
 `check-slice`, `claim` and `merge`, and unreadable gate records block even an
 ungated epic. An offline `check-slice --input` bundle supplies them as

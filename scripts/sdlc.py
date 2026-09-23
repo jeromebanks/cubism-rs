@@ -460,6 +460,25 @@ def parse_gate_records(comments: Iterable[dict[str, Any]]) -> list[dict[str, Any
     return records
 
 
+def complete_gate_record(record: dict[str, Any] | None, state: str) -> bool:
+    """True for a schema-1 `state` record carrying what `set-gate` writes.
+
+    Incomplete or legacy records still count as the newest record — they
+    are never skipped over — but they authorize nothing.
+    """
+    def present(key: str) -> bool:
+        value = (record or {}).get(key)
+        return isinstance(value, str) and bool(value.strip())
+
+    return (
+        bool(record)
+        and record.get("schema") == 1
+        and record.get("state") == state
+        and present("checkpoint")
+        and (state == "review" or present("decided_by"))
+    )
+
+
 def latest_gate_record(records: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
     ordered = sorted(records, key=lambda record: (record.get("created_at") or "", record.get("sequence") or 0))
     return ordered[-1] if ordered else None
@@ -526,10 +545,11 @@ def gate_admission_errors(
             f"{config['repository']} epic #{parent_number}"
         ]
     latest = latest_gate_record(records)
-    if not latest or latest.get("schema") != 1 or latest.get("state") != "changes-requested":
+    if not complete_gate_record(latest, "changes-requested"):
         return [
             f"parent epic #{parent_number} is labeled changes-requested but its newest gate "
-            "record is not a schema-1 changes-requested decision; reconcile with "
+            "record is not a complete schema-1 changes-requested decision (checkpoint and "
+            "decided_by); reconcile with "
             "`scripts/sdlc.py set-gate`"
         ]
     if str(latest.get("id")) != link.group(3):
@@ -1283,7 +1303,7 @@ def command_set_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
         if records is None:
             raise SdlcError(f"gate records on epic #{args.epic} could not be read; the checkpoint under review is unknown")
         latest = latest_gate_record(records)
-        if not latest or latest.get("schema") != 1 or latest.get("state") != "review":
+        if not complete_gate_record(latest, "review"):
             raise SdlcError(
                 f"epic #{args.epic} has no current schema-1 review record; run "
                 "`set-gate --state review --checkpoint <report>` first"

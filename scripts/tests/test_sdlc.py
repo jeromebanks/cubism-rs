@@ -840,7 +840,30 @@ Read one file.
         }])
         self.assertEqual([0], [record["schema"] for record in records])
         ready, _ = self._admission(records)
-        self.assertTrue(any("schema-1 changes-requested" in e for e in ready), ready)
+        self.assertTrue(any("complete schema-1 changes-requested" in e for e in ready), ready)
+
+    def test_incomplete_decision_record_cannot_authorize_feedback(self):
+        # Round-3 finding 8: a hand-written schema-1 record lacking the
+        # checkpoint or the deciding human is not a recorded decision.
+        for payload in (
+            {"schema": 1, "state": "changes-requested"},
+            {"schema": 1, "state": "changes-requested", "checkpoint": self.CHECKPOINT},
+            {"schema": 1, "state": "changes-requested", "decided_by": "Jerome"},
+            {"schema": 1, "state": "changes-requested", "checkpoint": " ", "decided_by": "Jerome"},
+            {"schema": 1, "state": "changes-requested", "checkpoint": self.CHECKPOINT, "decided_by": 7},
+        ):
+            with self.subTest(payload=payload):
+                self.setUp()
+                self.epic["labels"] = [{"name": "gate:changes-requested"}]
+                self._as_feedback(self._decision_url(510))
+                records = sdlc.parse_gate_records([
+                    self._gate_comment("changes-requested", 500, "2026-09-03T00:00:00Z"),
+                    {"id": 510, "created_at": "2026-09-04T00:00:00Z",
+                     "body": f"{sdlc.GATE_PREFIX}{json.dumps(payload)}{sdlc.GATE_SUFFIX}"},
+                ])
+                ready, merge = self._admission(records)
+                self.assertTrue(any("not a complete schema-1" in e for e in ready), ready)
+                self.assertEqual(ready, merge)
 
     def test_quoted_marker_is_not_a_newer_gate_record(self):
         comments = [self._gate_comment("changes-requested", 500, "2026-09-03T00:00:00Z")]
@@ -1090,6 +1113,9 @@ Read one file.
                 ([self._gate_comment("changes-requested", 700, "2026-09-08T00:00:00Z")], "no current schema-1 review record"),
                 ([{"id": 7, "created_at": "2026-09-01T00:00:00Z",
                    "body": f"{sdlc.GATE_PREFIX}state=review{sdlc.GATE_SUFFIX}"}], "no current schema-1 review record"),
+                ([{"id": 8, "created_at": "2026-09-01T00:00:00Z",
+                   "body": sdlc.GATE_PREFIX + '{"schema":1,"state":"review"}' + sdlc.GATE_SUFFIX}],
+                 "no current schema-1 review record"),
                 (sdlc.SdlcError("HTTP 502"), "could not be read"),
             ):
                 with self.subTest(state=state, existing=existing):
