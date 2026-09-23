@@ -902,7 +902,8 @@ Read one file.
 
     def test_unknown_or_unreadable_parent_blocks_merge(self):
         for parent, expected in (
-            (sdlc.ParentGate(None, None, None), "exactly one parent epic"),
+            # The issue names #10 but the caller resolved no parent for it.
+            (sdlc.ParentGate(None, None, None), "parent epic #10 was not loaded"),
             (sdlc.ParentGate(10, None, None), "could not be loaded as an epic"),
             (sdlc.ParentGate(10, {"number": 10, "title": "Not an epic", "labels": []}, []), "could not be loaded as an epic"),
         ):
@@ -1213,6 +1214,140 @@ Read one file.
         self.assertNotIn("--remove-label", commands[0])
         self.assertIn("--remove-label", commands[1])
         self.assertNotIn("--add-label", commands[1])
+
+    # Issue states for the admission matrix, each a mutation of the ready slice.
+    def _set_labels(self, *names):
+        self.slice["labels"] = [{"name": name} for name in names]
+
+    ADMISSION_STATES = {
+        "ready": lambda self: None,
+        "in-progress": lambda self: self._set_labels("type:slice", "in-progress"),
+        "in-review": lambda self: self._set_labels("type:slice", "in-review"),
+        "ready feedback": lambda self: self._set_labels("type:feedback", "status:ready"),
+        "ready+blocked": lambda self: self._set_labels("type:slice", "status:ready", "status:blocked"),
+        "blocked in-progress": lambda self: self._set_labels("type:slice", "in-progress", "status:blocked"),
+        "needs-slicing": lambda self: self._set_labels("type:slice", "status:ready", "needs-slicing"),
+        "closed": lambda self: self.slice.update(state="CLOSED"),
+        "epic": lambda self: self._set_labels("type:slice", "status:ready", "type:epic"),
+        "not a slice": lambda self: self._set_labels("status:ready"),
+        "missing section": lambda self: self.slice.update(
+            body=self.slice["body"].replace("## Non-goals\nNo redesign.\n", "")),
+        "no parent": lambda self: self.slice.update(
+            body=self.slice["body"].replace("Parent epic: #10\n", "")),
+        "two parents": lambda self: self.slice.update(body=self.slice["body"] + "Part of #12\n"),
+        "parent paused": lambda self: self.epic.update(labels=[{"name": "gate:human-review"}]),
+    }
+    # Which states each mode admits; every other state must be refused.
+    ADMITTED = {
+        "check": {"ready", "in-progress", "in-review", "ready feedback"},
+        "start": {"ready", "ready feedback"},
+        "continue": {"ready", "in-progress", "in-review", "ready feedback", "missing section"},
+    }
+
+    class _Admitted(Exception):
+        """Raised by a stubbed side effect once a command has passed admission."""
+
+    def _command_admits(self, command):
+        """Run one real command against the fixture; True when it admits #11."""
+        import argparse
+        import contextlib
+        import io
+        issues = {10: self.epic, 11: self.slice}
+        if command == "merge":
+            parent = sdlc.load_parent_from(self.slice, issues, self.config, self.READ_OK)
+            return self._evaluate(
+                self._passing_pr(), [self._receipt("fresh-codex")], self.slice, self.config, parent=parent,
+            ) == []
+        data = {"issues": [self.epic, self.slice], "pulls": [], "gate_comments": {"10": []}}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            if command == "check-slice":
+                with tempfile.TemporaryDirectory() as tmp:
+                    bundle = Path(tmp) / "bundle.json"
+                    bundle.write_text(json.dumps(data), encoding="utf-8")
+                    return sdlc.command_check_slice(argparse.Namespace(issue=11, input=bundle), self.config) == 0
+            with patch.object(sdlc, "fetch_status_data", return_value=data), \
+                    patch.object(sdlc, "fetch_comments", return_value=[]):
+                if command == "next":
+                    sdlc.command_next(None, self.config)
+                    return "NEXT=11" in out.getvalue()
+                # Claim's first effect after admission is inspecting the remote
+                # claim ref; reaching it means the issue was admitted. A resume
+                # first probes that ref, and continues only if it exists.
+                resume = command.startswith("claim --resume")
+                probes = [0 if command == "claim --resume" else 2] if resume else []
+
+                def run_process(args, **kwargs):
+                    if probes:
+                        return subprocess.CompletedProcess(args, probes.pop(), "", "")
+                    raise self._Admitted
+
+                with patch.object(sdlc, "run_process", side_effect=run_process):
+                    try:
+                        code = sdlc.command_claim(argparse.Namespace(issue=11, resume=resume), self.config)
+                    except self._Admitted:
+                        return True
+                    self.assertEqual(1, code)
+                    self.assertIn("BLOCKED:", out.getvalue())
+                    return False
+
+    def test_admission_matrix_is_consistent_across_commands(self):
+        commands = {
+            "check-slice": "check", "next": "start", "claim": "start",
+            "claim --resume": "continue", "merge": "continue",
+        }
+        for state, prepare in self.ADMISSION_STATES.items():
+            for command, mode in commands.items():
+                with self.subTest(state=state, command=command):
+                    self.setUp()
+                    prepare(self)
+                    expected = state in self.ADMITTED[mode]
+                    self.assertEqual(expected, self._command_admits(command))
+                    # The command's verdict is the shared predicate's verdict.
+                    errors = sdlc.validate_slice(
+                        self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK, mode=mode)
+                    self.assertEqual(expected, errors == [], errors)
+
+    def test_resume_without_an_existing_claim_starts_new_work(self):
+        # `--resume` must not be a way to start unready work under the looser
+        # continue rule: with no remote claim to resume, it is a start.
+        for state in self.ADMISSION_STATES:
+            with self.subTest(state=state):
+                self.setUp()
+                self.ADMISSION_STATES[state](self)
+                self.assertEqual(
+                    state in self.ADMITTED["start"], self._command_admits("claim --resume (unclaimed)"))
+
+    def test_blocked_slice_is_refused_with_its_cause(self):
+        self._set_labels("type:slice", "status:ready", "status:blocked")
+        for mode in sdlc.ADMISSION_MODES:
+            with self.subTest(mode=mode):
+                errors = sdlc.validate_slice(
+                    self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK, mode=mode)
+                self.assertTrue(any("`status:blocked`" in error for error in errors), errors)
+
+    def test_closed_or_blocked_linked_issue_blocks_merge(self):
+        for state in ("closed", "ready+blocked", "blocked in-progress", "needs-slicing"):
+            with self.subTest(state=state):
+                self.setUp()
+                self.ADMISSION_STATES[state](self)
+                self.assertFalse(self._command_admits("merge"))
+
+    def test_next_names_a_ready_slice_it_skips_as_blocked(self):
+        import contextlib
+        import io
+        self._set_labels("type:slice", "status:ready", "status:blocked")
+        err = io.StringIO()
+        with patch.object(sdlc, "fetch_status_data", return_value={"issues": [self.epic, self.slice], "pulls": []}), \
+                patch.object(sdlc, "fetch_comments", return_value=[]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(1, sdlc.command_next(None, self.config))
+        self.assertIn("SKIPPED: issue #11", err.getvalue())
+        self.assertIn("`status:blocked`", err.getvalue())
+
+    def test_unknown_admission_mode_is_a_programming_error(self):
+        with self.assertRaises(ValueError):
+            sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK, mode="merge")
 
     def test_status_maps_epic_children_and_renders_html(self):
         data = {

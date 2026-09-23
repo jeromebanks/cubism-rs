@@ -52,6 +52,24 @@ issue must identify exactly one parent epic and contain:
 - the human-visible effect or demo impact;
 - the minimum context links needed by a fresh session.
 
+### Admission: start and continue
+
+One predicate in `scripts/sdlc.py` decides whether an issue is executable, for
+every command that admits work. It has three modes:
+
+| Mode | Commands | Requires |
+| --- | --- | --- |
+| check | `check-slice` | open; `type:slice` or `type:feedback`; not an epic; no `status:blocked` or `needs-slicing`; the contract sections above; exactly one parent epic whose gate admits it |
+| start | `next`, `claim` | everything `check` requires, and `status:ready` |
+| continue | `claim --resume`, `merge` | open; slice or feedback; no `status:blocked` or `needs-slicing`; exactly one parent epic whose gate admits it |
+
+`check-slice` does not require `status:ready`: a planner runs it to decide
+whether an issue may be labeled ready. An already-owned attempt continues
+without regaining `status:ready` and is not re-judged on its contract sections,
+but a blocker, closure or gate pause recorded after the claim still stops it.
+Prerequisites between slices are not evaluated yet (R3b); check them by hand
+before starting or merging dependent work.
+
 The issue is the session handoff. Do not preload the entire epic, historical
 time-series handoffs, or unrelated architecture documents. Follow only the
 links in the slice's `Context` section unless implementation uncovers a specific
@@ -62,14 +80,15 @@ need for more.
 1. **Select.** Choose a `status:ready` slice whose parent is not paused at a
    human gate. Never pick an epic or an unclassified backlog item.
 2. **Validate and claim.** Run the slice checker, then
-   `rtk python3 scripts/sdlc.py claim N`. The stable remote branch `issue/N` is an
+   `rtk python3 scripts/sdlc.py claim N`, which admits only in start mode. The stable remote branch `issue/N` is an
    atomic, cross-session claim: it is created through GitHub's create-only ref
    endpoint, so exactly one racing session wins and the others are told they
    lost. The command then creates an isolated worktree and adds `in-progress`.
 
    The claim has no heartbeat and no expiry. It establishes exclusive
    acquisition, not liveness: a session that dies holds `issue/N` until a human
-   judges it abandoned and re-runs the command with `--resume`.
+   judges it abandoned and re-runs the command with `--resume`, which admits
+   in continue mode.
 3. **Plan.** Write a short plan against the issue's acceptance criteria. In
    Claude Code, request an advisor review when that facility is available.
    Record material decisions on the issue rather than in a transient handoff.
@@ -111,10 +130,11 @@ need for more.
    retrying; a command error can occur after a successful remote merge.
 
    The gate reloads the linked issue's parent epic and its gate records and
-   applies the same human-gate admission as `check-slice` and `claim`, so a
-   pause recorded after the claim blocks the merge. An unknown or unreadable
-   parent blocks. Dependency/prerequisite admission is not automated yet (R3);
-   recheck prerequisites before invoking merge. A race remains: GitHub cannot
+   applies the shared admission predicate in continue mode, so a pause, a
+   `status:blocked` label or a closure recorded after the claim blocks the
+   merge. An unknown or unreadable parent blocks. Dependency/prerequisite
+   admission is not automated yet (R3b); recheck prerequisites before invoking
+   merge. A race remains: GitHub cannot
    atomically bind an epic-label update to a PR merge, so a gate changed between
    evaluation and `gh pr merge` is not seen. The expected-head precondition
    protects the candidate, not cross-object gates.

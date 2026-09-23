@@ -579,12 +579,47 @@ def bundle_gate_records(data: dict[str, Any]) -> GateRecordLoader:
     return load
 
 
-def validate_slice(
+class ParentGate(NamedTuple):
+    """An issue's parent epic and its gate records, as admission sees them.
+
+    Merge reloads it live (`load_parent_gate`); the other commands take it from
+    an already-fetched issue map (`load_parent_from`). `number` is None when
+    the issue does not name exactly one parent; `epic` and `records` are None
+    when GitHub could not supply them. Each unknown blocks: the pause must be
+    observable at merge, not only at claim.
+    """
+    number: int | None
+    epic: dict[str, Any] | None
+    records: list[dict[str, Any]] | None
+
+
+ADMISSION_MODES = ("check", "start", "continue")
+
+
+def admission_errors(
     issue: dict[str, Any],
-    all_issues: dict[int, dict[str, Any]],
+    parent: ParentGate,
     config: dict[str, Any],
-    load_gate_records: GateRecordLoader = no_gate_records,
+    *,
+    mode: str,
 ) -> list[str]:
+    """Decide whether an issue is executable work, for every command.
+
+    One predicate, three modes:
+
+    - `check` (check-slice): the executable-slice contract. It does not
+      require `status:ready`, because a planner runs it to decide whether an
+      issue may be labeled ready;
+    - `start` (next, claim): `check`, and the issue is labeled ready;
+    - `continue` (claim --resume, merge): an already-owned attempt. It need
+      not regain `status:ready` and is not re-judged on its contract
+      sections, but it must still be open, unblocked, sliced and admitted by
+      its parent's gate.
+
+    Dependencies between slices are not evaluated here yet (R3b).
+    """
+    if mode not in ADMISSION_MODES:
+        raise ValueError(f"unknown admission mode {mode!r}")
     errors: list[str] = []
     labels = config["labels"]
     names = label_names(issue)
@@ -594,24 +629,63 @@ def validate_slice(
         errors.append("epics are containers, not executable slices")
     if labels["slice"] not in names and labels["feedback"] not in names:
         errors.append(f"missing `{labels['slice']}` or `{labels['feedback']}` label")
-    sections = section_contents(issue.get("body") or "")
-    for heading in config["required_slice_sections"]:
-        if not sections.get(heading):
-            errors.append(f"missing or empty `## {heading}` section")
+    if labels["blocked"] in names:
+        errors.append(f"issue is labeled `{labels['blocked']}`; resolve the blocker and remove the label first")
+    if labels["needs_slicing"] in names:
+        errors.append(f"issue is labeled `{labels['needs_slicing']}`; split it into executable slices first")
+    if mode == "start" and labels["ready"] not in names:
+        errors.append(f"issue is not labeled `{labels['ready']}`")
+    if mode != "continue":
+        sections = section_contents(issue.get("body") or "")
+        for heading in config["required_slice_sections"]:
+            if not sections.get(heading):
+                errors.append(f"missing or empty `## {heading}` section")
+        acceptance = sections.get("Acceptance criteria", "")
+        if acceptance and not re.search(r"(?m)^\s*-\s*\[[ xX]\]", acceptance):
+            errors.append("acceptance criteria must contain at least one checklist item")
     parents = parent_numbers(issue)
     if len(parents) != 1:
-        errors.append(f"expected exactly one `Parent epic: #N`, found {len(parents)}")
+        errors.append(
+            f"expected exactly one parent epic (`Parent epic: #N`), found {len(parents)}; "
+            "its human gate is unknown"
+        )
+    elif parent.number != next(iter(parents)):
+        errors.append(f"parent epic #{next(iter(parents))} was not loaded; its human gate is unknown")
     else:
-        parent_number = next(iter(parents))
-        parent = all_issues.get(parent_number)
-        if not parent or not is_epic(parent, config):
-            errors.append(f"parent #{parent_number} is missing or is not an epic")
-        else:
-            errors.extend(gate_admission_errors(issue, parent_number, parent, load_gate_records, config))
-    acceptance = sections.get("Acceptance criteria", "")
-    if acceptance and not re.search(r"(?m)^\s*-\s*\[[ xX]\]", acceptance):
-        errors.append("acceptance criteria must contain at least one checklist item")
+        records = parent.records
+        errors.extend(gate_admission_errors(
+            issue, parent.number, parent.epic, lambda _number: records, config,
+        ))
     return errors
+
+
+def load_parent_from(
+    issue: dict[str, Any],
+    all_issues: dict[int, dict[str, Any]],
+    config: dict[str, Any],
+    load_gate_records: GateRecordLoader,
+) -> ParentGate:
+    """The issue's parent from an already-fetched issue map."""
+    parents = parent_numbers(issue)
+    if len(parents) != 1:
+        return ParentGate(None, None, None)
+    number = next(iter(parents))
+    epic = all_issues.get(number)
+    # Records are read only for a real epic; an absent parent blocks anyway.
+    records = load_gate_records(number) if epic and is_epic(epic, config) else None
+    return ParentGate(number, epic, records)
+
+
+def validate_slice(
+    issue: dict[str, Any],
+    all_issues: dict[int, dict[str, Any]],
+    config: dict[str, Any],
+    load_gate_records: GateRecordLoader = no_gate_records,
+    *,
+    mode: str = "check",
+) -> list[str]:
+    parent = load_parent_from(issue, all_issues, config, load_gate_records)
+    return admission_errors(issue, parent, config, mode=mode)
 
 
 def review_marker(kind: str, head_sha: str, verdict: str, reviewer: str) -> str:
@@ -768,18 +842,6 @@ def fetch_gate_records(number: int, config: dict[str, Any]) -> list[dict[str, An
     return parse_gate_records(comments)
 
 
-class ParentGate(NamedTuple):
-    """The linked issue's parent epic as reloaded for merge evaluation.
-
-    `number` is None when the issue does not name exactly one parent; `epic`
-    and `records` are None when GitHub could not supply them. Each unknown
-    blocks: the pause must be observable at merge, not only at claim.
-    """
-    number: int | None
-    epic: dict[str, Any] | None
-    records: list[dict[str, Any]] | None
-
-
 def evaluate_merge_gate(
     pr: dict[str, Any],
     comments: list[dict[str, Any]],
@@ -807,19 +869,9 @@ def evaluate_merge_gate(
     if issue is None:
         errors.append("linked slice issue could not be loaded")
     else:
-        names = label_names(issue)
-        if config["labels"]["slice"] not in names and config["labels"]["feedback"] not in names:
-            errors.append("linked issue is not labeled as a slice or feedback item")
-        if config["labels"]["blocked"] in names:
-            errors.append("linked issue is blocked")
-        # Re-evaluated here, not trusted from claim time: a checkpoint pause
-        # recorded after the claim must stop the merge.
-        if parent.number is None:
-            errors.append("linked issue does not name exactly one parent epic; its human gate is unknown")
-        else:
-            errors.extend(gate_admission_errors(
-                issue, parent.number, parent.epic, lambda _number: parent.records, config,
-            ))
+        # Re-evaluated here, not trusted from claim time: a checkpoint pause,
+        # a blocker or a closure recorded after the claim must stop the merge.
+        errors.extend(admission_errors(issue, parent, config, mode="continue"))
 
     outcomes = pr_check_outcomes(pr)
     for required in config["required_status_checks"]:
@@ -987,14 +1039,21 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
             continue
         if labels["slice"] not in names and labels["feedback"] not in names:
             continue
-        errors = validate_slice(issue, issues, config, lambda number: fetch_gate_records(number, config))
+        errors = validate_slice(
+            issue, issues, config, lambda number: fetch_gate_records(number, config), mode="start",
+        )
         if not errors:
             candidates.append(issue)
         else:
-            # A ready slice held back by an inconsistent or unknown gate needs
-            # a human-visible reason, not just an empty queue.
+            # A ready slice held back by an inconsistent or unknown gate, or
+            # by a contradictory blocked label, needs a human-visible reason,
+            # not just an empty queue.
             for error in errors:
-                if "conflicting gate labels" in error or "human gate is unknown" in error:
+                if (
+                    "conflicting gate labels" in error
+                    or "human gate is unknown" in error
+                    or f"`{labels['blocked']}`" in error
+                ):
                     print(f"SKIPPED: issue #{number}: {error}", file=sys.stderr)
     if not candidates:
         print("NONE: no executable status:ready slice is available")
@@ -1013,7 +1072,22 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     issue = issues.get(args.issue)
     if not issue:
         raise SdlcError(f"issue #{args.issue} was not found")
-    errors = validate_slice(issue, issues, config, lambda number: fetch_gate_records(number, config))
+    branch = f"issue/{args.issue}"
+    remote_ref = f"refs/heads/{branch}"
+    # A fresh claim starts work and needs `status:ready`. `--resume` continues
+    # an attempt that already owns the claim and has moved past that label,
+    # but only when that claim exists: resuming nothing would start new work
+    # under the looser rule.
+    continuing = False
+    if args.resume:
+        probe = run_process(["git", "ls-remote", "--exit-code", "--heads", "origin", remote_ref], check=False)
+        if probe.returncode not in {0, 2}:
+            raise SdlcError(probe.stderr.strip() or "could not inspect remote claim branch")
+        continuing = probe.returncode == 0
+    errors = validate_slice(
+        issue, issues, config, lambda number: fetch_gate_records(number, config),
+        mode="continue" if continuing else "start",
+    )
     if errors:
         for error in errors:
             print(f"BLOCKED: {error}")
@@ -1023,8 +1097,6 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
             print(f"BLOCKED: issue #{args.issue} already has open PR #{pr['number']}")
             return 1
 
-    branch = f"issue/{args.issue}"
-    remote_ref = f"refs/heads/{branch}"
     remote = run_process(["git", "ls-remote", "--exit-code", "--heads", "origin", remote_ref], check=False)
     if remote.returncode == 0 and not args.resume:
         print(f"BLOCKED: remote branch `{branch}` already claims issue #{args.issue}; use --resume only for an abandoned session")
