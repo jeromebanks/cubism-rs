@@ -18,7 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import Any, Iterable, NamedTuple
+from typing import Any, Callable, Iterable, NamedTuple, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +36,17 @@ PART_OF_RE = re.compile(r"(?im)^\s*part of\s+#(\d+)\b.*$")
 CHECKBOX_CHILD_RE = re.compile(r"(?im)^\s*-\s*\[[ xX]\]\s*#(\d+)\b")
 CLOSE_RE = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b")
 HEADING_RE = re.compile(r"(?m)^#{2,3}\s+(.+?)\s*$")
+# A gate record is a comment whose body begins, at its first byte, with the
+# marker — exactly as `set-gate` writes it. No leading whitespace is allowed:
+# four spaces make an indented Markdown code block, and a comment that merely
+# quotes a marker (fenced, indented or `>`) must not become the newest decision.
+GATE_RECORD_RE = re.compile(r"\A" + re.escape(GATE_PREFIX) + r"(.*?)" + re.escape(GATE_SUFFIX))
+LEGACY_GATE_RE = re.compile(r"\Astate=([a-z-]+)\Z")
+FEEDBACK_DECISION_RE = re.compile(r"(?im)^\s*feedback decision:\s*(\S+)\s*$")
+GATE_RECORD_URL_RE = re.compile(
+    r"\Ahttps://github\.com/([^/\s]+/[^/\s]+)/issues/(\d+)#issuecomment-(\d+)\Z"
+)
+GATE_STATES = ("review", "changes-requested", "approved")
 # Which agent session produced a commit. `Agent-Session` is the harness-neutral
 # spelling every harness should write; `Claude-Session` is the convention
 # already present in this repository's history and stays valid so that existing
@@ -383,7 +394,197 @@ def section_contents(body: str) -> dict[str, str]:
     return sections
 
 
-def validate_slice(issue: dict[str, Any], all_issues: dict[int, dict[str, Any]], config: dict[str, Any]) -> list[str]:
+GateRecordLoader = Callable[[int], Optional[list[dict[str, Any]]]]
+
+
+def gate_labels(config: dict[str, Any]) -> dict[str, str]:
+    labels = config["labels"]
+    return {
+        "review": labels["human_review"],
+        "changes-requested": labels["changes_requested"],
+        "approved": labels["approved"],
+    }
+
+
+def gate_state(epic: dict[str, Any], config: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return `(state, error)` for an epic's gate labels.
+
+    Gate labels are mutually exclusive. More than one is not a state any
+    command produces now, so it is refused rather than resolved by precedence:
+    guessing which label is stale would be guessing the human's decision.
+    """
+    names = label_names(epic)
+    present = [state for state, label in gate_labels(config).items() if label in names]
+    if len(present) > 1:
+        shown = ", ".join(f"`{gate_labels(config)[state]}`" for state in present)
+        return None, (
+            f"parent epic #{epic.get('number')} has conflicting gate labels ({shown}); "
+            f"reconcile by recording the actual human decision with `scripts/sdlc.py "
+            f"set-gate --epic {epic.get('number')} --state <state> ... --apply`"
+        )
+    return (present[0] if present else "none"), None
+
+
+def gate_marker(state: str, checkpoint: str, decided_by: str) -> str:
+    payload = json.dumps(
+        {"schema": 1, "state": state, "checkpoint": checkpoint, "decided_by": decided_by},
+        sort_keys=True, separators=(",", ":"),
+    )
+    return f"{GATE_PREFIX}{payload}{GATE_SUFFIX}"
+
+
+def parse_gate_records(comments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    records = []
+    for sequence, comment in enumerate(comments):
+        match = GATE_RECORD_RE.match(comment.get("body") or "")
+        if not match:
+            continue
+        raw = match.group(1).strip()
+        legacy = LEGACY_GATE_RE.match(raw)
+        if legacy:
+            # Pre-R2 records carry only a state: enough to show history, never
+            # enough to authorize feedback (no checkpoint, no decision owner).
+            payload: dict[str, Any] = {"schema": 0, "state": legacy.group(1)}
+        else:
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+        payload["id"] = comment.get("id")
+        payload["comment_url"] = comment.get("html_url") or comment.get("url")
+        payload["created_at"] = comment.get("created_at")
+        payload["sequence"] = sequence
+        records.append(payload)
+    return records
+
+
+def complete_gate_record(record: dict[str, Any] | None, state: str) -> bool:
+    """True for a schema-1 `state` record carrying what `set-gate` writes.
+
+    Incomplete or legacy records still count as the newest record — they
+    are never skipped over — but they authorize nothing.
+    """
+    def present(key: str) -> bool:
+        value = (record or {}).get(key)
+        return isinstance(value, str) and bool(value.strip())
+
+    return (
+        bool(record)
+        and record.get("schema") == 1
+        and record.get("state") == state
+        and present("checkpoint")
+        and (state == "review" or present("decided_by"))
+    )
+
+
+def latest_gate_record(records: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
+    ordered = sorted(records, key=lambda record: (record.get("created_at") or "", record.get("sequence") or 0))
+    return ordered[-1] if ordered else None
+
+
+def gate_admission_errors(
+    issue: dict[str, Any],
+    parent_number: int,
+    parent: dict[str, Any] | None,
+    load_gate_records: GateRecordLoader,
+    config: dict[str, Any],
+) -> list[str]:
+    """Decide whether the parent's human gate admits this issue.
+
+    One predicate for readiness, claim, and merge. The transition table:
+
+    - no gate label, or `approved`: ordinary and feedback work proceed;
+    - `review`: nothing proceeds, feedback included;
+    - `changes-requested`: only a `type:feedback` issue citing the parent's
+      current changes-requested gate record proceeds. The label alone is not
+      authority; the cited human decision is;
+    - conflicting labels, or an unreadable parent or record: blocked.
+
+    Records are required even where labels alone decide: the gate is the
+    labels *and* their record, and an unreadable record means the gate is
+    not fully known.
+    """
+    labels = config["labels"]
+    if parent is None or not is_epic(parent, config):
+        return [f"parent epic #{parent_number} could not be loaded as an epic; its human gate is unknown"]
+    records = load_gate_records(parent_number)
+    if records is None:
+        return [f"gate records on parent epic #{parent_number} could not be read; its human gate is unknown"]
+    state, conflict = gate_state(parent, config)
+    if conflict:
+        return [conflict]
+    if state == "review":
+        return [
+            f"parent epic #{parent_number} is paused for human review; "
+            "no slice, including feedback, may proceed"
+        ]
+    if state != "changes-requested":
+        return []
+    if labels["feedback"] not in label_names(issue):
+        return [
+            f"parent epic #{parent_number} has changes requested; only "
+            f"`{labels['feedback']}` slices may proceed"
+        ]
+    cited = FEEDBACK_DECISION_RE.findall(issue.get("body") or "")
+    if len(cited) != 1:
+        return [
+            f"feedback during changes-requested must cite exactly one "
+            f"`Feedback decision: <gate record URL>` from parent epic #{parent_number}; "
+            f"found {len(cited)}"
+        ]
+    link = GATE_RECORD_URL_RE.match(cited[0])
+    if (
+        not link
+        or link.group(1).lower() != config["repository"].lower()
+        or int(link.group(2)) != parent_number
+    ):
+        return [
+            f"`Feedback decision: {cited[0]}` is not a gate record comment on "
+            f"{config['repository']} epic #{parent_number}"
+        ]
+    latest = latest_gate_record(records)
+    if not complete_gate_record(latest, "changes-requested"):
+        return [
+            f"parent epic #{parent_number} is labeled changes-requested but its newest gate "
+            "record is not a complete schema-1 changes-requested decision (checkpoint and "
+            "decided_by); reconcile with "
+            "`scripts/sdlc.py set-gate`"
+        ]
+    if str(latest.get("id")) != link.group(3):
+        return [
+            f"feedback cites decision {cited[0]}, but the current changes-requested "
+            f"decision on epic #{parent_number} is {latest.get('comment_url')}"
+        ]
+    return []
+
+
+def no_gate_records(_parent_number: int) -> None:
+    return None
+
+
+def bundle_gate_records(data: dict[str, Any]) -> GateRecordLoader:
+    """Gate records from an offline bundle's `gate_comments` map.
+
+    The map is `{"<epic number>": [issue comment, ...]}` as the comments API
+    returns them. An epic absent from it is unknown, and so blocks.
+    """
+    stored = data.get("gate_comments")
+
+    def load(parent_number: int) -> list[dict[str, Any]] | None:
+        comments = stored.get(str(parent_number)) if isinstance(stored, dict) else None
+        return parse_gate_records(comments) if isinstance(comments, list) else None
+
+    return load
+
+
+def validate_slice(
+    issue: dict[str, Any],
+    all_issues: dict[int, dict[str, Any]],
+    config: dict[str, Any],
+    load_gate_records: GateRecordLoader = no_gate_records,
+) -> list[str]:
     errors: list[str] = []
     labels = config["labels"]
     names = label_names(issue)
@@ -406,20 +607,7 @@ def validate_slice(issue: dict[str, Any], all_issues: dict[int, dict[str, Any]],
         if not parent or not is_epic(parent, config):
             errors.append(f"parent #{parent_number} is missing or is not an epic")
         else:
-            # AGENTS.md: ordinary work stops under either gate; only linked
-            # feedback slices may proceed, and only during changes-requested.
-            # A `type:feedback` label is not a general pause bypass.
-            parent_labels = label_names(parent)
-            if labels["human_review"] in parent_labels:
-                errors.append(
-                    f"parent epic #{parent_number} is paused for human review; "
-                    "no slice, including feedback, may proceed"
-                )
-            elif labels["changes_requested"] in parent_labels and labels["feedback"] not in names:
-                errors.append(
-                    f"parent epic #{parent_number} has changes requested; only "
-                    f"`{labels['feedback']}` slices may proceed"
-                )
+            errors.extend(gate_admission_errors(issue, parent_number, parent, load_gate_records, config))
     acceptance = sections.get("Acceptance criteria", "")
     if acceptance and not re.search(r"(?m)^\s*-\s*\[[ xX]\]", acceptance):
         errors.append("acceptance criteria must contain at least one checklist item")
@@ -569,7 +757,38 @@ def fetch_comments(number: int, config: dict[str, Any]) -> list[dict[str, Any]]:
     return run_json(["gh", "api", "--paginate", f"repos/{config['repository']}/issues/{number}/comments"])
 
 
-def evaluate_merge_gate(pr: dict[str, Any], comments: list[dict[str, Any]], issue: dict[str, Any] | None, config: dict[str, Any], head_message: str | None = None) -> list[str]:
+def fetch_gate_records(number: int, config: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Gate records on an epic, or None when they cannot be read (fail closed)."""
+    try:
+        comments = fetch_comments(number, config)
+    except (SdlcError, OSError):
+        return None
+    if not isinstance(comments, list):
+        return None
+    return parse_gate_records(comments)
+
+
+class ParentGate(NamedTuple):
+    """The linked issue's parent epic as reloaded for merge evaluation.
+
+    `number` is None when the issue does not name exactly one parent; `epic`
+    and `records` are None when GitHub could not supply them. Each unknown
+    blocks: the pause must be observable at merge, not only at claim.
+    """
+    number: int | None
+    epic: dict[str, Any] | None
+    records: list[dict[str, Any]] | None
+
+
+def evaluate_merge_gate(
+    pr: dict[str, Any],
+    comments: list[dict[str, Any]],
+    issue: dict[str, Any] | None,
+    config: dict[str, Any],
+    head_message: str | None = None,
+    *,
+    parent: ParentGate,
+) -> list[str]:
     errors: list[str] = []
     head = pr.get("headRefOid")
     if pr.get("state") != "OPEN":
@@ -593,6 +812,14 @@ def evaluate_merge_gate(pr: dict[str, Any], comments: list[dict[str, Any]], issu
             errors.append("linked issue is not labeled as a slice or feedback item")
         if config["labels"]["blocked"] in names:
             errors.append("linked issue is blocked")
+        # Re-evaluated here, not trusted from claim time: a checkpoint pause
+        # recorded after the claim must stop the merge.
+        if parent.number is None:
+            errors.append("linked issue does not name exactly one parent epic; its human gate is unknown")
+        else:
+            errors.extend(gate_admission_errors(
+                issue, parent.number, parent.epic, lambda _number: parent.records, config,
+            ))
 
     outcomes = pr_check_outcomes(pr)
     for required in config["required_status_checks"]:
@@ -737,7 +964,10 @@ def command_check_slice(args: argparse.Namespace, config: dict[str, Any]) -> int
     if not issue:
         print(f"BLOCKED: issue #{args.issue} was not found", file=sys.stderr)
         return 1
-    errors = validate_slice(issue, issues, config)
+    # An offline bundle supplies gate records through `gate_comments`; one
+    # without the parent's comments leaves the gate unknown and blocks.
+    loader = bundle_gate_records(data) if args.input else (lambda number: fetch_gate_records(number, config))
+    errors = validate_slice(issue, issues, config, loader)
     if errors:
         for error in errors:
             print(f"BLOCKED: {error}")
@@ -757,9 +987,15 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
             continue
         if labels["slice"] not in names and labels["feedback"] not in names:
             continue
-        errors = validate_slice(issue, issues, config)
+        errors = validate_slice(issue, issues, config, lambda number: fetch_gate_records(number, config))
         if not errors:
             candidates.append(issue)
+        else:
+            # A ready slice held back by an inconsistent or unknown gate needs
+            # a human-visible reason, not just an empty queue.
+            for error in errors:
+                if "conflicting gate labels" in error or "human gate is unknown" in error:
+                    print(f"SKIPPED: issue #{number}: {error}", file=sys.stderr)
     if not candidates:
         print("NONE: no executable status:ready slice is available")
         return 1
@@ -777,7 +1013,7 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     issue = issues.get(args.issue)
     if not issue:
         raise SdlcError(f"issue #{args.issue} was not found")
-    errors = validate_slice(issue, issues, config)
+    errors = validate_slice(issue, issues, config, lambda number: fetch_gate_records(number, config))
     if errors:
         for error in errors:
             print(f"BLOCKED: {error}")
@@ -882,7 +1118,27 @@ def fetch_commit_message(sha: str, config: dict[str, Any]) -> str:
     return ((commit.get("commit") or {}).get("message")) or ""
 
 
-def load_gate_inputs(pr_number: int, config: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None, str]:
+class GateInputs(NamedTuple):
+    pr: dict[str, Any]
+    comments: list[dict[str, Any]]
+    issue: dict[str, Any] | None
+    head_message: str
+    parent: ParentGate
+
+
+def load_parent_gate(issue: dict[str, Any] | None, config: dict[str, Any]) -> ParentGate:
+    parents = parent_numbers(issue) if issue else set()
+    if len(parents) != 1:
+        return ParentGate(None, None, None)
+    number = next(iter(parents))
+    try:
+        epic: dict[str, Any] | None = fetch_issue(number, config)
+    except (SdlcError, OSError):
+        epic = None
+    return ParentGate(number, epic, fetch_gate_records(number, config))
+
+
+def load_gate_inputs(pr_number: int, config: dict[str, Any]) -> GateInputs:
     pr = fetch_pr(pr_number, config)
     comments = fetch_comments(pr_number, config)
     linked = linked_issue_numbers(pr)
@@ -890,7 +1146,7 @@ def load_gate_inputs(pr_number: int, config: dict[str, Any]) -> tuple[dict[str, 
     # The head commit carries the implementing agent's identity in a trailer.
     # Fetched here so `evaluate_merge_gate` stays a pure function of its inputs.
     head_message = fetch_commit_message(pr["headRefOid"], config) if pr.get("headRefOid") else ""
-    return pr, comments, issue, head_message
+    return GateInputs(pr, comments, issue, head_message, load_parent_gate(issue, config))
 
 
 class MergeEligibility(NamedTuple):
@@ -899,8 +1155,8 @@ class MergeEligibility(NamedTuple):
 
 
 def merge_eligibility(pr_number: int, config: dict[str, Any]) -> MergeEligibility:
-    pr, comments, issue, head_message = load_gate_inputs(pr_number, config)
-    errors = evaluate_merge_gate(pr, comments, issue, config, head_message)
+    pr, comments, issue, head_message, parent = load_gate_inputs(pr_number, config)
+    errors = evaluate_merge_gate(pr, comments, issue, config, head_message, parent=parent)
     head = pr.get("headRefOid") or ""
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         errors.append("evaluated candidate is not a full commit SHA")
@@ -1013,35 +1269,104 @@ def command_set_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
     note = args.note_file.read_text(encoding="utf-8").strip()
     if not note:
         raise SdlcError("gate note must not be empty")
-    labels = config["labels"]
-    transitions = {
-        "review": ([labels["human_review"]], [labels["changes_requested"], labels["approved"]]),
-        "changes-requested": ([labels["human_review"], labels["changes_requested"]], [labels["approved"]]),
-        "approved": ([labels["approved"]], [labels["human_review"], labels["changes_requested"]]),
-    }
-    add, remove = transitions[args.state]
+    checkpoint = (args.checkpoint or "").strip()
+    decided_by = (args.decided_by or "").strip()
+    if not checkpoint:
+        raise SdlcError("--checkpoint must name the checkpoint report or reference under review")
+    if args.state != "review" and not decided_by:
+        # An agent may faithfully record a decision it was given. It must not
+        # produce one, so a decision without an attributed human is refused.
+        raise SdlcError(
+            f"`{args.state}` records a human decision; pass --decided-by naming the "
+            "person who made it, and put their words in --note-file"
+        )
+    for flag, value in (("--checkpoint", checkpoint), ("--decided-by", decided_by)):
+        if "-->" in value or any(char in value for char in "\r\n"):
+            raise SdlcError(f"{flag} must be a single line and must not contain `-->`")
+
+    targets = gate_labels(config)
     current = label_names(epic)
-    add = [name for name in add if name not in current]
-    remove = [name for name in remove if name in current]
-    command = ["gh", "issue", "edit", str(args.epic), "--repo", config["repository"]]
-    for name in add:
-        command.extend(["--add-label", name])
-    for name in remove:
-        command.extend(["--remove-label", name])
+    if args.state != "review" and targets["review"] not in current:
+        # A decision answers a checkpoint that is under review. This also
+        # admits the legacy dual-label state (review + changes-requested),
+        # which recording the actual decision reconciles.
+        raise SdlcError(
+            f"`{args.state}` decides a checkpoint under review, but epic #{args.epic} "
+            f"is not labeled `{targets['review']}`; request review first"
+        )
+    if args.state != "review":
+        # The decision must answer the checkpoint actually put under review,
+        # as recorded by `set-gate --state review`. A missing or different
+        # review record (e.g. its post failed) is reconciled by requesting
+        # review again, not by deciding an unrecorded checkpoint.
+        records = fetch_gate_records(args.epic, config)
+        if records is None:
+            raise SdlcError(f"gate records on epic #{args.epic} could not be read; the checkpoint under review is unknown")
+        latest = latest_gate_record(records)
+        if not complete_gate_record(latest, "review"):
+            raise SdlcError(
+                f"epic #{args.epic} has no current schema-1 review record; run "
+                "`set-gate --state review --checkpoint <report>` first"
+            )
+        if latest.get("checkpoint") != checkpoint:
+            raise SdlcError(
+                f"--checkpoint {checkpoint!r} does not match the checkpoint under review "
+                f"({latest.get('checkpoint')!r}, {latest.get('comment_url')})"
+            )
+    add = [targets[args.state]] if targets[args.state] not in current else []
+    remove = [label for state, label in targets.items() if state != args.state and label in current]
+    edit = ["gh", "issue", "edit", str(args.epic), "--repo", config["repository"]]
+    # Two writes, add before remove: one `gh issue edit` carrying both flags is
+    # not known to be atomic, and removing first could leave no gate at all.
+    # Failing between these leaves conflicting labels, which block everything.
+    label_commands = [edit + ["--add-label", name] for name in add]
+    if remove:
+        label_commands.append(edit + [part for name in remove for part in ("--remove-label", name)])
+    record = f"{gate_marker(args.state, checkpoint, decided_by)}\n\n{note}\n"
     if not args.apply:
-        print("DRY RUN:", " ".join(command))
-        print(note)
+        for command in label_commands:
+            print("DRY RUN:", " ".join(command))
+        print(record)
         return 0
-    run_text(command)
-    marker = f"{GATE_PREFIX}state={args.state}{GATE_SUFFIX}"
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
-        handle.write(f"{marker}\n\n{note}\n")
-        temp_name = handle.name
-    try:
-        run_text(["gh", "issue", "comment", str(args.epic), "--repo", config["repository"], "--body-file", temp_name])
-    finally:
-        Path(temp_name).unlink(missing_ok=True)
+
+    def apply_labels() -> None:
+        for command in label_commands:
+            run_text(command)
+
+    def post_record() -> str:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as handle:
+            json.dump({"body": record}, handle)
+            temp_name = handle.name
+        try:
+            # The REST response returns the comment's URL, which a feedback
+            # issue cites as its `Feedback decision:`.
+            posted = run_json([
+                "gh", "api", "--method", "POST",
+                f"repos/{config['repository']}/issues/{args.epic}/comments",
+                "--input", temp_name,
+            ])
+        finally:
+            Path(temp_name).unlink(missing_ok=True)
+        url = (posted or {}).get("html_url") if isinstance(posted, dict) else None
+        if not url:
+            raise SdlcError(
+                f"gate record posted to epic #{args.epic} returned no URL; read the epic's "
+                "comments before retrying"
+            )
+        return url
+
+    # Tighten first, relax last, so a failure between the two writes leaves the
+    # epic at least as paused as either state. `review` pauses: label first.
+    # A decision relaxes the pause: its record exists before the label changes,
+    # and until then the epic stays under review.
+    if args.state == "review":
+        apply_labels()
+        record_url = post_record()
+    else:
+        record_url = post_record()
+        apply_labels()
     print(f"GATE={args.state} epic=#{args.epic}")
+    print(f"GATE_RECORD={record_url}")
     return 0
 
 
@@ -1175,8 +1500,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     gate_state = sub.add_parser("set-gate", help="record a human milestone gate transition")
     gate_state.add_argument("--epic", type=int, required=True)
-    gate_state.add_argument("--state", choices=["review", "changes-requested", "approved"], required=True)
+    gate_state.add_argument("--state", choices=GATE_STATES, required=True)
     gate_state.add_argument("--note-file", type=Path, required=True)
+    gate_state.add_argument("--checkpoint", required=True, help="checkpoint report/reference the gate concerns")
+    gate_state.add_argument("--decided-by", help="the human whose decision this records (required unless --state review)")
     gate_state.add_argument("--apply", action="store_true")
     gate_state.set_defaults(func=command_set_gate)
 

@@ -27,8 +27,10 @@ Prefix shell commands with `rtk`. In command chains, prefix each segment. Use
 - Do not ask for routine human PR review. When CI and the required agent review
   pass, use the deterministic merge command in `SDLC.md`.
 - Stop ordinary work under an epic labeled `gate:human-review` or
-  `gate:changes-requested`. Only linked feedback slices may proceed during the
-  latter state.
+  `gate:changes-requested`. Only feedback slices citing the current decision
+  (`Feedback decision: <gate record URL>`) may proceed during the latter state.
+  Record gate transitions only with `scripts/sdlc.py set-gate`, and only for a
+  decision a human actually made.
 - Record durable decisions and feedback in GitHub or versioned docs, not a
   transient session handoff.
 

@@ -17,6 +17,7 @@ Read `SDLC.md`, the epic, its linked slices, and
 
    ```bash
    rtk python3 scripts/sdlc.py set-gate --epic N --state review \
+     --checkpoint docs/milestones/epic-N/<checkpoint>.html \
      --note-file <note> --apply
    ```
 3. Create `docs/milestones/epic-N/<checkpoint>.json`. Explain the integrated
@@ -38,16 +39,25 @@ Read `SDLC.md`, the epic, its linked slices, and
 ## Record feedback
 
 Preserve the human's words in a note and run `set-gate --state
-changes-requested --note-file <note> --apply`.
+changes-requested --checkpoint <report> --decided-by <human> --note-file <note>
+--apply`. It prints `GATE_RECORD=<url>`.
 Turn each independently deliverable correction into a `type:feedback` issue
-using the slice template and `Parent epic: #N`. Feedback slices use `$work-slice`
-and may proceed while the parent is paused; unrelated roadmap slices may not.
+using the feedback template, `Parent epic: #N`, and exactly one
+`Feedback decision: <url>` line citing that record. Feedback slices use
+`$work-slice` and may proceed while ordinary roadmap slices stay paused. A
+feedback issue citing an older decision, or none, is blocked. Further feedback
+on the same checkpoint means `set-gate --state review` and a new decision;
+re-cite the new `GATE_RECORD=` URL in any feedback issue still open.
+
+`--checkpoint` must equal the one given to `set-gate --state review`.
+`--decided-by` names the human whose decision you are recording. Never record a
+decision the human did not give you.
 
 After all feedback slices merge, revise the manifest, generate a new checkpoint
 HTML file, and request review again. Keep earlier checkpoint reports.
 
 ## Record approval
 
-Preserve the approval in a note and run `set-gate --state approved --note-file
-<note> --apply`. Refresh the cockpit. Do not infer approval from silence or from
+Preserve the approval in a note and run `set-gate --state approved --checkpoint
+<report> --decided-by <human> --note-file <note> --apply`. Refresh the cockpit. Do not infer approval from silence or from
 approval of an individual PR.
