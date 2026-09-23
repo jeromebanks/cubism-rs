@@ -49,6 +49,7 @@ feedback issue citing an older decision, or none, is blocked. Further feedback
 on the same checkpoint means `set-gate --state review` and a new decision;
 re-cite the new `GATE_RECORD=` URL in any feedback issue still open.
 
+`--checkpoint` must equal the one given to `set-gate --state review`.
 `--decided-by` names the human whose decision you are recording. Never record a
 decision the human did not give you.
 

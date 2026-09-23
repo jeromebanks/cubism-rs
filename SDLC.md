@@ -178,7 +178,13 @@ point leaves the epic paused.
 "The current decision" is the epic's newest gate record, which must be a
 `changes-requested` record; a feedback issue cites it with exactly one
 `Feedback decision: <URL>` line. The same predicate runs at `next`,
-`check-slice`, `claim` and `merge`.
+`check-slice`, `claim` and `merge`, and unreadable gate records block even an
+ungated epic. `check-slice --input` reads no comments, so it cannot pass.
+
+A decision answers the checkpoint actually under review: `approved` and
+`changes-requested` require the epic's newest record to be a `review` record
+with the same `--checkpoint`. If that record is missing — for example its post
+failed, or the epic predates R2 — run `set-gate --state review` again first.
 
 `--decided-by` is attribution, not proof. With one GitHub account, the tool
 cannot tell a human's decision from an agent's claim of one. An agent records

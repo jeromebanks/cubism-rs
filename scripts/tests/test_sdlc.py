@@ -45,6 +45,9 @@ Read one file.
             "url": "https://example.test/11", "updatedAt": "2026-01-01T00:00:00Z",
         }
 
+    # A gate-record loader that read the epic's comments and found no records.
+    READ_OK = staticmethod(lambda _number: [])
+
     def _open_parent(self):
         # The parent as `load_gate_inputs` reloads it: an ungated epic whose
         # gate records were read successfully.
@@ -57,15 +60,15 @@ Read one file.
 
     def test_slice_contract_accepts_one_session_issue(self):
         issues = {10: self.epic, 11: self.slice}
-        self.assertEqual([], sdlc.validate_slice(self.slice, issues, self.config))
+        self.assertEqual([], sdlc.validate_slice(self.slice, issues, self.config, self.READ_OK))
 
     def test_issue_form_level_three_headings_are_accepted(self):
         self.slice["body"] = self.slice["body"].replace("## ", "### ")
-        self.assertEqual([], sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config))
+        self.assertEqual([], sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK))
 
     def test_human_gate_blocks_normal_slice(self):
         self.epic["labels"] = [{"name": "gate:human-review"}]
-        errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config)
+        errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK)
         self.assertIn(
             "parent epic #10 is paused for human review; no slice, including feedback, may proceed",
             errors,
@@ -775,7 +778,7 @@ Read one file.
 
     def test_ordinary_slice_pauses_during_changes_requested(self):
         self.epic["labels"] = [{"name": "gate:changes-requested"}]
-        errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config)
+        errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK)
         self.assertTrue(any("only `type:feedback` slices may proceed" in e for e in errors), errors)
 
     def test_feedback_citing_another_epic_or_repository_is_refused(self):
@@ -810,6 +813,17 @@ Read one file.
         errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config)
         self.assertTrue(any("could not be read" in e for e in errors), errors)
 
+    def test_unreadable_gate_records_block_even_without_a_gate_label(self):
+        # Round-1 finding 3: labels alone must not decide when the record half
+        # of the gate is unknown.
+        for gate in ([], [{"name": "gate:approved"}]):
+            with self.subTest(gate=gate):
+                self.setUp()
+                self.epic["labels"] = gate
+                ready, merge = self._admission(None)
+                self.assertTrue(any("could not be read" in e for e in ready), ready)
+                self.assertEqual(ready, merge)
+
     def test_label_without_a_matching_record_blocks_feedback(self):
         self.epic["labels"] = [{"name": "gate:changes-requested"}]
         self._as_feedback(self._decision_url(450))
@@ -835,6 +849,9 @@ Read one file.
             {"id": 600, "created_at": "2026-09-04T00:00:00Z",
              "body": f"Continuation note. The record reads:\n```\n{quoted}\n```"},
             {"id": 601, "created_at": "2026-09-05T00:00:00Z", "body": f"> {quoted}"},
+            # Round-1 finding 2: an indented Markdown code block.
+            {"id": 602, "created_at": "2026-09-06T00:00:00Z", "body": f"    {quoted}\n"},
+            {"id": 603, "created_at": "2026-09-07T00:00:00Z", "body": f"\n{quoted}\n"},
         ]
         records = sdlc.parse_gate_records(comments)
         self.assertEqual([500], [record["id"] for record in records])
@@ -901,7 +918,7 @@ Read one file.
     # --- set-gate transitions ---
 
     def _set_gate(self, state, labels, *, decided_by="Jerome (human)", checkpoint=None,
-                  apply=True, fail=None):
+                  apply=True, fail=None, existing=None):
         """Run the real command against a mocked GitHub; return what it did."""
         import argparse
         import contextlib
@@ -937,7 +954,13 @@ Read one file.
                 decided_by=decided_by,
             )
             out = io.StringIO()
-            with patch.object(sdlc, "fetch_issue", return_value=epic), \
+            if existing is None:
+                # The record `set-gate --state review` posted for this checkpoint.
+                existing = [self._gate_comment("review", 800, "2026-09-09T00:00:00Z")]
+            comments = patch.object(sdlc, "fetch_comments", return_value=existing) \
+                if not isinstance(existing, Exception) else \
+                patch.object(sdlc, "fetch_comments", side_effect=existing)
+            with patch.object(sdlc, "fetch_issue", return_value=epic), comments, \
                     patch.object(sdlc, "run_text", side_effect=run_text), \
                     patch.object(sdlc, "run_json", side_effect=run_json), \
                     contextlib.redirect_stdout(out):
@@ -1007,6 +1030,41 @@ Read one file.
                 self.assertIsInstance(code, sdlc.SdlcError)
                 self.assertIn("request review first", str(code))
                 self.assertEqual([], writes)
+
+    def test_a_decision_must_answer_the_recorded_checkpoint(self):
+        # Round-1 finding 1: the label alone does not say *what* is under review.
+        for state in ("changes-requested", "approved"):
+            for existing, expected in (
+                ([], "no current schema-1 review record"),
+                ([self._gate_comment("changes-requested", 700, "2026-09-08T00:00:00Z")], "no current schema-1 review record"),
+                ([{"id": 7, "created_at": "2026-09-01T00:00:00Z",
+                   "body": f"{sdlc.GATE_PREFIX}state=review{sdlc.GATE_SUFFIX}"}], "no current schema-1 review record"),
+                (sdlc.SdlcError("HTTP 502"), "could not be read"),
+            ):
+                with self.subTest(state=state, existing=existing):
+                    code, writes, _, _, _ = self._set_gate(state, ["gate:human-review"], existing=existing)
+                    self.assertIsInstance(code, sdlc.SdlcError)
+                    self.assertIn(expected, str(code))
+                    self.assertEqual([], writes)
+            with self.subTest(state=state, checkpoint="different"):
+                code, writes, _, _, _ = self._set_gate(
+                    state, ["gate:human-review"], checkpoint="docs/milestones/epic-10/other.html")
+                self.assertIsInstance(code, sdlc.SdlcError)
+                self.assertIn("does not match the checkpoint under review", str(code))
+                self.assertEqual([], writes)
+
+    def test_next_names_a_gate_conflict_it_skips(self):
+        import contextlib
+        import io
+        self.epic["labels"] = [{"name": "gate:human-review"}, {"name": "gate:approved"}]
+        err = io.StringIO()
+        with patch.object(sdlc, "fetch_status_data", return_value={"issues": [self.epic, self.slice], "pulls": []}), \
+                patch.object(sdlc, "fetch_comments", return_value=[]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = sdlc.command_next(None, self.config)
+        self.assertEqual(1, code)
+        self.assertIn("SKIPPED: issue #11", err.getvalue())
+        self.assertIn("set-gate --epic 10", err.getvalue())
 
     def test_a_decision_must_name_the_human_who_made_it(self):
         for state in ("changes-requested", "approved"):

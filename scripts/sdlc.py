@@ -36,10 +36,11 @@ PART_OF_RE = re.compile(r"(?im)^\s*part of\s+#(\d+)\b.*$")
 CHECKBOX_CHILD_RE = re.compile(r"(?im)^\s*-\s*\[[ xX]\]\s*#(\d+)\b")
 CLOSE_RE = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b")
 HEADING_RE = re.compile(r"(?m)^#{2,3}\s+(.+?)\s*$")
-# A gate record is a comment whose body *opens* with the marker. Anchoring
-# keeps a later comment that merely quotes a marker (a continuation note, a
-# code fence) from becoming the newest decision.
-GATE_RECORD_RE = re.compile(r"\A\s*" + re.escape(GATE_PREFIX) + r"(.*?)" + re.escape(GATE_SUFFIX))
+# A gate record is a comment whose body begins, at its first byte, with the
+# marker — exactly as `set-gate` writes it. No leading whitespace is allowed:
+# four spaces make an indented Markdown code block, and a comment that merely
+# quotes a marker (fenced, indented or `>`) must not become the newest decision.
+GATE_RECORD_RE = re.compile(r"\A" + re.escape(GATE_PREFIX) + r"(.*?)" + re.escape(GATE_SUFFIX))
 LEGACY_GATE_RE = re.compile(r"\Astate=([a-z-]+)\Z")
 FEEDBACK_DECISION_RE = re.compile(r"(?im)^\s*feedback decision:\s*(\S+)\s*$")
 GATE_RECORD_URL_RE = re.compile(
@@ -481,10 +482,17 @@ def gate_admission_errors(
       current changes-requested gate record proceeds. The label alone is not
       authority; the cited human decision is;
     - conflicting labels, or an unreadable parent or record: blocked.
+
+    Records are required even where labels alone decide: the gate is the
+    labels *and* their record, and an unreadable record means the gate is
+    not fully known.
     """
     labels = config["labels"]
     if parent is None or not is_epic(parent, config):
         return [f"parent epic #{parent_number} could not be loaded as an epic; its human gate is unknown"]
+    records = load_gate_records(parent_number)
+    if records is None:
+        return [f"gate records on parent epic #{parent_number} could not be read; its human gate is unknown"]
     state, conflict = gate_state(parent, config)
     if conflict:
         return [conflict]
@@ -517,9 +525,6 @@ def gate_admission_errors(
             f"`Feedback decision: {cited[0]}` is not a gate record comment on "
             f"{config['repository']} epic #{parent_number}"
         ]
-    records = load_gate_records(parent_number)
-    if records is None:
-        return [f"gate records on parent epic #{parent_number} could not be read; the feedback decision is unverified"]
     latest = latest_gate_record(records)
     if not latest or latest.get("schema") != 1 or latest.get("state") != "changes-requested":
         return [
@@ -950,6 +955,12 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
         errors = validate_slice(issue, issues, config, lambda number: fetch_gate_records(number, config))
         if not errors:
             candidates.append(issue)
+        else:
+            # A ready slice held back by an inconsistent or unknown gate needs
+            # a human-visible reason, not just an empty queue.
+            for error in errors:
+                if "conflicting gate labels" in error or "human gate is unknown" in error:
+                    print(f"SKIPPED: issue #{number}: {error}", file=sys.stderr)
     if not candidates:
         print("NONE: no executable status:ready slice is available")
         return 1
@@ -1248,6 +1259,25 @@ def command_set_gate(args: argparse.Namespace, config: dict[str, Any]) -> int:
             f"`{args.state}` decides a checkpoint under review, but epic #{args.epic} "
             f"is not labeled `{targets['review']}`; request review first"
         )
+    if args.state != "review":
+        # The decision must answer the checkpoint actually put under review,
+        # as recorded by `set-gate --state review`. A missing or different
+        # review record (e.g. its post failed) is reconciled by requesting
+        # review again, not by deciding an unrecorded checkpoint.
+        records = fetch_gate_records(args.epic, config)
+        if records is None:
+            raise SdlcError(f"gate records on epic #{args.epic} could not be read; the checkpoint under review is unknown")
+        latest = latest_gate_record(records)
+        if not latest or latest.get("schema") != 1 or latest.get("state") != "review":
+            raise SdlcError(
+                f"epic #{args.epic} has no current schema-1 review record; run "
+                "`set-gate --state review --checkpoint <report>` first"
+            )
+        if latest.get("checkpoint") != checkpoint:
+            raise SdlcError(
+                f"--checkpoint {checkpoint!r} does not match the checkpoint under review "
+                f"({latest.get('checkpoint')!r}, {latest.get('comment_url')})"
+            )
     add = [targets[args.state]] if targets[args.state] not in current else []
     remove = [label for state, label in targets.items() if state != args.state and label in current]
     edit = ["gh", "issue", "edit", str(args.epic), "--repo", config["repository"]]
