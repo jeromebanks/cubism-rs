@@ -227,8 +227,7 @@ need for more.
    over the slice commit, and that merge commit carries no `Agent-Session:`
    trailer of its own. The merge gate refuses a same-account receipt on a
    trailerless merge-commit head, and its error names this rebase as the fix
-   rather than asking for a trailer that a rebase-away commit cannot
-   meaningfully carry.
+   rather than asking for a trailer on a commit GitHub wrote.
 10. **Reconcile.** Confirm the issue closed, then run
     `rtk python3 scripts/sdlc.py cleanup N` from the primary checkout. It owns
     the closing transition: it removes whichever of `in-progress` and

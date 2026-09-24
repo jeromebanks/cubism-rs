@@ -1613,12 +1613,12 @@ def fetch_commit_message(sha: str, config: dict[str, Any]) -> str:
 
 
 def fetch_commit_parent_count(sha: str, config: dict[str, Any]) -> int:
-    """Whether the head commit is a GitHub-authored merge (2+ parents).
+    """Number of parents; 2+ is a merge commit, such as the one
+    `gh pr update-branch` writes with no `Agent-Session:` trailer of its own.
 
-    `gh pr update-branch` writes such a commit with no `Agent-Session:`
-    trailer of its own. The gate needs this to tell that shape apart from an
-    ordinary commit that simply omitted the trailer, so its error can point at
-    rebase instead of a nonsensical amend.
+    The gate needs this to tell that shape apart from an ordinary commit that
+    simply omitted the trailer, so its error can point at rebase instead of a
+    nonsensical amend.
     """
     commit = run_json(["gh", "api", f"repos/{config['repository']}/commits/{sha}"])
     return len(commit.get("parents") or [])

@@ -259,9 +259,9 @@ Read one file.
 
     def test_merge_commit_head_carrying_its_own_trailer_still_resolves_identity(self):
         # `head_parent_count` only changes which error a trailerless head
-        # gets; a merge commit that does carry its own trailer works exactly
-        # as a normal commit would (AC1's "evaluated against the slice
-        # commit's identity" branch).
+        # gets. A merge commit that carries its own trailer resolves an
+        # identity exactly as any other commit does; that path is unchanged
+        # by this fix, and this locks it in.
         errors = self._evaluate(
             self._passing_pr(author=self.ONE_ACCOUNT),
             [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
