@@ -1274,7 +1274,14 @@ def evaluate_merge_gate(
         reasons: list[str] = []
         for receipt in candidates:
             if pr_author and (receipt.get("author") or "").lower() != pr_author.lower():
-                continue  # Separate accounts: independent, no trailer needed.
+                # Separate accounts: independent, no trailer needed. This also
+                # applies to a merge-commit head with no trailer of its own —
+                # the rebase advice below exists only to establish identity
+                # for a *same-account* receipt, which a different account
+                # already establishes without it. Do not read `head_parent_count`
+                # as "the gate refuses every trailerless merge-commit head";
+                # it only refuses one paired with a same-account receipt.
+                continue
             reviewer = (receipt.get("reviewer") or "").strip()
             if not reviewer:
                 dependent.append(receipt)

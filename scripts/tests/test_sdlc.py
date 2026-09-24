@@ -288,6 +288,19 @@ Read one file.
             errors,
         )
 
+    def test_different_account_receipt_needs_no_rebase_on_a_merge_commit_head(self):
+        # Codex round 1 finding: the rebase advice is scoped to a *same-account*
+        # receipt, exactly like the pre-existing trailer requirement it
+        # replaces text for. A different-account receipt already establishes
+        # independence without a trailer (`test_separate_accounts_need_no_trailer`),
+        # and a merge-commit head changes nothing about that — this is
+        # unrelated, unchanged, pre-existing behavior, not a new gap.
+        errors = self._evaluate(
+            self._passing_pr(author=self.ONE_ACCOUNT),
+            [self._receipt("reviewer-bot", reviewer="codex-cli fresh exec session")],
+            self.slice, self.config, self.MERGE_COMMIT_HEAD, head_parent_count=2)
+        self.assertEqual([], errors)
+
     def test_fetch_commit_parent_count_reads_the_parents_list(self):
         with patch.object(sdlc, "run_json", return_value={"parents": [{"sha": "a"}, {"sha": "b"}]}) as reader:
             self.assertEqual(2, sdlc.fetch_commit_parent_count("deadbeef", self.config))
