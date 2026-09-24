@@ -1755,21 +1755,67 @@ Read one file.
                 self.assertEqual(1, len(errors), errors)
                 self.assertIn("prerequisites of #11 could not be read completely", errors[0])
 
+    # The live GraphQL answer for #97 (recorded 2026-09-24), renumbered.
+    @staticmethod
+    def _graphql_prerequisite(nodes=None, total=None, has_next=False, state="CLOSED"):
+        nodes = [{"number": 7, "repository": {"name": "cubism-rs", "owner": {"login": "jeromebanks"}}}] \
+            if nodes is None else nodes
+        return {"data": {"repository": {"issue": {
+            "number": 5, "state": state, "stateReason": "COMPLETED", "url": "https://example.test/5",
+            "closedByPullRequestsReferences": {
+                "totalCount": len(nodes) if total is None else total,
+                "pageInfo": {"hasNextPage": has_next}, "nodes": nodes,
+            },
+        }}}}
+
     def test_live_prerequisite_reads_use_the_probed_fields(self):
         commands = []
         responses = iter([
-            {"number": 5, "state": "CLOSED", "stateReason": "COMPLETED", "closedByPullRequestsReferences": [
-                {"number": 7, "repository": {"name": "cubism-rs", "owner": {"login": "jeromebanks"}}}]},
+            self._graphql_prerequisite(),
             {"number": 7, "state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": "e" * 40}},
         ])
         with patch.object(sdlc, "fetch_prerequisite", new=REAL_READERS["fetch_prerequisite"]), \
                 patch.object(sdlc, "fetch_pull_merge", new=REAL_READERS["fetch_pull_merge"]), \
                 patch.object(sdlc, "run_json", side_effect=lambda c: commands.append(c) or next(responses)):
             self.assertIsNone(sdlc.completion_error(5, sdlc.live_dependencies(self.config), self.config))
-        self.assertIn("stateReason", commands[0][-1])
-        self.assertIn("closedByPullRequestsReferences", commands[0][-1])
+        self.assertEqual(["gh", "api", "graphql"], commands[0][:3])
+        query = commands[0][4]
+        for field in ("stateReason", "closedByPullRequestsReferences", "totalCount", "hasNextPage"):
+            self.assertIn(field, query)
+        self.assertIn("number=5", commands[0])
         self.assertEqual(["gh", "pr", "view", "7"], commands[1][:4])
         self.assertIn("mergeCommit", commands[1][-1])
+
+    def test_a_closing_reference_list_not_shown_complete_is_unknown(self):
+        # `gh issue view` asks for only the first 100 closing references and
+        # never pages. A list that may be cut hides unread references, and every
+        # reference must be read.
+        for name, response in (
+            ("more pages", self._graphql_prerequisite(has_next=True)),
+            ("count exceeds nodes", self._graphql_prerequisite(total=101)),
+            ("no page info", {"data": {"repository": {"issue": dict(
+                self._graphql_prerequisite()["data"]["repository"]["issue"],
+                closedByPullRequestsReferences={"totalCount": 1, "nodes": []})}}}),
+            ("no issue", {"data": {"repository": {"issue": None}}}),
+            ("graphql error", {"errors": [{"message": "Something went wrong"}]}),
+        ):
+            with self.subTest(case=name):
+                with patch.object(sdlc, "fetch_prerequisite", new=REAL_READERS["fetch_prerequisite"]), \
+                        patch.object(sdlc, "run_json", return_value=response):
+                    error = sdlc.completion_error(5, sdlc.live_dependencies(self.config), self.config)
+                self.assertIn("blocked by #5, which could not be read", error)
+
+    def test_a_prerequisite_state_must_be_known(self):
+        for state in (None, "closed", "MERGED", ""):
+            with self.subTest(state=state):
+                self.setUp()
+                self._blocked_by(5)
+                self._prerequisite(5, prs=[7])
+                self._pull(7)
+                self.graph["issues"][5]["state"] = state
+                self.assertEqual(
+                    ["blocked by #5, whose record is malformed; its completion is unknown"],
+                    self._prerequisite_errors())
 
     def test_offline_bundle_must_supply_dependency_data(self):
         import argparse

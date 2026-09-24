@@ -93,7 +93,8 @@ format exists (Stage C3). The following are all unknown, and unknown blocks:
 - a dependency cycle, reported with its path;
 - a blocker in another repository;
 - a failed or malformed page;
-- a malformed or incomplete issue, reference or pull request record;
+- a malformed or incomplete issue, reference or pull request record, or a
+  closing-reference list not shown to be complete;
 - a 403 or 404.
 
 Dependencies recorded only in issue prose are not read. Adding native links is
@@ -105,8 +106,9 @@ omits blocks:
 
 - `"dependencies": {"<issue>": [<REST blocked_by issues>]}`, with an entry
   for the slice and for every prerequisite reached from it;
-- each prerequisite in `issues`, carrying `stateReason` and
-  `closedByPullRequestsReferences` as `gh issue view --json` returns them;
+- each prerequisite in `issues`, carrying `state`, `stateReason` and the
+  complete `closedByPullRequestsReferences` list
+  (`[{"number", "repository": {"name", "owner": {"login"}}}]`);
 - `"pull_requests": {"<pr>": {"state", "baseRefName", "mergeCommit"}}`.
 
 The issue is the session handoff. Do not preload the entire epic, historical

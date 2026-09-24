@@ -715,7 +715,7 @@ def completion_error(number: int, source: DependencySource, config: dict[str, An
         issue = source.issue(number)
     except (SdlcError, OSError) as exc:
         return f"blocked by #{number}, which could not be read ({exc}); its completion is unknown"
-    if not isinstance(issue, dict):
+    if not isinstance(issue, dict) or issue.get("state") not in {"OPEN", "CLOSED"}:
         return f"blocked by #{number}, whose record is malformed; its completion is unknown"
     if issue.get("state") != "CLOSED":
         return f"blocked by #{number}, which is still open"
@@ -1082,11 +1082,47 @@ def fetch_blocked_by(number: int, config: dict[str, Any]) -> list[dict[str, Any]
     return blockers
 
 
+PREREQUISITE_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      number state stateReason url
+      closedByPullRequestsReferences(first: 100) {
+        totalCount
+        pageInfo { hasNextPage }
+        nodes { number repository { name owner { login } } }
+      }
+    }
+  }
+}
+"""
+
+
 def fetch_prerequisite(number: int, config: dict[str, Any]) -> dict[str, Any]:
-    return run_json([
-        "gh", "issue", "view", str(number), "--repo", config["repository"],
-        "--json", "number,state,stateReason,closedByPullRequestsReferences,url",
+    """A prerequisite with every closing reference, or raise.
+
+    `gh issue view --json closedByPullRequestsReferences` requests only the
+    first 100 and does not page, so a longer list would be silently cut. Every
+    reference must be read, so this query reports completeness and a list it
+    cannot show is whole is unknown.
+    """
+    owner, name = config["repository"].split("/", 1)
+    data = run_json([
+        "gh", "api", "graphql", "-f", f"query={PREREQUISITE_QUERY}",
+        "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"number={number}",
     ])
+    issue = (((data or {}).get("data") or {}).get("repository") or {}).get("issue")
+    if not isinstance(issue, dict):
+        raise SdlcError(f"issue #{number} was not returned")
+    refs = issue.get("closedByPullRequestsReferences")
+    nodes = refs.get("nodes") if isinstance(refs, dict) else None
+    if (
+        not isinstance(nodes, list)
+        or (refs.get("pageInfo") or {}).get("hasNextPage") is not False
+        or refs.get("totalCount") != len(nodes)
+    ):
+        raise SdlcError(f"the closing pull requests of #{number} could not be read completely")
+    return dict(issue, closedByPullRequestsReferences=nodes)
 
 
 def fetch_pull_merge(number: int, config: dict[str, Any]) -> dict[str, Any]:
