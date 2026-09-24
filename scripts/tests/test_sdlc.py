@@ -234,6 +234,9 @@ Read one file.
             [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
             self.slice, self.config, "docs: a change with no trailer")
         self.assertTrue(any("Agent-Session:" in e for e in errors), errors)
+        # An ordinary single-parent commit (the default head_parent_count=1)
+        # gets the trailer advice, never the merge-commit/rebase advice.
+        self.assertFalse(any("rebase" in e for e in errors), errors)
 
     def test_separate_accounts_need_no_trailer(self):
         errors = self._evaluate(
@@ -241,6 +244,59 @@ Read one file.
             [self._receipt("reviewer-bot", reviewer="codex-cli fresh exec session")],
             self.slice, self.config, "docs: a change with no trailer")
         self.assertEqual([], errors)
+
+    # --- #75: a `gh pr update-branch` merge-commit head names rebase, not a trailer ---
+
+    MERGE_COMMIT_HEAD = "Merge branch 'main' into issue/11"
+
+    def test_merge_commit_head_with_no_trailer_names_rebase_not_a_trailer(self):
+        errors = self._evaluate(
+            self._passing_pr(author=self.ONE_ACCOUNT, head="mergesha"),
+            [self._receipt(self.ONE_ACCOUNT, head="mergesha", reviewer="codex-cli fresh exec session")],
+            self.slice, self.config, self.MERGE_COMMIT_HEAD, head_parent_count=2)
+        self.assertTrue(any("rebase" in e and "gh pr update-branch" in e for e in errors), errors)
+        self.assertFalse(any("add an" in e and "Agent-Session:" in e for e in errors), errors)
+
+    def test_merge_commit_head_carrying_its_own_trailer_still_resolves_identity(self):
+        # `head_parent_count` only changes which error a trailerless head
+        # gets; a merge commit that does carry its own trailer works exactly
+        # as a normal commit would (AC1's "evaluated against the slice
+        # commit's identity" branch).
+        errors = self._evaluate(
+            self._passing_pr(author=self.ONE_ACCOUNT),
+            [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
+            self.slice, self.config, self.HEAD_COMMIT, head_parent_count=2)
+        self.assertEqual([], errors)
+
+    def test_merge_commit_head_with_no_receipt_yet_still_names_rebase(self):
+        # The real sequence: `gh pr update-branch` produces a new head before
+        # any receipt has been recorded against it, so the identity-mismatch
+        # branch above never runs. The missing-receipt error must still name
+        # rebase, or the operator burns a review round to find out.
+        errors = self._evaluate(
+            self._passing_pr(author=self.ONE_ACCOUNT, head="mergesha"),
+            [], self.slice, self.config, self.MERGE_COMMIT_HEAD, head_parent_count=2)
+        self.assertTrue(
+            any("missing clean" in e and "rebase" in e and "gh pr update-branch" in e for e in errors), errors)
+
+    def test_behind_merge_state_names_rebase_instead_of_update_branch(self):
+        pr = dict(self._passing_pr(author=self.ONE_ACCOUNT), mergeStateStatus="BEHIND")
+        errors = self._evaluate(pr, [], self.slice, self.config, self.MERGE_COMMIT_HEAD, head_parent_count=2)
+        self.assertTrue(
+            any("merge state is not ready (BEHIND)" in e and "rebase" in e and "gh pr update-branch" in e
+                for e in errors),
+            errors,
+        )
+
+    def test_fetch_commit_parent_count_reads_the_parents_list(self):
+        with patch.object(sdlc, "run_json", return_value={"parents": [{"sha": "a"}, {"sha": "b"}]}) as reader:
+            self.assertEqual(2, sdlc.fetch_commit_parent_count("deadbeef", self.config))
+        reader.assert_called_once_with(
+            ["gh", "api", f"repos/{self.config['repository']}/commits/deadbeef"])
+
+    def test_fetch_commit_parent_count_defaults_missing_parents_to_zero(self):
+        with patch.object(sdlc, "run_json", return_value={}):
+            self.assertEqual(0, sdlc.fetch_commit_parent_count("deadbeef", self.config))
 
     def test_implementer_identity_reads_the_last_trailer(self):
         message = "x\n\nAgent-Session: first\nAgent-Session: second"
@@ -1049,6 +1105,7 @@ Read one file.
                 patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
                 patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
                 patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT), \
+                patch.object(sdlc, "fetch_commit_parent_count", return_value=1), \
                 patch.object(sdlc, "run_text", side_effect=lambda command, **k: writes.append(command) or ""), \
                 contextlib.redirect_stdout(out):
             code = sdlc.command_merge(argparse.Namespace(pr=99, apply=True), self.config)
@@ -1060,10 +1117,44 @@ Read one file.
         with patch.object(sdlc, "fetch_pr", return_value=pr), \
                 patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
                 patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
-                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT):
+                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT), \
+                patch.object(sdlc, "fetch_commit_parent_count", return_value=1):
             inputs = sdlc.load_gate_inputs(99, self.config)
             self.assertEqual((), sdlc.merge_eligibility(99, self.config).errors)
         self.assertEqual(sdlc.ParentGate(10, self.epic, []), inputs.parent)
+        self.assertEqual(1, inputs.head_parent_count)
+
+    def test_real_merge_inputs_thread_head_parent_count_to_the_gate(self):
+        # #75: a value that only `load_gate_inputs` fetches must actually
+        # reach `evaluate_merge_gate`, not just live on `GateInputs` unused.
+        # Hardcoding `head_parent_count=1` in `load_gate_inputs` turns this red.
+        import argparse
+        import contextlib
+        import io
+        pr = dict(
+            self._passing_pr(head=self.CANDIDATE, author=self.ONE_ACCOUNT),
+            number=99, headRefName="issue/11",
+        )
+        issues = {10: self.epic, 11: self.slice}
+        comments = {
+            99: [self._receipt(self.ONE_ACCOUNT, head=self.CANDIDATE, reviewer="codex-cli fresh exec session")],
+            10: [],
+        }
+        writes = []
+        out = io.StringIO()
+        with patch.object(sdlc, "fetch_pr", return_value=pr), \
+                patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
+                patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
+                patch.object(sdlc, "fetch_commit_message", return_value=self.MERGE_COMMIT_HEAD), \
+                patch.object(sdlc, "fetch_commit_parent_count", return_value=2), \
+                patch.object(sdlc, "run_text", side_effect=lambda command, **k: writes.append(command) or ""), \
+                contextlib.redirect_stdout(out):
+            code = sdlc.command_merge(argparse.Namespace(pr=99, apply=True), self.config)
+        self.assertEqual(1, code)
+        self.assertEqual([], writes, "a merge-commit head with no trailer must never reach `gh pr merge`")
+        self.assertIn("rebase", out.getvalue())
+        self.assertIn("gh pr update-branch", out.getvalue())
+        self.assertNotIn("add an", out.getvalue())
 
     def test_pause_after_claim_blocks_the_merge(self):
         issues = {10: self.epic, 11: self.slice}
@@ -1961,6 +2052,7 @@ Read one file.
                 patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
                 patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
                 patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT), \
+                patch.object(sdlc, "fetch_commit_parent_count", return_value=1), \
                 patch.object(sdlc, "run_text", side_effect=lambda command, **k: writes.append(command) or ""), \
                 contextlib.redirect_stdout(out):
             code = sdlc.command_merge(argparse.Namespace(pr=99, apply=True), self.config)
@@ -1972,7 +2064,8 @@ Read one file.
         with patch.object(sdlc, "fetch_pr", return_value=pr), \
                 patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
                 patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
-                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT):
+                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT), \
+                patch.object(sdlc, "fetch_commit_parent_count", return_value=1):
             self.assertEqual((), sdlc.merge_eligibility(99, self.config).errors)
 
     def test_next_and_claim_explain_an_unmet_prerequisite(self):

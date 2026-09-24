@@ -212,6 +212,23 @@ need for more.
    protects the candidate, not cross-object gates.
    There is no routine human PR gate and no
    size-based exception to the requested auto-merge policy.
+
+   If a PR falls `BEHIND` because another slice merged first, rebase onto the
+   fetched remote default branch and push, and re-run review/receipt for the
+   new head (step 8):
+
+   ```bash
+   rtk proxy git fetch origin main
+   rtk proxy git rebase origin/main
+   rtk proxy git push --force-with-lease origin issue/N
+   ```
+
+   Do not run `gh pr update-branch`: it writes a GitHub-authored merge commit
+   over the slice commit, and that merge commit carries no `Agent-Session:`
+   trailer of its own. The merge gate refuses a same-account receipt on a
+   trailerless merge-commit head, and its error names this rebase as the fix
+   rather than asking for a trailer that a rebase-away commit cannot
+   meaningfully carry.
 10. **Reconcile.** Confirm the issue closed, then run
     `rtk python3 scripts/sdlc.py cleanup N` from the primary checkout. It owns
     the closing transition: it removes whichever of `in-progress` and

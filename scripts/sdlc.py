@@ -1200,9 +1200,11 @@ def evaluate_merge_gate(
     *,
     parent: ParentGate,
     prerequisites: Sequence[str],
+    head_parent_count: int = 1,
 ) -> list[str]:
     errors: list[str] = []
     head = pr.get("headRefOid")
+    branch = pr.get("headRefName") or "the slice branch"
     if pr.get("state") != "OPEN":
         errors.append("pull request is not open")
     if pr.get("isDraft"):
@@ -1211,8 +1213,17 @@ def evaluate_merge_gate(
         errors.append(f"base branch is not `{config['default_branch']}`")
     if pr.get("mergeable") != "MERGEABLE":
         errors.append(f"pull request is not confirmed mergeable ({pr.get('mergeable')})")
-    if pr.get("mergeStateStatus") not in {"CLEAN", "HAS_HOOKS", "UNSTABLE"}:
-        errors.append(f"merge state is not ready ({pr.get('mergeStateStatus')})")
+    merge_state = pr.get("mergeStateStatus")
+    if merge_state not in {"CLEAN", "HAS_HOOKS", "UNSTABLE"}:
+        if merge_state == "BEHIND":
+            errors.append(
+                f"merge state is not ready ({merge_state}); rebase `{branch}` onto "
+                f"`origin/{config['default_branch']}` and push with --force-with-lease "
+                "instead of `gh pr update-branch`, which writes a GitHub-authored merge "
+                f"commit carrying no `{AGENT_SESSION_TRAILERS[0]}:` trailer"
+            )
+        else:
+            errors.append(f"merge state is not ready ({merge_state})")
     linked = linked_issue_numbers(pr)
     if len(linked) != 1:
         errors.append(f"PR must close exactly one slice issue; found {len(linked)}")
@@ -1240,6 +1251,18 @@ def evaluate_merge_gate(
     if not pr_author:
         errors.append("pull request author is unknown; review independence cannot be established")
     implementer = implementer_identity(head_message)
+    # `gh pr update-branch` writes a GitHub-authored merge commit with no
+    # trailer of its own. Walking to a trailered parent is deliberately not
+    # done here (plan R4: "do not blindly trust the first parent... or the
+    # nearest arbitrary trailer"), so that head is indistinguishable from any
+    # other trailerless commit except by parent count. Naming rebase instead
+    # of "add a trailer" only for that shape keeps the advice accurate without
+    # reading history.
+    rebase_advice = (
+        f"rebase `{branch}` onto `origin/{config['default_branch']}` and push "
+        "with --force-with-lease instead of using `gh pr update-branch`, which "
+        f"writes a GitHub-authored merge commit carrying no `{AGENT_SESSION_TRAILERS[0]}:` trailer"
+    )
     for kind in config["review"]["required"]:
         candidates = [
             receipt for receipt in receipts
@@ -1261,12 +1284,20 @@ def evaluate_merge_gate(
                 )
             elif implementer is None:
                 dependent.append(receipt)
-                reasons.append(
-                    f"`{kind}` receipt for head {head} shares the PR author "
-                    f"`{pr_author}`, and head commit {head} records no implementing "
-                    f"agent; add an `{AGENT_SESSION_TRAILERS[0]}:` trailer to the "
-                    "commit so the two agents can be told apart"
-                )
+                if head_parent_count > 1:
+                    reasons.append(
+                        f"`{kind}` receipt for head {head} shares the PR author "
+                        f"`{pr_author}`, and head commit {head} is a merge commit "
+                        f"with no `{AGENT_SESSION_TRAILERS[0]}:` trailer of its own; "
+                        + rebase_advice
+                    )
+                else:
+                    reasons.append(
+                        f"`{kind}` receipt for head {head} shares the PR author "
+                        f"`{pr_author}`, and head commit {head} records no implementing "
+                        f"agent; add an `{AGENT_SESSION_TRAILERS[0]}:` trailer to the "
+                        "commit so the two agents can be told apart"
+                    )
             elif reviewer.lower() == implementer.lower():
                 dependent.append(receipt)
                 reasons.append(
@@ -1287,6 +1318,17 @@ def evaluate_merge_gate(
         if latest is None:
             if reasons:
                 errors.append(reasons[-1])
+            elif head_parent_count > 1 and implementer is None:
+                # No receipt has been attempted yet, so the identity mismatch
+                # above never ran — but a same-account receipt on this exact
+                # head would be refused the moment it is recorded. Say so now
+                # rather than spending a review round to find out.
+                errors.append(
+                    f"missing clean `{kind}` review receipt for head {head}, which is a "
+                    f"merge commit with no `{AGENT_SESSION_TRAILERS[0]}:` trailer of its "
+                    "own; a receipt from the PR author's account on this head will be "
+                    "refused, so " + rebase_advice
+                )
             else:
                 errors.append(f"missing clean `{kind}` review receipt for head {head}")
         elif latest.get("verdict") != "pass":
@@ -1570,6 +1612,18 @@ def fetch_commit_message(sha: str, config: dict[str, Any]) -> str:
     return ((commit.get("commit") or {}).get("message")) or ""
 
 
+def fetch_commit_parent_count(sha: str, config: dict[str, Any]) -> int:
+    """Whether the head commit is a GitHub-authored merge (2+ parents).
+
+    `gh pr update-branch` writes such a commit with no `Agent-Session:`
+    trailer of its own. The gate needs this to tell that shape apart from an
+    ordinary commit that simply omitted the trailer, so its error can point at
+    rebase instead of a nonsensical amend.
+    """
+    commit = run_json(["gh", "api", f"repos/{config['repository']}/commits/{sha}"])
+    return len(commit.get("parents") or [])
+
+
 class GateInputs(NamedTuple):
     pr: dict[str, Any]
     comments: list[dict[str, Any]]
@@ -1577,6 +1631,7 @@ class GateInputs(NamedTuple):
     head_message: str
     parent: ParentGate
     prerequisites: tuple[str, ...]
+    head_parent_count: int = 1
 
 
 def load_parent_gate(issue: dict[str, Any] | None, config: dict[str, Any]) -> ParentGate:
@@ -1599,13 +1654,16 @@ def load_gate_inputs(pr_number: int, config: dict[str, Any]) -> GateInputs:
     # The head commit carries the implementing agent's identity in a trailer.
     # Fetched here so `evaluate_merge_gate` stays a pure function of its inputs.
     head_message = fetch_commit_message(pr["headRefOid"], config) if pr.get("headRefOid") else ""
+    head_parent_count = fetch_commit_parent_count(pr["headRefOid"], config) if pr.get("headRefOid") else 1
     # Reloaded live like the parent: a prerequisite reopened after the claim
     # must stop the merge.
     prerequisites = (
         tuple(prerequisite_errors(int(issue["number"]), live_dependencies(config), config))
         if issue else ()
     )
-    return GateInputs(pr, comments, issue, head_message, load_parent_gate(issue, config), prerequisites)
+    return GateInputs(
+        pr, comments, issue, head_message, load_parent_gate(issue, config), prerequisites, head_parent_count,
+    )
 
 
 class MergeEligibility(NamedTuple):
@@ -1614,9 +1672,10 @@ class MergeEligibility(NamedTuple):
 
 
 def merge_eligibility(pr_number: int, config: dict[str, Any]) -> MergeEligibility:
-    pr, comments, issue, head_message, parent, prerequisites = load_gate_inputs(pr_number, config)
+    pr, comments, issue, head_message, parent, prerequisites, head_parent_count = load_gate_inputs(pr_number, config)
     errors = evaluate_merge_gate(
         pr, comments, issue, config, head_message, parent=parent, prerequisites=prerequisites,
+        head_parent_count=head_parent_count,
     )
     head = pr.get("headRefOid") or ""
     if not re.fullmatch(r"[0-9a-f]{40}", head):
