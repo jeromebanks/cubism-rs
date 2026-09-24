@@ -1019,8 +1019,9 @@ def fetch_blocked_by(number: int, config: dict[str, Any]) -> list[dict[str, Any]
         "gh", "api", "--paginate", "--slurp",
         f"repos/{config['repository']}/issues/{number}/dependencies/blocked_by?per_page=100",
     ])
-    if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
-        raise SdlcError(f"blocked_by for #{number} was not a list of pages")
+    # Even an empty answer is one page (`[[]]`); zero pages is not an answer.
+    if not isinstance(pages, list) or not pages or not all(isinstance(page, list) for page in pages):
+        raise SdlcError(f"blocked_by for #{number} was not a non-empty list of pages")
     blockers = [item for page in pages for item in page]
     if not all(isinstance(item, dict) for item in blockers):
         raise SdlcError(f"blocked_by for #{number} contained a non-issue entry")

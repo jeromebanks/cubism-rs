@@ -1679,6 +1679,10 @@ Read one file.
             {"message": "Not Found"},
             [[{"number": 110}], {"message": "rate limited"}],
             [[{"number": 110}], ["not an issue"]],
+            # Shapes that would flatten to "no prerequisites" and fail open.
+            {},
+            [{}],
+            [],
         ):
             with self.subTest(response=response):
                 kwargs = {"side_effect": response} if isinstance(response, Exception) else {"return_value": response}
