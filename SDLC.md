@@ -60,8 +60,8 @@ every command that admits work. It has three modes:
 | Mode | Commands | Requires |
 | --- | --- | --- |
 | check | `check-slice` | open; `type:slice` or `type:feedback`; not an epic; no `status:blocked` or `needs-slicing`; the contract sections above; exactly one parent epic whose gate admits it |
-| start | `next`, `claim` | everything `check` requires, and `status:ready` |
-| continue | `claim --resume`, `merge` | open; slice or feedback; no `status:blocked` or `needs-slicing`; exactly one parent epic whose gate admits it |
+| start | `next`, `claim`, and `claim --resume` when no `issue/N` claim exists | everything `check` requires, and `status:ready` |
+| continue | `claim --resume` on an existing `issue/N` claim, `merge` | open; slice or feedback; no `status:blocked` or `needs-slicing`; exactly one parent epic whose gate admits it |
 
 `check-slice` does not require `status:ready`: a planner runs it to decide
 whether an issue may be labeled ready. An already-owned attempt continues
@@ -87,8 +87,9 @@ need for more.
 
    The claim has no heartbeat and no expiry. It establishes exclusive
    acquisition, not liveness: a session that dies holds `issue/N` until a human
-   judges it abandoned and re-runs the command with `--resume`, which admits
-   in continue mode.
+   judges it abandoned and re-runs the command with `--resume`. That
+   admits in continue mode only while the `issue/N` claim exists; with no
+   claim to resume it is a fresh start and needs `status:ready`.
 3. **Plan.** Write a short plan against the issue's acceptance criteria. In
    Claude Code, request an advisor review when that facility is available.
    Record material decisions on the issue rather than in a transient handoff.

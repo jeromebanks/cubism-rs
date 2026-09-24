@@ -1380,6 +1380,17 @@ Read one file.
         self.assertIn("SKIPPED: issue #11", err.getvalue())
         self.assertIn("`needs-slicing`", err.getvalue())
 
+    def test_next_says_why_it_skips_a_ready_issue_that_is_not_a_slice(self):
+        import contextlib
+        import io
+        self._set_labels("status:ready")
+        err = io.StringIO()
+        with patch.object(sdlc, "fetch_status_data", return_value={"issues": [self.epic, self.slice], "pulls": []}), \
+                patch.object(sdlc, "fetch_comments", return_value=[]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(1, sdlc.command_next(None, self.config))
+        self.assertIn("SKIPPED: issue #11: missing `type:slice` or `type:feedback` label", err.getvalue())
+
     def test_blocked_slice_is_refused_with_its_cause(self):
         self._set_labels("type:slice", "status:ready", "status:blocked")
         for mode in sdlc.ADMISSION_MODES:

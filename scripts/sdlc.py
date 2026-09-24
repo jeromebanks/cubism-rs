@@ -1037,8 +1037,8 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
         names = label_names(issue)
         if labels["ready"] not in names:
             continue
-        if labels["slice"] not in names and labels["feedback"] not in names:
-            continue
+        # Everything labeled ready goes through admission, so a ready issue
+        # that is not a slice is reported below rather than silently dropped.
         errors = validate_slice(
             issue, issues, config, lambda number: fetch_gate_records(number, config), mode="start",
         )
