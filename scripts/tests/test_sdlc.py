@@ -2064,12 +2064,21 @@ Read one file.
         self.assertIn(f"BASE=origin/{default}\n", out.getvalue())
         self.assertIn(["git", "fetch", "origin", default], git)
         for args in git:
-            if args[0] != "git" or args == ["git", "fetch", "origin", default]:
+            if args[0] != "git":
+                continue
+            # An allowlist, not a denylist: claim runs only these read or
+            # claim-branch commands, with no global option (`-C <dir>`, `-c`,
+            # `--git-dir`) placed before them that could redirect one at the
+            # primary checkout. `reset`, `branch`, `pull`, `update-ref` and
+            # the rest are rejected by omission.
+            self.assertIn(args[1], {"ls-remote", "fetch", "rev-parse", "show-ref", "worktree"}, args)
+            if args[1] == "worktree":
+                self.assertEqual("add", args[2], args)
+            if args == ["git", "fetch", "origin", default]:
                 continue
             # No other command names the local default branch in any form,
-            # so none can move it (`branch -f main`, `fetch origin main:main`,
-            # `update-ref refs/heads/main`) or check it out.
-            self.assertNotIn(args[1], {"pull", "merge", "update-ref", "checkout", "switch", "reset"}, args)
+            # so none can move it (`fetch origin main:main`) or check it out
+            # (`worktree add <path> main`).
             for token in args[1:]:
                 self.assertNotEqual(default, token, args)
                 self.assertFalse(token.endswith(f":{default}") or token.endswith(f"/heads/{default}"), args)
