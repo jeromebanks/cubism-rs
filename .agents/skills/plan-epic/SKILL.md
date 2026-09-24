@@ -15,16 +15,21 @@ consume the implementer's context budget.
    behavior, include tests/docs needed for its own Definition of Done, and fit
    one implementation/review session. Split infrastructure by usable seams, not
    arbitrary file or layer boundaries.
-3. Order slices by dependency. Add `status:ready` only when dependencies are
-   already satisfied. Mark future slices without `status:ready`; use
-   `status:blocked` only for a real external or prerequisite blocker.
+3. Order slices by dependency. Record every prerequisite as a native GitHub
+   `blocked_by` link, the one dependency authority; a `## Dependencies` prose
+   section only explains it. Link to the leaf slice that will merge, never to a
+   container issue. `SDLC.md` ("Prerequisites") has the exact command. Add
+   `status:ready` only when dependencies are already satisfied. Mark future
+   slices without `status:ready`; use `status:blocked` only for a container
+   issue or a real external blocker the native links cannot express.
 4. Place human checkpoints after coherent integrated outcomes. State what report
    and demo a human will receive; do not use a fixed slice count.
 5. Create each issue with `.github/ISSUE_TEMPLATE/slice.yml`. Include exactly
    one `Parent epic: #N`, exact acceptance/validation, explicit non-goals, demo
    impact, and the minimum `Context` links.
-6. Run `rtk python3 scripts/sdlc.py check-slice CHILD` for each ready child.
-   Correct every failure before leaving it ready.
+6. Run `rtk python3 scripts/sdlc.py check-slice CHILD` for each ready child;
+   it reports every unmet native prerequisite. Correct every failure before
+   leaving it ready.
 7. Update the epic's child checklist and checkpoint plan. Remove `needs-slicing`
    only when at least one validated ready slice exists and the next checkpoint
    has a clear outcome.

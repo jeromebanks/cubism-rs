@@ -97,9 +97,27 @@ format exists (Stage C3). The following are all unknown, and unknown blocks:
   closing-reference list not shown to be complete;
 - a 403 or 404.
 
-Dependencies recorded only in issue prose are not read. Adding native links is
-R3c's migration, and until it runs, prose prerequisites still need a check by
-hand.
+Native `blocked_by` links are the one dependency authority. An issue's
+`## Dependencies` prose explains them and is never read by the tooling; when
+prose and links disagree, reconcile the disagreement on the parent epic and
+correct both. Add a link with the blocker's numeric issue `id`, not its number:
+
+```bash
+BLOCKER_ID=$(rtk proxy gh api repos/<owner>/<repo>/issues/<blocker> --jq .id)
+rtk proxy gh api -X POST repos/<owner>/<repo>/issues/<dependent>/dependencies/blocked_by \
+  -F issue_id="$BLOCKER_ID"
+rtk proxy gh api repos/<owner>/<repo>/issues/<dependent>/dependencies/blocked_by \
+  --jq '[.[].number]'
+```
+
+The last line reads the list back; confirm it names the intended blocker. Link
+to the leaf slice that will merge, never to a container issue that is closed by
+hand, because a hand-closed prerequisite never counts as completed. Removing a
+link is a recorded decision on the parent epic, not a way to unblock work; see
+GitHub's [issue dependencies API](https://docs.github.com/en/rest/issues/issue-dependencies).
+Epic #38's open plan work was migrated to native links by R3c (#99); other
+epics have not been migrated: the tooling cannot see their prose
+prerequisites, so add the native link before marking such a dependent ready.
 
 An offline `check-slice --input` bundle must supply the same data. Anything it
 omits blocks:

@@ -57,11 +57,12 @@ prerequisite evidence even when `check-slice` passes.
 
 If decomposition is needed, reuse equivalent issues and create only the next
 bounded slice or immediate batch, using the issue contract in
-[plan-epic](../plan-epic/SKILL.md). Record dependencies and the actual mapping
-on #38. For this continuation request, proceed into eligible implementation
-in the same invocation; the user's request to continue through implementation
-overrides plan-epic's normal separate-session advice. Do not decompose the
-whole roadmap or claim an epic. Set readiness only after prerequisites pass.
+[plan-epic](../plan-epic/SKILL.md). Record dependencies as native `blocked_by`
+links and the actual mapping on #38. For this continuation request, proceed
+into eligible implementation in the same invocation; the user's request to
+continue through implementation overrides plan-epic's normal separate-session
+advice. Do not decompose the whole roadmap or claim an epic. Set readiness only
+after prerequisites pass.
 
 Delegate implementation to [work-slice](../work-slice/SKILL.md) with the explicit
 issue number. It owns claim/worktree isolation, validation, commits, PRs,
