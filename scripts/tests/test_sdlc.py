@@ -234,6 +234,9 @@ Read one file.
             [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
             self.slice, self.config, "docs: a change with no trailer")
         self.assertTrue(any("Agent-Session:" in e for e in errors), errors)
+        # An ordinary single-parent commit (the default head_parent_count=1)
+        # gets the trailer advice, never the merge-commit/rebase advice.
+        self.assertFalse(any("rebase" in e for e in errors), errors)
 
     def test_separate_accounts_need_no_trailer(self):
         errors = self._evaluate(
@@ -241,6 +244,141 @@ Read one file.
             [self._receipt("reviewer-bot", reviewer="codex-cli fresh exec session")],
             self.slice, self.config, "docs: a change with no trailer")
         self.assertEqual([], errors)
+
+    # --- #75: a `gh pr update-branch` merge-commit head names rebase, not a trailer ---
+
+    MERGE_COMMIT_HEAD = "Merge branch 'main' into issue/11"
+
+    def test_merge_commit_head_with_no_trailer_names_rebase_not_a_trailer(self):
+        errors = self._evaluate(
+            self._passing_pr(author=self.ONE_ACCOUNT, head="mergesha"),
+            [self._receipt(self.ONE_ACCOUNT, head="mergesha", reviewer="codex-cli fresh exec session")],
+            self.slice, self.config, self.MERGE_COMMIT_HEAD, head_parent_count=2)
+        self.assertTrue(any("rebase" in e and "gh pr update-branch" in e for e in errors), errors)
+        self.assertFalse(any("add an" in e and "Agent-Session:" in e for e in errors), errors)
+
+    def test_merge_commit_head_carrying_its_own_trailer_still_resolves_identity(self):
+        # `head_parent_count` only changes which error a trailerless head
+        # gets. A merge commit that carries its own trailer resolves an
+        # identity exactly as any other commit does; that path is unchanged
+        # by this fix, and this locks it in.
+        errors = self._evaluate(
+            self._passing_pr(author=self.ONE_ACCOUNT),
+            [self._receipt(self.ONE_ACCOUNT, reviewer="codex-cli fresh exec session")],
+            self.slice, self.config, self.HEAD_COMMIT, head_parent_count=2)
+        self.assertEqual([], errors)
+
+    def test_merge_commit_head_with_no_receipt_yet_still_names_rebase(self):
+        # The real sequence: `gh pr update-branch` produces a new head before
+        # any receipt has been recorded against it, so the identity-mismatch
+        # branch above never runs. The missing-receipt error must still name
+        # rebase, or the operator burns a review round to find out.
+        errors = self._evaluate(
+            self._passing_pr(author=self.ONE_ACCOUNT, head="mergesha"),
+            [], self.slice, self.config, self.MERGE_COMMIT_HEAD, head_parent_count=2)
+        self.assertTrue(
+            any("missing clean" in e and "rebase" in e and "gh pr update-branch" in e for e in errors), errors)
+
+    def test_behind_merge_state_names_rebase_instead_of_update_branch(self):
+        pr = dict(self._passing_pr(author=self.ONE_ACCOUNT), mergeStateStatus="BEHIND")
+        errors = self._evaluate(pr, [], self.slice, self.config, self.MERGE_COMMIT_HEAD, head_parent_count=2)
+        self.assertTrue(
+            any("merge state is not ready (BEHIND)" in e and "rebase" in e and "gh pr update-branch" in e
+                for e in errors),
+            errors,
+        )
+
+    def test_different_account_receipt_needs_no_rebase_on_a_merge_commit_head(self):
+        # Codex round 1 finding: the rebase advice is scoped to a *same-account*
+        # receipt, exactly like the pre-existing trailer requirement it
+        # replaces text for. A different-account receipt already establishes
+        # independence without a trailer (`test_separate_accounts_need_no_trailer`),
+        # and a merge-commit head changes nothing about that — this is
+        # unrelated, unchanged, pre-existing behavior, not a new gap.
+        errors = self._evaluate(
+            self._passing_pr(author=self.ONE_ACCOUNT),
+            [self._receipt("reviewer-bot", reviewer="codex-cli fresh exec session")],
+            self.slice, self.config, self.MERGE_COMMIT_HEAD, head_parent_count=2)
+        self.assertEqual([], errors)
+
+    NO_TRAILER_HEAD = "docs: a change with no trailer"
+
+    def test_merge_commit_rebase_advice_is_a_closed_class_not_one_more_branch(self):
+        # Codex round 3 finding: a fail-verdict receipt short-circuits the
+        # `reasons` list that the earlier branches build, so the rebase
+        # advice they computed was silently discarded. Rather than patch that
+        # one instance (a round-4 reviewer would likely find the next one --
+        # a no-reviewer receipt with no other considered receipt hits the
+        # same short-circuit), this asserts three invariants over a matrix of
+        # receipt shapes, so any future branch that forgets the note fails
+        # this test rather than needing a fourth review round to find it.
+        receipt_scenarios = {
+            "none": [],
+            "same-account pass": [self._receipt(self.ONE_ACCOUNT, verdict="pass", reviewer="fresh-codex")],
+            "same-account fail": [self._receipt(self.ONE_ACCOUNT, verdict="fail", reviewer="fresh-codex")],
+            "same-account pass, no reviewer": [self._receipt(self.ONE_ACCOUNT, verdict="pass", reviewer="")],
+            "same-account fail, no reviewer": [self._receipt(self.ONE_ACCOUNT, verdict="fail", reviewer="")],
+            "different-account pass": [self._receipt("reviewer-bot", verdict="pass", reviewer="fresh-codex")],
+            "different-account fail": [self._receipt("reviewer-bot", verdict="fail", reviewer="fresh-codex")],
+        }
+        pr = self._passing_pr(author=self.ONE_ACCOUNT)
+        for name, receipts in receipt_scenarios.items():
+            with self.subTest(scenario=name):
+                errors_pc1 = self._evaluate(pr, receipts, self.slice, self.config, self.NO_TRAILER_HEAD, head_parent_count=1)
+                errors_pc2 = self._evaluate(pr, receipts, self.slice, self.config, self.NO_TRAILER_HEAD, head_parent_count=2)
+                errors_pc2_trailer = self._evaluate(pr, receipts, self.slice, self.config, self.HEAD_COMMIT, head_parent_count=2)
+                # (a) `head_parent_count` changes messages, never whether the
+                # gate blocks.
+                self.assertEqual(
+                    len(errors_pc1), len(errors_pc2),
+                    f"{name}: parent count changed the block decision: {errors_pc1!r} vs {errors_pc2!r}",
+                )
+                # (b) at pc=2 with no trailer, every error that exists names rebase.
+                for error in errors_pc2:
+                    self.assertIn("rebase", error, f"{name}: {error!r}")
+                    self.assertIn("gh pr update-branch", error, f"{name}: {error!r}")
+                # (c) at pc=1, or with the head's own trailer present, no
+                # error ever names rebase -- an ordinary commit still gets
+                # ordinary advice, and a merge commit carrying its own
+                # trailer needs no rebase advice at all.
+                for error in errors_pc1:
+                    self.assertNotIn("rebase", error, f"{name} (pc=1): {error!r}")
+                for error in errors_pc2_trailer:
+                    self.assertNotIn("rebase", error, f"{name} (own trailer): {error!r}")
+
+    def test_rebase_advice_is_not_confused_with_a_kind_named_rebase_review(self):
+        # Codex round 4 finding: the prior fix detected "already named rebase"
+        # by checking `"rebase" not in errors[-1]`, which a review `kind`
+        # literally named "rebase-review" would satisfy by coincidence (the
+        # kind's own name in the error text), suppressing the real advice.
+        # The fix tracks this structurally instead
+        # (`reasons_named_rebase`, index-matched to `reasons`), not by
+        # sniffing the rendered message. Assert the actual advice text is
+        # present, not just the word "rebase".
+        config = json.loads(json.dumps(self.config))
+        config["review"]["required"] = ["rebase-review"]
+        pr = self._passing_pr(author=self.ONE_ACCOUNT)
+        for name, receipts in (
+            ("missing receipt", []),
+            ("same-account fail", [self._receipt(self.ONE_ACCOUNT, verdict="fail", reviewer="fresh-codex")]),
+        ):
+            with self.subTest(scenario=name):
+                errors = self._evaluate(pr, receipts, self.slice, config, self.NO_TRAILER_HEAD, head_parent_count=2)
+                self.assertTrue(errors, name)
+                self.assertTrue(
+                    any("gh pr update-branch" in e and "force-with-lease" in e for e in errors),
+                    f"{name}: advice missing, got {errors!r}",
+                )
+
+    def test_fetch_commit_parent_count_reads_the_parents_list(self):
+        with patch.object(sdlc, "run_json", return_value={"parents": [{"sha": "a"}, {"sha": "b"}]}) as reader:
+            self.assertEqual(2, sdlc.fetch_commit_parent_count("deadbeef", self.config))
+        reader.assert_called_once_with(
+            ["gh", "api", f"repos/{self.config['repository']}/commits/deadbeef"])
+
+    def test_fetch_commit_parent_count_defaults_missing_parents_to_zero(self):
+        with patch.object(sdlc, "run_json", return_value={}):
+            self.assertEqual(0, sdlc.fetch_commit_parent_count("deadbeef", self.config))
 
     def test_implementer_identity_reads_the_last_trailer(self):
         message = "x\n\nAgent-Session: first\nAgent-Session: second"
@@ -1049,6 +1187,7 @@ Read one file.
                 patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
                 patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
                 patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT), \
+                patch.object(sdlc, "fetch_commit_parent_count", return_value=1), \
                 patch.object(sdlc, "run_text", side_effect=lambda command, **k: writes.append(command) or ""), \
                 contextlib.redirect_stdout(out):
             code = sdlc.command_merge(argparse.Namespace(pr=99, apply=True), self.config)
@@ -1060,10 +1199,47 @@ Read one file.
         with patch.object(sdlc, "fetch_pr", return_value=pr), \
                 patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
                 patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
-                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT):
+                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT), \
+                patch.object(sdlc, "fetch_commit_parent_count", return_value=1):
             inputs = sdlc.load_gate_inputs(99, self.config)
             self.assertEqual((), sdlc.merge_eligibility(99, self.config).errors)
         self.assertEqual(sdlc.ParentGate(10, self.epic, []), inputs.parent)
+        self.assertEqual(1, inputs.head_parent_count)
+
+    def test_real_merge_inputs_thread_head_parent_count_to_the_gate(self):
+        # #75: a value that only `load_gate_inputs` fetches must actually
+        # reach `evaluate_merge_gate`, not just live on `GateInputs` unused.
+        # Hardcoding `head_parent_count=1` in `load_gate_inputs` turns this red.
+        import argparse
+        import contextlib
+        import io
+        pr = dict(
+            self._passing_pr(head=self.CANDIDATE, author=self.ONE_ACCOUNT),
+            number=99, headRefName="issue/11",
+        )
+        issues = {10: self.epic, 11: self.slice}
+        comments = {
+            99: [self._receipt(self.ONE_ACCOUNT, head=self.CANDIDATE, reviewer="codex-cli fresh exec session")],
+            10: [],
+        }
+        writes = []
+        out = io.StringIO()
+        with patch.object(sdlc, "fetch_pr", return_value=pr), \
+                patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
+                patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
+                patch.object(sdlc, "fetch_commit_message", return_value=self.MERGE_COMMIT_HEAD), \
+                patch.object(sdlc, "fetch_commit_parent_count", return_value=2), \
+                patch.object(sdlc, "run_text", side_effect=lambda command, **k: writes.append(command) or ""), \
+                contextlib.redirect_stdout(out):
+            code = sdlc.command_merge(argparse.Namespace(pr=99, apply=True), self.config)
+        self.assertEqual(1, code)
+        self.assertEqual(
+            [], writes,
+            "a same-account receipt on a merge-commit head with no trailer must never reach `gh pr merge`",
+        )
+        self.assertIn("rebase", out.getvalue())
+        self.assertIn("gh pr update-branch", out.getvalue())
+        self.assertNotIn("add an", out.getvalue())
 
     def test_pause_after_claim_blocks_the_merge(self):
         issues = {10: self.epic, 11: self.slice}
@@ -1961,6 +2137,7 @@ Read one file.
                 patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
                 patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
                 patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT), \
+                patch.object(sdlc, "fetch_commit_parent_count", return_value=1), \
                 patch.object(sdlc, "run_text", side_effect=lambda command, **k: writes.append(command) or ""), \
                 contextlib.redirect_stdout(out):
             code = sdlc.command_merge(argparse.Namespace(pr=99, apply=True), self.config)
@@ -1972,7 +2149,8 @@ Read one file.
         with patch.object(sdlc, "fetch_pr", return_value=pr), \
                 patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
                 patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
-                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT):
+                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT), \
+                patch.object(sdlc, "fetch_commit_parent_count", return_value=1):
             self.assertEqual((), sdlc.merge_eligibility(99, self.config).errors)
 
     def test_next_and_claim_explain_an_unmet_prerequisite(self):

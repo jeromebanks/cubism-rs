@@ -24,6 +24,11 @@ Prefix shell commands with `rtk`. In command chains, prefix each segment. Use
   closed. A receipt from a different account establishes independence on its
   own and is accepted without consulting trailers. `Claude-Session:` is
   accepted as an equivalent for existing history.
+- If a PR goes `BEHIND`, rebase onto the fetched remote default branch and
+  push; never run `gh pr update-branch`. It writes a GitHub-authored merge
+  commit with no `Agent-Session:` trailer of its own, which the merge gate
+  refuses when the receipt shares the PR author's account — the normal case
+  here (see `SDLC.md` step 9).
 - Do not ask for routine human PR review. When CI and the required agent review
   pass, use the deterministic merge command in `SDLC.md`.
 - Stop ordinary work under an epic labeled `gate:human-review` or
