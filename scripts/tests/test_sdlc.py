@@ -301,6 +301,51 @@ Read one file.
             self.slice, self.config, self.MERGE_COMMIT_HEAD, head_parent_count=2)
         self.assertEqual([], errors)
 
+    NO_TRAILER_HEAD = "docs: a change with no trailer"
+
+    def test_merge_commit_rebase_advice_is_a_closed_class_not_one_more_branch(self):
+        # Codex round 3 finding: a fail-verdict receipt short-circuits the
+        # `reasons` list that the earlier branches build, so the rebase
+        # advice they computed was silently discarded. Rather than patch that
+        # one instance (a round-4 reviewer would likely find the next one --
+        # a no-reviewer receipt with no other considered receipt hits the
+        # same short-circuit), this asserts three invariants over a matrix of
+        # receipt shapes, so any future branch that forgets the note fails
+        # this test rather than needing a fourth review round to find it.
+        receipt_scenarios = {
+            "none": [],
+            "same-account pass": [self._receipt(self.ONE_ACCOUNT, verdict="pass", reviewer="fresh-codex")],
+            "same-account fail": [self._receipt(self.ONE_ACCOUNT, verdict="fail", reviewer="fresh-codex")],
+            "same-account pass, no reviewer": [self._receipt(self.ONE_ACCOUNT, verdict="pass", reviewer="")],
+            "same-account fail, no reviewer": [self._receipt(self.ONE_ACCOUNT, verdict="fail", reviewer="")],
+            "different-account pass": [self._receipt("reviewer-bot", verdict="pass", reviewer="fresh-codex")],
+            "different-account fail": [self._receipt("reviewer-bot", verdict="fail", reviewer="fresh-codex")],
+        }
+        pr = self._passing_pr(author=self.ONE_ACCOUNT)
+        for name, receipts in receipt_scenarios.items():
+            with self.subTest(scenario=name):
+                errors_pc1 = self._evaluate(pr, receipts, self.slice, self.config, self.NO_TRAILER_HEAD, head_parent_count=1)
+                errors_pc2 = self._evaluate(pr, receipts, self.slice, self.config, self.NO_TRAILER_HEAD, head_parent_count=2)
+                errors_pc2_trailer = self._evaluate(pr, receipts, self.slice, self.config, self.HEAD_COMMIT, head_parent_count=2)
+                # (a) `head_parent_count` changes messages, never whether the
+                # gate blocks.
+                self.assertEqual(
+                    len(errors_pc1), len(errors_pc2),
+                    f"{name}: parent count changed the block decision: {errors_pc1!r} vs {errors_pc2!r}",
+                )
+                # (b) at pc=2 with no trailer, every error that exists names rebase.
+                for error in errors_pc2:
+                    self.assertIn("rebase", error, f"{name}: {error!r}")
+                    self.assertIn("gh pr update-branch", error, f"{name}: {error!r}")
+                # (c) at pc=1, or with the head's own trailer present, no
+                # error ever names rebase -- an ordinary commit still gets
+                # ordinary advice, and a merge commit carrying its own
+                # trailer needs no rebase advice at all.
+                for error in errors_pc1:
+                    self.assertNotIn("rebase", error, f"{name} (pc=1): {error!r}")
+                for error in errors_pc2_trailer:
+                    self.assertNotIn("rebase", error, f"{name} (own trailer): {error!r}")
+
     def test_fetch_commit_parent_count_reads_the_parents_list(self):
         with patch.object(sdlc, "run_json", return_value={"parents": [{"sha": "a"}, {"sha": "b"}]}) as reader:
             self.assertEqual(2, sdlc.fetch_commit_parent_count("deadbeef", self.config))

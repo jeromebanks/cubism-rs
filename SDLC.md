@@ -225,9 +225,13 @@ need for more.
 
    Do not run `gh pr update-branch`: it writes a GitHub-authored merge commit
    over the slice commit, and that merge commit carries no `Agent-Session:`
-   trailer of its own. The merge gate refuses a same-account receipt on a
-   trailerless merge-commit head, and its error names this rebase as the fix
-   rather than asking for a trailer on a commit GitHub wrote.
+   trailer of its own. On such a head, a receipt from the PR author's account
+   can never establish independence, and whatever review error the gate
+   reports for it also names this rebase as the fix — a missing receipt, a
+   failing one, or one the gate cannot otherwise resolve an identity for.
+   Parent count never changes *whether* the gate blocks, only whether the
+   error also names rebase. A different-account receipt is unaffected: it
+   already established independence without a trailer before this existed.
 10. **Reconcile.** Confirm the issue closed, then run
     `rtk python3 scripts/sdlc.py cleanup N` from the primary checkout. It owns
     the closing transition: it removes whichever of `in-progress` and

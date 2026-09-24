@@ -1322,26 +1322,34 @@ def evaluate_merge_gate(
             if receipt in independent or receipt.get("verdict") == "fail"
         ]
         latest = latest_receipt(considered, kind, head) if pr_author else None
+        before = len(errors)
         if latest is None:
             if reasons:
                 errors.append(reasons[-1])
-            elif head_parent_count > 1 and implementer is None:
-                # No receipt has been attempted yet, so the identity mismatch
-                # above never ran — but a same-account receipt on this exact
-                # head would be refused the moment it is recorded. Say so now
-                # rather than spending a review round to find out.
-                errors.append(
-                    f"missing clean `{kind}` review receipt for head {head}, which is a "
-                    f"merge commit with no `{AGENT_SESSION_TRAILERS[0]}:` trailer of its "
-                    "own; a receipt from the PR author's account on this head will be "
-                    "refused, so " + rebase_advice
-                )
             else:
                 errors.append(f"missing clean `{kind}` review receipt for head {head}")
         elif latest.get("verdict") != "pass":
             errors.append(
                 f"latest `{kind}` review receipt for head {head} is "
                 f"`{latest.get('verdict')}`, not `pass`"
+            )
+        # Closing the whole class, not one more branch: three review rounds
+        # each found a different way for a `kind` error to omit the rebase
+        # advice (a fail-verdict receipt short-circuits `reasons` above; a
+        # receipt naming no reviewer does too when nothing else is
+        # `considered`; the next input would have found another). No matter
+        # which branch above produced this kind's error, or whether the
+        # receipt driving it was same- or different-account, append the note
+        # once here if it isn't already present. `head_parent_count` must
+        # never change *whether* the gate blocks — only whether the resulting
+        # error also names rebase — so this only ever extends an existing
+        # error, never creates one.
+        if len(errors) > before and head_parent_count > 1 and implementer is None \
+                and "rebase" not in errors[-1]:
+            errors[-1] += (
+                f"; separately, a `{kind}` receipt from the PR author's account can never "
+                f"establish independence on this head (a merge commit with no "
+                f"`{AGENT_SESSION_TRAILERS[0]}:` trailer of its own) — " + rebase_advice
             )
     return errors
 
