@@ -1272,6 +1272,11 @@ def evaluate_merge_gate(
         ]
         dependent: list[dict[str, Any]] = []
         reasons: list[str] = []
+        # Parallel to `reasons`: whether that specific message already embeds
+        # the rebase advice. Tracked structurally, index-matched to `reasons`
+        # — never sniffed from the resulting text with a substring check,
+        # which a `kind` named e.g. "rebase-review" would falsely satisfy.
+        reasons_named_rebase: list[bool] = []
         for receipt in candidates:
             if pr_author and (receipt.get("author") or "").lower() != pr_author.lower():
                 # Separate accounts: independent, no trailer needed. This also
@@ -1289,6 +1294,7 @@ def evaluate_merge_gate(
                     f"`{kind}` receipt for head {head} names no reviewer; re-record it with "
                     f"`review-receipt --reviewer <agent/session> --expect-sha {head}`"
                 )
+                reasons_named_rebase.append(False)
             elif implementer is None:
                 dependent.append(receipt)
                 if head_parent_count > 1:
@@ -1298,6 +1304,7 @@ def evaluate_merge_gate(
                         f"with no `{AGENT_SESSION_TRAILERS[0]}:` trailer of its own; "
                         + rebase_advice
                     )
+                    reasons_named_rebase.append(True)
                 else:
                     reasons.append(
                         f"`{kind}` receipt for head {head} shares the PR author "
@@ -1305,12 +1312,14 @@ def evaluate_merge_gate(
                         f"agent; add an `{AGENT_SESSION_TRAILERS[0]}:` trailer to the "
                         "commit so the two agents can be told apart"
                     )
+                    reasons_named_rebase.append(False)
             elif reviewer.lower() == implementer.lower():
                 dependent.append(receipt)
                 reasons.append(
                     f"`{kind}` receipt for head {head} was written by the implementing "
                     f"agent `{implementer}`; a self-review is not an independent review"
                 )
+                reasons_named_rebase.append(False)
         independent = [receipt for receipt in candidates if receipt not in dependent]
         # Independence gates *authorization*, not *objection*. A failing receipt
         # is a veto, and an implementer who finds a defect in their own work
@@ -1323,9 +1332,11 @@ def evaluate_merge_gate(
         ]
         latest = latest_receipt(considered, kind, head) if pr_author else None
         before = len(errors)
+        already_named_rebase = False
         if latest is None:
             if reasons:
                 errors.append(reasons[-1])
+                already_named_rebase = reasons_named_rebase[-1]
             else:
                 errors.append(f"missing clean `{kind}` review receipt for head {head}")
         elif latest.get("verdict") != "pass":
@@ -1343,9 +1354,11 @@ def evaluate_merge_gate(
         # once here if it isn't already present. `head_parent_count` must
         # never change *whether* the gate blocks — only whether the resulting
         # error also names rebase — so this only ever extends an existing
-        # error, never creates one.
+        # error, never creates one. `already_named_rebase` is tracked
+        # structurally (never sniffed from `errors[-1]` text), so a `kind`
+        # whose own name happens to contain "rebase" cannot suppress it.
         if len(errors) > before and head_parent_count > 1 and implementer is None \
-                and "rebase" not in errors[-1]:
+                and not already_named_rebase:
             errors[-1] += (
                 f"; separately, a `{kind}` receipt from the PR author's account can never "
                 f"establish independence on this head (a merge commit with no "

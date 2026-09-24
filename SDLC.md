@@ -230,8 +230,11 @@ need for more.
    reports for it also names this rebase as the fix — a missing receipt, a
    failing one, or one the gate cannot otherwise resolve an identity for.
    Parent count never changes *whether* the gate blocks, only whether the
-   error also names rebase. A different-account receipt is unaffected: it
-   already established independence without a trailer before this existed.
+   error also names rebase. A different-account receipt's authorization is
+   unaffected — it already established independence without a trailer
+   before this existed — but if it fails for its own reasons, its error
+   gains the same rebase note as an informational aside: that fact holds
+   regardless of which account's receipt is being evaluated.
 10. **Reconcile.** Confirm the issue closed, then run
     `rtk python3 scripts/sdlc.py cleanup N` from the primary checkout. It owns
     the closing transition: it removes whichever of `in-progress` and

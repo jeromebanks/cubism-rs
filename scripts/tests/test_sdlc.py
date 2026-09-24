@@ -346,6 +346,30 @@ Read one file.
                 for error in errors_pc2_trailer:
                     self.assertNotIn("rebase", error, f"{name} (own trailer): {error!r}")
 
+    def test_rebase_advice_is_not_confused_with_a_kind_named_rebase_review(self):
+        # Codex round 4 finding: the prior fix detected "already named rebase"
+        # by checking `"rebase" not in errors[-1]`, which a review `kind`
+        # literally named "rebase-review" would satisfy by coincidence (the
+        # kind's own name in the error text), suppressing the real advice.
+        # The fix tracks this structurally instead
+        # (`reasons_named_rebase`, index-matched to `reasons`), not by
+        # sniffing the rendered message. Assert the actual advice text is
+        # present, not just the word "rebase".
+        config = json.loads(json.dumps(self.config))
+        config["review"]["required"] = ["rebase-review"]
+        pr = self._passing_pr(author=self.ONE_ACCOUNT)
+        for name, receipts in (
+            ("missing receipt", []),
+            ("same-account fail", [self._receipt(self.ONE_ACCOUNT, verdict="fail", reviewer="fresh-codex")]),
+        ):
+            with self.subTest(scenario=name):
+                errors = self._evaluate(pr, receipts, self.slice, config, self.NO_TRAILER_HEAD, head_parent_count=2)
+                self.assertTrue(errors, name)
+                self.assertTrue(
+                    any("gh pr update-branch" in e and "force-with-lease" in e for e in errors),
+                    f"{name}: advice missing, got {errors!r}",
+                )
+
     def test_fetch_commit_parent_count_reads_the_parents_list(self):
         with patch.object(sdlc, "run_json", return_value={"parents": [{"sha": "a"}, {"sha": "b"}]}) as reader:
             self.assertEqual(2, sdlc.fetch_commit_parent_count("deadbeef", self.config))
