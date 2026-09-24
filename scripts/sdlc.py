@@ -633,19 +633,48 @@ def _blocker_repository(blocker: dict[str, Any]) -> str:
     return match.group(1) if match else ""
 
 
+def _closing_reference(ref: Any) -> tuple[str, int] | None:
+    """A closing reference's `owner/name` and PR number, or None if malformed."""
+    if not isinstance(ref, dict):
+        return None
+    repo = ref.get("repository")
+    owner = repo.get("owner") if isinstance(repo, dict) else None
+    login = owner.get("login") if isinstance(owner, dict) else None
+    name = repo.get("name") if isinstance(repo, dict) else None
+    number = ref.get("number")
+    if not (isinstance(login, str) and login and isinstance(name, str) and name):
+        return None
+    if not isinstance(number, int) or isinstance(number, bool):
+        return None
+    return f"{login}/{name}", number
+
+
+def _pull_record_complete(pull: Any) -> bool:
+    """Whether a PR record carries every field completion is judged on."""
+    return (
+        isinstance(pull, dict)
+        and isinstance(pull.get("state"), str)
+        and isinstance(pull.get("baseRefName"), str)
+        and "mergeCommit" in pull
+        and (pull["mergeCommit"] is None or isinstance(pull["mergeCommit"], dict))
+    )
+
+
 def _verified_merges(issue: dict[str, Any], source: DependencySource, config: dict[str, Any]) -> tuple[bool, list[str], list[str]]:
     """Whether a closing PR of `issue` is verified merged into the default
     branch, what was checked when none is, and which references could not be
-    read. Every reference is read: one that cannot be is unknown, and unknown
-    blocks even beside a merged one."""
+    read. Every reference is read: one that is malformed, unreadable or
+    incomplete is unknown, and unknown blocks even beside a merged one."""
     merged = False
     checked: list[str] = []
     unreadable: list[str] = []
-    for ref in issue.get("closedByPullRequestsReferences") or []:
-        repo = ref.get("repository") or {}
-        name = f"{(repo.get('owner') or {}).get('login', '')}/{repo.get('name', '')}"
-        number = ref.get("number")
-        if not same_repository(name, config) or not isinstance(number, int):
+    for ref in issue["closedByPullRequestsReferences"]:
+        parsed = _closing_reference(ref)
+        if parsed is None:
+            unreadable.append(f"a closing reference is malformed ({json.dumps(ref, sort_keys=True)[:120]})")
+            continue
+        name, number = parsed
+        if not same_repository(name, config):
             checked.append(f"{name}#{number} is outside {config['repository']}")
             continue
         try:
@@ -653,17 +682,19 @@ def _verified_merges(issue: dict[str, Any], source: DependencySource, config: di
         except (SdlcError, OSError) as exc:
             unreadable.append(f"PR #{number} could not be read ({exc})")
             continue
-        merge_sha = (pull.get("mergeCommit") or {}).get("oid") or ""
+        if not _pull_record_complete(pull):
+            unreadable.append(f"PR #{number} lacks state, baseRefName or mergeCommit")
+            continue
+        merge_sha = (pull["mergeCommit"] or {}).get("oid") or ""
         if (
-            pull.get("state") == "MERGED"
-            and pull.get("baseRefName") == config["default_branch"]
+            pull["state"] == "MERGED"
+            and pull["baseRefName"] == config["default_branch"]
+            and isinstance(merge_sha, str)
             and re.fullmatch(r"[0-9a-f]{40}", merge_sha)
         ):
             merged = True
             continue
-        checked.append(
-            f"PR #{number} is {pull.get('state')} into `{pull.get('baseRefName')}`"
-        )
+        checked.append(f"PR #{number} is {pull['state']} into `{pull['baseRefName']}`")
     return merged, checked, unreadable
 
 
@@ -678,6 +709,8 @@ def completion_error(number: int, source: DependencySource, config: dict[str, An
         issue = source.issue(number)
     except (SdlcError, OSError) as exc:
         return f"blocked by #{number}, which could not be read ({exc}); its completion is unknown"
+    if not isinstance(issue, dict):
+        return f"blocked by #{number}, whose record is malformed; its completion is unknown"
     if issue.get("state") != "CLOSED":
         return f"blocked by #{number}, which is still open"
     reason = issue.get("stateReason")
@@ -686,12 +719,12 @@ def completion_error(number: int, source: DependencySource, config: dict[str, An
             f"blocked by #{number}, closed as {reason or 'an unknown reason'} rather than "
             "COMPLETED; a cancelled or duplicate prerequisite does not satisfy a dependency"
         )
-    if "closedByPullRequestsReferences" not in issue:
+    if not isinstance(issue.get("closedByPullRequestsReferences"), list):
         return f"blocked by #{number}: its closing pull requests could not be read; its completion is unknown"
     merged, checked, unreadable = _verified_merges(issue, source, config)
     if unreadable:
         return (
-            f"blocked by #{number}: a closing pull request could not be read "
+            f"blocked by #{number}: its closing evidence could not be read "
             f"({'; '.join(unreadable)}); its completion is unknown"
         )
     if merged:
@@ -725,11 +758,16 @@ def prerequisite_errors(number: int, source: DependencySource, config: dict[str,
         except (SdlcError, OSError) as exc:
             errors.append(f"prerequisites of #{node} could not be read completely ({exc}); dependencies are unknown")
             return []
+        if not isinstance(blockers, list):
+            errors.append(f"prerequisites of #{node} are not a list; dependencies are unknown")
+            return []
         found = []
         for blocker in blockers:
-            repository = _blocker_repository(blocker)
-            blocker_number = blocker.get("number")
-            if not isinstance(blocker_number, int) or not same_repository(repository, config):
+            blocker_number = blocker.get("number") if isinstance(blocker, dict) else None
+            if not isinstance(blocker_number, int) or isinstance(blocker_number, bool):
+                errors.append(f"a prerequisite entry of #{node} is malformed; dependencies are unknown")
+                continue
+            if not same_repository(_blocker_repository(blocker), config):
                 errors.append(
                     f"#{node} is blocked by {blocker.get('html_url') or blocker_number}, outside "
                     f"{config['repository']}; its completion cannot be verified"

@@ -1549,10 +1549,29 @@ Read one file.
             "unreadable PR beside a merged one": (
                 lambda: (self._prerequisite(5, prs=[6, 7]), self._pull(7),
                          self.graph["pulls"].update({6: sdlc.SdlcError("HTTP 403")})),
-                "a closing pull request could not be read (PR #6 could not be read (HTTP 403))"),
+                "its closing evidence could not be read (PR #6 could not be read (HTTP 403))"),
             "merged PR beside an unreadable one": (
                 lambda: (self._prerequisite(5, prs=[7, 6]), self._pull(7)),
-                "a closing pull request could not be read (PR #6 could not be read (HTTP 404"),
+                "its closing evidence could not be read (PR #6 could not be read (HTTP 404"),
+            # R3b-2/R3b-3: malformed references and incomplete PR records are
+            # unknown, even beside a merged reference.
+            "malformed reference beside a merged one": (
+                lambda: (self._prerequisite(5, prs=[7]), self._pull(7),
+                         self.graph["issues"][5]["closedByPullRequestsReferences"].extend(
+                             [{"number": 8}, {"repository": {"name": "cubism-rs", "owner": {"login": "jeromebanks"}}},
+                              "PR_kwDO", {"number": True, "repository": {"name": "cubism-rs", "owner": {"login": "jeromebanks"}}}])),
+                "a closing reference is malformed"),
+            "incomplete PR record beside a merged one": (
+                lambda: (self._prerequisite(5, prs=[6, 7]), self._pull(7), self.graph["pulls"].update({6: {}})),
+                "PR #6 lacks state, baseRefName or mergeCommit"),
+            "PR record without mergeCommit": (
+                lambda: (self._prerequisite(5, prs=[6, 7]), self._pull(7),
+                         self.graph["pulls"].update({6: {"state": "MERGED", "baseRefName": "main"}})),
+                "PR #6 lacks state, baseRefName or mergeCommit"),
+            "closing references not a list": (
+                lambda: self._prerequisite(5, prs=[7]) or self.graph["issues"][5].update(
+                    closedByPullRequestsReferences={"number": 7}),
+                "its closing pull requests could not be read"),
             "one of two PRs merged": (
                 lambda: (self._prerequisite(5, prs=[6, 7]), self._pull(6, state="CLOSED", oid=None), self._pull(7)),
                 None),
@@ -1607,6 +1626,23 @@ Read one file.
         [error] = self._prerequisite_errors()
         self.assertIn("#11 is blocked by", error)
         self.assertIn("outside jeromebanks/cubism-rs; its completion cannot be verified", error)
+
+    def test_malformed_dependency_records_fail_closed(self):
+        for name, prepare, expected in (
+            ("blocked_by not a list", lambda: self.graph["blocked_by"].update({11: {"number": 5}}),
+             "prerequisites of #11 are not a list"),
+            ("blocker not a dict", lambda: self.graph["blocked_by"].update({11: ["#5"]}),
+             "a prerequisite entry of #11 is malformed"),
+            ("boolean blocker number", lambda: self.graph["blocked_by"].update(
+                {11: [dict(self._blocker(5), number=True)]}), "a prerequisite entry of #11 is malformed"),
+            ("prerequisite not a dict", lambda: (self._blocked_by(5), self.graph["issues"].update({5: ["CLOSED"]})),
+             "blocked by #5, whose record is malformed"),
+        ):
+            with self.subTest(case=name):
+                self.setUp()
+                prepare()
+                errors = self._prerequisite_errors()
+                self.assertTrue(any(expected in e for e in errors), errors)
 
     def test_cycles_are_reported_with_their_path(self):
         # 11 <- 5 <- 6 <- 5: the cycle is upstream of the slice.
@@ -1756,6 +1792,16 @@ Read one file.
         code, output = check(dict(base, issues=[self.epic, self.slice, two_refs], pull_requests={"7": merged}))
         self.assertEqual(1, code)
         self.assertIn("no `pull_requests` entry for pull request #6", output)
+        # R3b-3: an incomplete bundled PR record is unknown beside a merged one.
+        code, output = check(dict(base, issues=[self.epic, self.slice, two_refs], pull_requests={"6": {}, "7": merged}))
+        self.assertEqual(1, code)
+        self.assertIn("PR #6 lacks state, baseRefName or mergeCommit", output)
+        # R3b-2: a malformed bundled reference is unknown beside a merged one.
+        malformed = dict(prerequisite, closedByPullRequestsReferences=[
+            *prerequisite["closedByPullRequestsReferences"], {"number": 8}])
+        code, output = check(dict(base, issues=[self.epic, self.slice, malformed], pull_requests={"7": merged}))
+        self.assertEqual(1, code)
+        self.assertIn("a closing reference is malformed", output)
         without_reason = {k: v for k, v in prerequisite.items() if k != "stateReason"}
         code, output = check(dict(base, issues=[self.epic, self.slice, without_reason], pull_requests={"7": merged}))
         self.assertEqual(1, code)
