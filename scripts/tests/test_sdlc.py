@@ -1540,7 +1540,7 @@ Read one file.
                 "PR #7 is MERGED into `release`"),
             "merged without a full SHA": (
                 lambda: (self._prerequisite(5, prs=[7]), self._pull(7, oid="abc")),
-                "PR #7 is MERGED into `main`"),
+                "PR #7 is not a complete record"),
             "closing PR unreadable": (
                 lambda: (self._prerequisite(5, prs=[7]), self.graph["pulls"].update({7: sdlc.SdlcError("HTTP 502")})),
                 "PR #7 could not be read (HTTP 502)"),
@@ -1563,11 +1563,29 @@ Read one file.
                 "a closing reference is malformed"),
             "incomplete PR record beside a merged one": (
                 lambda: (self._prerequisite(5, prs=[6, 7]), self._pull(7), self.graph["pulls"].update({6: {}})),
-                "PR #6 lacks state, baseRefName or mergeCommit"),
+                "PR #6 is not a complete record"),
             "PR record without mergeCommit": (
                 lambda: (self._prerequisite(5, prs=[6, 7]), self._pull(7),
                          self.graph["pulls"].update({6: {"state": "MERGED", "baseRefName": "main"}})),
-                "PR #6 lacks state, baseRefName or mergeCommit"),
+                "PR #6 is not a complete record"),
+            # R3b-4: every PR record inconsistent with its state is unknown,
+            # beside a merged reference, rather than read as unmerged.
+            **{
+                f"inconsistent PR record {record!r} beside a merged one": (
+                    lambda record=record: (self._prerequisite(5, prs=[6, 7]), self._pull(7),
+                                           self.graph["pulls"].update({6: record})),
+                    "PR #6 is not a complete record")
+                for record in (
+                    {"state": "MERGED", "baseRefName": "main", "mergeCommit": {}},
+                    {"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": None}},
+                    {"state": "MERGED", "baseRefName": "main", "mergeCommit": None},
+                    {"state": "MERGED", "baseRefName": "", "mergeCommit": {"oid": "e" * 40}},
+                    {"state": "OPEN", "baseRefName": "main", "mergeCommit": {}},
+                    {"state": "CLOSED", "baseRefName": "main", "mergeCommit": {"oid": "e" * 40}},
+                    {"state": "merged", "baseRefName": "main", "mergeCommit": {"oid": "e" * 40}},
+                    {"state": None, "baseRefName": "main", "mergeCommit": None},
+                )
+            },
             "closing references not a list": (
                 lambda: self._prerequisite(5, prs=[7]) or self.graph["issues"][5].update(
                     closedByPullRequestsReferences={"number": 7}),
@@ -1795,7 +1813,12 @@ Read one file.
         # R3b-3: an incomplete bundled PR record is unknown beside a merged one.
         code, output = check(dict(base, issues=[self.epic, self.slice, two_refs], pull_requests={"6": {}, "7": merged}))
         self.assertEqual(1, code)
-        self.assertIn("PR #6 lacks state, baseRefName or mergeCommit", output)
+        self.assertIn("PR #6 is not a complete record", output)
+        # R3b-4: `mergeCommit: {}` is not evidence of either outcome.
+        code, output = check(dict(base, issues=[self.epic, self.slice, two_refs], pull_requests={
+            "6": dict(merged, mergeCommit={}), "7": merged}))
+        self.assertEqual(1, code)
+        self.assertIn("PR #6 is not a complete record", output)
         # R3b-2: a malformed bundled reference is unknown beside a merged one.
         malformed = dict(prerequisite, closedByPullRequestsReferences=[
             *prerequisite["closedByPullRequestsReferences"], {"number": 8}])

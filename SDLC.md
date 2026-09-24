@@ -82,8 +82,10 @@ prerequisite is **successfully completed**:
 Open, reopened, `NOT_PLANNED`, duplicate or hand-closed prerequisites do not
 count. A closing reference that is listed but unmerged, or merged into another
 branch, does not count either. A closing reference that is malformed, cannot
-be read, or leads to a pull request record missing `state`, `baseRefName` or
-`mergeCommit` blocks, even when another reference is merged. Each refusal names the
+be read, or leads to a pull request record inconsistent with its state blocks,
+even when another reference is merged. A consistent record has a known
+`state`, a `baseRefName`, and a `mergeCommit` that is null unless `MERGED` and
+carries a full SHA when `MERGED`. Each refusal names the
 prerequisite and the missing evidence. A verification-only prerequisite, one
 with no merged closing pull request, fails closed until an explicit evidence
 format exists (Stage C3). The following are all unknown, and unknown blocks:

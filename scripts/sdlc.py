@@ -649,15 +649,24 @@ def _closing_reference(ref: Any) -> tuple[str, int] | None:
     return f"{login}/{name}", number
 
 
+PULL_STATES = ("OPEN", "CLOSED", "MERGED")
+
+
 def _pull_record_complete(pull: Any) -> bool:
-    """Whether a PR record carries every field completion is judged on."""
-    return (
-        isinstance(pull, dict)
-        and isinstance(pull.get("state"), str)
-        and isinstance(pull.get("baseRefName"), str)
-        and "mergeCommit" in pull
-        and (pull["mergeCommit"] is None or isinstance(pull["mergeCommit"], dict))
-    )
+    """Whether a PR record is exactly consistent with its state, as GitHub
+    reports it: a MERGED pull request has a `mergeCommit` with a full SHA, and
+    any other has a null `mergeCommit`. Anything else is not evidence of either
+    outcome, so it is unknown rather than read as "unmerged"."""
+    if not isinstance(pull, dict):
+        return False
+    state, base = pull.get("state"), pull.get("baseRefName")
+    if state not in PULL_STATES or not isinstance(base, str) or not base or "mergeCommit" not in pull:
+        return False
+    commit = pull["mergeCommit"]
+    if state != "MERGED":
+        return commit is None
+    oid = commit.get("oid") if isinstance(commit, dict) else None
+    return isinstance(oid, str) and re.fullmatch(r"[0-9a-f]{40}", oid) is not None
 
 
 def _verified_merges(issue: dict[str, Any], source: DependencySource, config: dict[str, Any]) -> tuple[bool, list[str], list[str]]:
@@ -683,15 +692,12 @@ def _verified_merges(issue: dict[str, Any], source: DependencySource, config: di
             unreadable.append(f"PR #{number} could not be read ({exc})")
             continue
         if not _pull_record_complete(pull):
-            unreadable.append(f"PR #{number} lacks state, baseRefName or mergeCommit")
+            unreadable.append(
+                f"PR #{number} is not a complete record: it needs a known state, a base branch, "
+                "and a mergeCommit that is null unless MERGED and has a full SHA when MERGED"
+            )
             continue
-        merge_sha = (pull["mergeCommit"] or {}).get("oid") or ""
-        if (
-            pull["state"] == "MERGED"
-            and pull["baseRefName"] == config["default_branch"]
-            and isinstance(merge_sha, str)
-            and re.fullmatch(r"[0-9a-f]{40}", merge_sha)
-        ):
+        if pull["state"] == "MERGED" and pull["baseRefName"] == config["default_branch"]:
             merged = True
             continue
         checked.append(f"PR #{number} is {pull['state']} into `{pull['baseRefName']}`")
