@@ -18,7 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, Iterable, NamedTuple, Optional
+from typing import Any, Callable, Iterable, NamedTuple, Optional, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -596,12 +596,173 @@ class ParentGate(NamedTuple):
 ADMISSION_MODES = ("check", "start", "continue")
 
 
+class DependencySource(NamedTuple):
+    """How admission reads prerequisites. Each reader raises when GitHub cannot
+    answer completely; the caller treats that as unknown, and unknown blocks.
+
+    - `blocked_by(n)`: every native `blocked_by` issue of #n, all pages;
+    - `issue(n)`: a prerequisite with `state`, `stateReason` and
+      `closedByPullRequestsReferences`;
+    - `pull(n)`: a pull request with `state`, `baseRefName` and `mergeCommit`.
+    """
+    blocked_by: Callable[[int], list[dict[str, Any]]]
+    issue: Callable[[int], dict[str, Any]]
+    pull: Callable[[int], dict[str, Any]]
+
+
+def _unread(what: str) -> Callable[[int], Any]:
+    def read(number: int) -> Any:
+        raise SdlcError(f"no {what} source was supplied for #{number}")
+    return read
+
+
+# The default for callers that supply nothing: every prerequisite is unknown.
+NO_DEPENDENCY_DATA = DependencySource(
+    _unread("blocked_by"), _unread("prerequisite"), _unread("pull request"),
+)
+
+
+def same_repository(repository: str, config: dict[str, Any]) -> bool:
+    return repository.lower() == config["repository"].lower()
+
+
+def _blocker_repository(blocker: dict[str, Any]) -> str:
+    # REST: https://api.github.com/repos/{owner}/{repo}
+    url = str(blocker.get("repository_url") or "")
+    match = re.search(r"/repos/([^/]+/[^/]+)/?$", url)
+    return match.group(1) if match else ""
+
+
+def _verified_merges(issue: dict[str, Any], source: DependencySource, config: dict[str, Any]) -> tuple[bool, list[str]]:
+    """Whether a closing PR of `issue` is verified merged into the default
+    branch, and what was checked when none is."""
+    checked: list[str] = []
+    for ref in issue.get("closedByPullRequestsReferences") or []:
+        repo = ref.get("repository") or {}
+        name = f"{(repo.get('owner') or {}).get('login', '')}/{repo.get('name', '')}"
+        number = ref.get("number")
+        if not same_repository(name, config) or not isinstance(number, int):
+            checked.append(f"{name}#{number} is outside {config['repository']}")
+            continue
+        try:
+            pull = source.pull(number)
+        except (SdlcError, OSError) as exc:
+            checked.append(f"PR #{number} could not be read ({exc})")
+            continue
+        merge_sha = (pull.get("mergeCommit") or {}).get("oid") or ""
+        if (
+            pull.get("state") == "MERGED"
+            and pull.get("baseRefName") == config["default_branch"]
+            and re.fullmatch(r"[0-9a-f]{40}", merge_sha)
+        ):
+            return True, checked
+        checked.append(
+            f"PR #{number} is {pull.get('state')} into `{pull.get('baseRefName')}`"
+        )
+    return False, checked
+
+
+def completion_error(number: int, source: DependencySource, config: dict[str, Any]) -> str | None:
+    """None when prerequisite #number is successfully completed.
+
+    An implementation prerequisite is complete when it is closed COMPLETED
+    *and* a pull request that closed it is verified merged into the default
+    branch. Closure alone — cancelled, duplicate, or hand-closed — is not.
+    """
+    try:
+        issue = source.issue(number)
+    except (SdlcError, OSError) as exc:
+        return f"blocked by #{number}, which could not be read ({exc}); its completion is unknown"
+    if issue.get("state") != "CLOSED":
+        return f"blocked by #{number}, which is still open"
+    reason = issue.get("stateReason")
+    if reason != "COMPLETED":
+        return (
+            f"blocked by #{number}, closed as {reason or 'an unknown reason'} rather than "
+            "COMPLETED; a cancelled or duplicate prerequisite does not satisfy a dependency"
+        )
+    if "closedByPullRequestsReferences" not in issue:
+        return f"blocked by #{number}: its closing pull requests could not be read; its completion is unknown"
+    merged, checked = _verified_merges(issue, source, config)
+    if merged:
+        return None
+    detail = f" (checked: {'; '.join(checked)})" if checked else ""
+    return (
+        f"blocked by #{number}: closed COMPLETED, but no closing pull request is verified "
+        f"merged into `{config['default_branch']}`{detail}. A verification-only prerequisite "
+        "needs explicit completion evidence, which admission cannot read yet"
+    )
+
+
+def prerequisite_errors(number: int, source: DependencySource, config: dict[str, Any]) -> list[str]:
+    """Why #number's native prerequisites do not admit it; empty when they do.
+
+    Reads `blocked_by` transitively so a cycle anywhere upstream is found and
+    reported with its path. Only direct prerequisites must be complete, but
+    every read must succeed: an unreadable or foreign link leaves the graph
+    unknown, and unknown blocks.
+    """
+    errors: list[str] = []
+    edges: dict[int, list[int]] = {}
+    cycles: set[tuple[int, ...]] = set()
+
+    def read(node: int) -> list[int]:
+        if node in edges:
+            return edges[node]
+        edges[node] = []
+        try:
+            blockers = source.blocked_by(node)
+        except (SdlcError, OSError) as exc:
+            errors.append(f"prerequisites of #{node} could not be read completely ({exc}); dependencies are unknown")
+            return []
+        found = []
+        for blocker in blockers:
+            repository = _blocker_repository(blocker)
+            blocker_number = blocker.get("number")
+            if not isinstance(blocker_number, int) or not same_repository(repository, config):
+                errors.append(
+                    f"#{node} is blocked by {blocker.get('html_url') or blocker_number}, outside "
+                    f"{config['repository']}; its completion cannot be verified"
+                )
+                continue
+            found.append(blocker_number)
+        edges[node] = found
+        return found
+
+    path: list[int] = []
+    finished: set[int] = set()
+
+    def walk(node: int) -> None:
+        path.append(node)
+        for blocker in read(node):
+            if blocker in path:
+                cycle = path[path.index(blocker):]
+                # One report per cycle, whichever node it was entered from.
+                start = cycle.index(min(cycle))
+                cycles.add(tuple(cycle[start:] + cycle[:start]))
+            elif blocker not in finished:
+                walk(blocker)
+        path.pop()
+        finished.add(node)
+
+    walk(number)
+    for cycle in sorted(cycles):
+        route = " → ".join(f"#{node}" for node in (*cycle, cycle[0]))
+        errors.append(f"dependency cycle: {route} (each is blocked by the next); remove one link")
+    for blocker in edges.get(number, []):
+        error = completion_error(blocker, source, config)
+        if error:
+            errors.append(error)
+    return errors
+
+
 def admission_errors(
     issue: dict[str, Any],
     parent: ParentGate,
     config: dict[str, Any],
     *,
     mode: str,
+    prerequisites: Sequence[str],
 ) -> list[str]:
     """Decide whether an issue is executable work, for every command.
 
@@ -616,7 +777,10 @@ def admission_errors(
       sections, but it must still be open, unblocked, sliced and admitted by
       its parent's gate.
 
-    Dependencies between slices are not evaluated here yet (R3b).
+    Every mode also requires each native `blocked_by` prerequisite to be
+    successfully completed. The caller evaluates them with
+    `prerequisite_errors` and passes the result; there is no default, so no
+    command can omit them.
     """
     if mode not in ADMISSION_MODES:
         raise ValueError(f"unknown admission mode {mode!r}")
@@ -656,6 +820,7 @@ def admission_errors(
         errors.extend(gate_admission_errors(
             issue, parent.number, parent.epic, lambda _number: records, config,
         ))
+    errors.extend(prerequisites)
     return errors
 
 
@@ -681,11 +846,13 @@ def validate_slice(
     all_issues: dict[int, dict[str, Any]],
     config: dict[str, Any],
     load_gate_records: GateRecordLoader = no_gate_records,
+    dependencies: DependencySource = NO_DEPENDENCY_DATA,
     *,
     mode: str = "check",
 ) -> list[str]:
     parent = load_parent_from(issue, all_issues, config, load_gate_records)
-    return admission_errors(issue, parent, config, mode=mode)
+    prerequisites = prerequisite_errors(int(issue["number"]), dependencies, config)
+    return admission_errors(issue, parent, config, mode=mode, prerequisites=prerequisites)
 
 
 def review_marker(kind: str, head_sha: str, verdict: str, reviewer: str) -> str:
@@ -842,6 +1009,76 @@ def fetch_gate_records(number: int, config: dict[str, Any]) -> list[dict[str, An
     return parse_gate_records(comments)
 
 
+def fetch_blocked_by(number: int, config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every native `blocked_by` issue of #number, all pages.
+
+    `--slurp` keeps one list per page so a malformed page is detected rather
+    than merged away. A failed page makes `gh` exit non-zero, which raises.
+    """
+    pages = run_json([
+        "gh", "api", "--paginate", "--slurp",
+        f"repos/{config['repository']}/issues/{number}/dependencies/blocked_by?per_page=100",
+    ])
+    if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+        raise SdlcError(f"blocked_by for #{number} was not a list of pages")
+    blockers = [item for page in pages for item in page]
+    if not all(isinstance(item, dict) for item in blockers):
+        raise SdlcError(f"blocked_by for #{number} contained a non-issue entry")
+    return blockers
+
+
+def fetch_prerequisite(number: int, config: dict[str, Any]) -> dict[str, Any]:
+    return run_json([
+        "gh", "issue", "view", str(number), "--repo", config["repository"],
+        "--json", "number,state,stateReason,closedByPullRequestsReferences,url",
+    ])
+
+
+def fetch_pull_merge(number: int, config: dict[str, Any]) -> dict[str, Any]:
+    return run_json([
+        "gh", "pr", "view", str(number), "--repo", config["repository"],
+        "--json", "number,state,baseRefName,mergedAt,mergeCommit,url",
+    ])
+
+
+def live_dependencies(config: dict[str, Any]) -> DependencySource:
+    return DependencySource(
+        lambda number: fetch_blocked_by(number, config),
+        lambda number: fetch_prerequisite(number, config),
+        lambda number: fetch_pull_merge(number, config),
+    )
+
+
+def bundle_dependencies(data: dict[str, Any]) -> DependencySource:
+    """Dependency data from an offline bundle. Anything absent is unknown.
+
+    - `dependencies`: `{"<issue>": [blocked_by issue, ...]}` in REST shape;
+    - each prerequisite in `issues` carries `stateReason` and
+      `closedByPullRequestsReferences`;
+    - `pull_requests`: `{"<pr>": {state, baseRefName, mergeCommit}}`.
+    """
+    def keyed(key: str, number: int, what: str) -> Any:
+        stored = data.get(key)
+        value = stored.get(str(number)) if isinstance(stored, dict) else None
+        if value is None:
+            raise SdlcError(f"the bundle has no `{key}` entry for {what} #{number}")
+        return value
+
+    def blocked_by(number: int) -> list[dict[str, Any]]:
+        blockers = keyed("dependencies", number, "issue")
+        if not isinstance(blockers, list):
+            raise SdlcError(f"the bundle's `dependencies` entry for #{number} is not a list")
+        return blockers
+
+    def issue(number: int) -> dict[str, Any]:
+        for item in data.get("issues") or []:
+            if item.get("number") == number and "stateReason" in item:
+                return item
+        raise SdlcError(f"the bundle has no prerequisite record with `stateReason` for #{number}")
+
+    return DependencySource(blocked_by, issue, lambda number: keyed("pull_requests", number, "pull request"))
+
+
 def evaluate_merge_gate(
     pr: dict[str, Any],
     comments: list[dict[str, Any]],
@@ -850,6 +1087,7 @@ def evaluate_merge_gate(
     head_message: str | None = None,
     *,
     parent: ParentGate,
+    prerequisites: Sequence[str],
 ) -> list[str]:
     errors: list[str] = []
     head = pr.get("headRefOid")
@@ -871,7 +1109,7 @@ def evaluate_merge_gate(
     else:
         # Re-evaluated here, not trusted from claim time: a checkpoint pause,
         # a blocker or a closure recorded after the claim must stop the merge.
-        errors.extend(admission_errors(issue, parent, config, mode="continue"))
+        errors.extend(admission_errors(issue, parent, config, mode="continue", prerequisites=prerequisites))
 
     outcomes = pr_check_outcomes(pr)
     for required in config["required_status_checks"]:
@@ -1019,7 +1257,9 @@ def command_check_slice(args: argparse.Namespace, config: dict[str, Any]) -> int
     # An offline bundle supplies gate records through `gate_comments`; one
     # without the parent's comments leaves the gate unknown and blocks.
     loader = bundle_gate_records(data) if args.input else (lambda number: fetch_gate_records(number, config))
-    errors = validate_slice(issue, issues, config, loader)
+    # Likewise its dependency data: anything the bundle omits blocks.
+    dependencies = bundle_dependencies(data) if args.input else live_dependencies(config)
+    errors = validate_slice(issue, issues, config, loader, dependencies)
     if errors:
         for error in errors:
             print(f"BLOCKED: {error}")
@@ -1040,7 +1280,8 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
         # Everything labeled ready goes through admission, so a ready issue
         # that is not a slice is reported below rather than silently dropped.
         errors = validate_slice(
-            issue, issues, config, lambda number: fetch_gate_records(number, config), mode="start",
+            issue, issues, config, lambda number: fetch_gate_records(number, config),
+            live_dependencies(config), mode="start",
         )
         if not errors:
             candidates.append(issue)
@@ -1080,7 +1321,7 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     continuing = args.resume and remote.returncode == 0
     errors = validate_slice(
         issue, issues, config, lambda number: fetch_gate_records(number, config),
-        mode="continue" if continuing else "start",
+        live_dependencies(config), mode="continue" if continuing else "start",
     )
     if errors:
         for error in errors:
@@ -1186,6 +1427,7 @@ class GateInputs(NamedTuple):
     issue: dict[str, Any] | None
     head_message: str
     parent: ParentGate
+    prerequisites: tuple[str, ...]
 
 
 def load_parent_gate(issue: dict[str, Any] | None, config: dict[str, Any]) -> ParentGate:
@@ -1208,7 +1450,13 @@ def load_gate_inputs(pr_number: int, config: dict[str, Any]) -> GateInputs:
     # The head commit carries the implementing agent's identity in a trailer.
     # Fetched here so `evaluate_merge_gate` stays a pure function of its inputs.
     head_message = fetch_commit_message(pr["headRefOid"], config) if pr.get("headRefOid") else ""
-    return GateInputs(pr, comments, issue, head_message, load_parent_gate(issue, config))
+    # Reloaded live like the parent: a prerequisite reopened after the claim
+    # must stop the merge.
+    prerequisites = (
+        tuple(prerequisite_errors(int(issue["number"]), live_dependencies(config), config))
+        if issue else ()
+    )
+    return GateInputs(pr, comments, issue, head_message, load_parent_gate(issue, config), prerequisites)
 
 
 class MergeEligibility(NamedTuple):
@@ -1217,8 +1465,10 @@ class MergeEligibility(NamedTuple):
 
 
 def merge_eligibility(pr_number: int, config: dict[str, Any]) -> MergeEligibility:
-    pr, comments, issue, head_message, parent = load_gate_inputs(pr_number, config)
-    errors = evaluate_merge_gate(pr, comments, issue, config, head_message, parent=parent)
+    pr, comments, issue, head_message, parent, prerequisites = load_gate_inputs(pr_number, config)
+    errors = evaluate_merge_gate(
+        pr, comments, issue, config, head_message, parent=parent, prerequisites=prerequisites,
+    )
     head = pr.get("headRefOid") or ""
     if not re.fullmatch(r"[0-9a-f]{40}", head):
         errors.append("evaluated candidate is not a full commit SHA")

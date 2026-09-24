@@ -13,10 +13,33 @@ sdlc = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
 SPEC.loader.exec_module(sdlc)
 
+# The live GitHub readers, captured before any test patches them, so a test
+# can drive the real reader against a mocked `run_json`.
+REAL_READERS = {
+    name: getattr(sdlc, name) for name in ("fetch_blocked_by", "fetch_prerequisite", "fetch_pull_merge")
+}
+
 
 class SdlcTests(unittest.TestCase):
     def setUp(self):
         self.config = sdlc.load_config(ROOT / ".sdlc" / "config.json")
+        # No test may reach GitHub. A reader a test forgot to patch fails
+        # loudly instead of reading this repository's real issues.
+        guard = patch.object(sdlc, "run_json", side_effect=AssertionError("unpatched GitHub read"))
+        guard.start()
+        self.addCleanup(guard.stop)
+        # The native dependency graph every command reads, live or bundled.
+        # By default the slice has no prerequisites. A value that is an
+        # exception is raised, as an unreadable GitHub answer would be.
+        self.graph = {"blocked_by": {11: []}, "issues": {}, "pulls": {}}
+        for name, key in (
+            ("fetch_blocked_by", "blocked_by"),
+            ("fetch_prerequisite", "issues"),
+            ("fetch_pull_merge", "pulls"),
+        ):
+            reader = patch.object(sdlc, name, side_effect=lambda n, _config, key=key: self._graph_read(key, n))
+            reader.start()
+            self.addCleanup(reader.stop)
         self.epic = {
             "number": 10, "title": "Epic: Visible delivery", "state": "OPEN",
             "body": "## Child issues\n- [ ] #11\n", "labels": [],
@@ -48,27 +71,87 @@ Read one file.
     # A gate-record loader that read the epic's comments and found no records.
     READ_OK = staticmethod(lambda _number: [])
 
+    @staticmethod
+    def _unreachable(number):
+        raise AssertionError(f"no prerequisite exists, yet #{number} was read")
+
+    # A dependency source that read the slice's blockers and found none.
+    NO_BLOCKERS = sdlc.DependencySource(lambda _number: [], _unreachable, _unreachable)
+
+    def _graph_read(self, key, number):
+        if number not in self.graph[key]:
+            raise sdlc.SdlcError(f"HTTP 404: no {key} for #{number}")
+        value = self.graph[key][number]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def _graph_source(self):
+        return sdlc.DependencySource(*(
+            (lambda n, key=key: self._graph_read(key, n)) for key in ("blocked_by", "issues", "pulls")
+        ))
+
+    def _graph_bundle(self):
+        """The graph as an offline bundle's keys; unreadable entries are absent."""
+        return {
+            "dependencies": {
+                str(n): v for n, v in self.graph["blocked_by"].items() if not isinstance(v, Exception)
+            },
+            "pull_requests": {str(n): v for n, v in self.graph["pulls"].items()},
+            "prerequisites": list(self.graph["issues"].values()),
+        }
+
+    REPO_API = "https://api.github.com/repos/jeromebanks/cubism-rs"
+
+    def _blocker(self, number, repo_api=None):
+        # One entry of the REST blocked_by list (see the #98 probe).
+        return {"number": number, "repository_url": repo_api or self.REPO_API,
+                "html_url": f"https://github.com/jeromebanks/cubism-rs/issues/{number}",
+                "state": "closed", "state_reason": "completed", "id": 900000 + number}
+
+    def _prerequisite(self, number, state="CLOSED", reason="COMPLETED", prs=(), blocked_by=()):
+        self.graph["issues"][number] = {
+            "number": number, "state": state, "stateReason": reason,
+            "closedByPullRequestsReferences": [
+                {"number": pr, "repository": {"name": "cubism-rs", "owner": {"login": "jeromebanks"}}}
+                for pr in prs
+            ],
+        }
+        self.graph["blocked_by"][number] = [self._blocker(n) for n in blocked_by]
+
+    def _pull(self, number, state="MERGED", base="main", oid="e" * 40):
+        self.graph["pulls"][number] = {
+            "number": number, "state": state, "baseRefName": base, "mergeCommit": {"oid": oid} if oid else None,
+        }
+
+    def _blocked_by(self, *numbers):
+        self.graph["blocked_by"][11] = [self._blocker(n) for n in numbers]
+
+    def _prerequisite_errors(self):
+        return sdlc.prerequisite_errors(11, self._graph_source(), self.config)
+
     def _open_parent(self):
         # The parent as `load_gate_inputs` reloads it: an ungated epic whose
         # gate records were read successfully.
         return sdlc.ParentGate(10, self.epic, [])
 
     def _evaluate(self, *args, parent=None, **kwargs):
+        kwargs.setdefault("prerequisites", ())
         return sdlc.evaluate_merge_gate(
             *args, parent=self._open_parent() if parent is None else parent, **kwargs,
         )
 
     def test_slice_contract_accepts_one_session_issue(self):
         issues = {10: self.epic, 11: self.slice}
-        self.assertEqual([], sdlc.validate_slice(self.slice, issues, self.config, self.READ_OK))
+        self.assertEqual([], sdlc.validate_slice(self.slice, issues, self.config, self.READ_OK, self.NO_BLOCKERS))
 
     def test_issue_form_level_three_headings_are_accepted(self):
         self.slice["body"] = self.slice["body"].replace("## ", "### ")
-        self.assertEqual([], sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK))
+        self.assertEqual([], sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK, self.NO_BLOCKERS))
 
     def test_human_gate_blocks_normal_slice(self):
         self.epic["labels"] = [{"name": "gate:human-review"}]
-        errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK)
+        errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK, self.NO_BLOCKERS)
         self.assertIn(
             "parent epic #10 is paused for human review; no slice, including feedback, may proceed",
             errors,
@@ -350,7 +433,7 @@ Read one file.
             {"sha": "c" * 40}, {"sha": self.CANDIDATE},
         ]}
 
-    def _merge_attempt(self, *, response=None, reads=None, apply=True, head=None, parent=None):
+    def _merge_attempt(self, *, response=None, reads=None, apply=True, head=None, parent=None, prerequisites=()):
         import argparse
         import contextlib
         import io
@@ -378,7 +461,7 @@ Read one file.
         out = io.StringIO()
         with patch.object(sdlc, "load_gate_inputs", return_value=sdlc.GateInputs(
             pr, [self._receipt("fresh-codex", head=head)], self.slice, self.HEAD_COMMIT,
-            self._open_parent() if parent is None else parent,
+            self._open_parent() if parent is None else parent, prerequisites,
         )) as inputs, patch.object(sdlc, "run_text", side_effect=submit), \
                 patch.object(sdlc, "run_json", side_effect=read), contextlib.redirect_stdout(out):
             code = sdlc.command_merge(argparse.Namespace(pr=99, apply=apply), self.config)
@@ -488,7 +571,7 @@ Read one file.
         sdlc.load_gate_inputs = lambda number, config: sdlc.GateInputs(
             self._passing_pr(head=self.CANDIDATE, author=self.ONE_ACCOUNT),
             [self._receipt(self.ONE_ACCOUNT, head=self.CANDIDATE, reviewer=self.IMPLEMENTED_BY)],
-            self.slice, self.HEAD_COMMIT, self._open_parent())
+            self.slice, self.HEAD_COMMIT, self._open_parent(), ())
         sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
         try:
             import argparse
@@ -711,10 +794,10 @@ Read one file.
     def _admission(self, records):
         """Gate errors from readiness and from merge, which must agree."""
         issues = {10: self.epic, 11: self.slice}
-        ready = [e for e in sdlc.validate_slice(self.slice, issues, self.config, lambda n: records)]
+        ready = [e for e in sdlc.validate_slice(self.slice, issues, self.config, lambda n: records, self.NO_BLOCKERS)]
         merge = sdlc.evaluate_merge_gate(
             self._passing_pr(), [self._receipt("fresh-codex")], self.slice, self.config,
-            parent=sdlc.ParentGate(10, self.epic, records),
+            parent=sdlc.ParentGate(10, self.epic, records), prerequisites=(),
         )
         return ready, merge
 
@@ -778,7 +861,7 @@ Read one file.
 
     def test_ordinary_slice_pauses_during_changes_requested(self):
         self.epic["labels"] = [{"name": "gate:changes-requested"}]
-        errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK)
+        errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK, self.NO_BLOCKERS)
         self.assertTrue(any("only `type:feedback` slices may proceed" in e for e in errors), errors)
 
     def test_feedback_citing_another_epic_or_repository_is_refused(self):
@@ -935,9 +1018,11 @@ Read one file.
         import contextlib
         import io
         for bundle, expected in (
-            ({"gate_comments": {"10": []}}, 0),
-            ({}, 1),
-            ({"gate_comments": {"38": []}}, 1),
+            ({"gate_comments": {"10": []}, "dependencies": {"11": []}}, 0),
+            ({"dependencies": {"11": []}}, 1),
+            ({"gate_comments": {"38": []}, "dependencies": {"11": []}}, 1),
+            # Complete gate records but no dependency data: unknown, so blocked.
+            ({"gate_comments": {"10": []}}, 1),
         ):
             with self.subTest(bundle=bundle):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -982,7 +1067,7 @@ Read one file.
 
     def test_pause_after_claim_blocks_the_merge(self):
         issues = {10: self.epic, 11: self.slice}
-        self.assertEqual([], sdlc.validate_slice(self.slice, issues, self.config, lambda n: []))
+        self.assertEqual([], sdlc.validate_slice(self.slice, issues, self.config, lambda n: [], self.NO_BLOCKERS))
         # A checkpoint pause is recorded after the claim and before merge.
         paused = dict(self.epic, labels=[{"name": "gate:human-review"}])
         code, events, output = self._merge_attempt(parent=sdlc.ParentGate(10, paused, []))
@@ -1236,12 +1321,21 @@ Read one file.
             body=self.slice["body"].replace("Parent epic: #10\n", "")),
         "two parents": lambda self: self.slice.update(body=self.slice["body"] + "Part of #12\n"),
         "parent paused": lambda self: self.epic.update(labels=[{"name": "gate:human-review"}]),
+        # Native prerequisites (R3b): only a verified completion admits.
+        "prereq satisfied": lambda self: (
+            self._blocked_by(5), self._prerequisite(5, prs=[7]), self._pull(7)),
+        "prereq open": lambda self: (self._blocked_by(5), self._prerequisite(5, state="OPEN", reason=None)),
+        "prereq not planned": lambda self: (self._blocked_by(5), self._prerequisite(5, reason="NOT_PLANNED")),
+        "prereq without merged PR": lambda self: (
+            self._blocked_by(5), self._prerequisite(5, prs=[7]), self._pull(7, state="CLOSED", oid=None)),
+        "prereqs unreadable": lambda self: self.graph["blocked_by"].update(
+            {11: sdlc.SdlcError("HTTP 403: Resource not accessible")}),
     }
     # Which states each mode admits; every other state must be refused.
     ADMITTED = {
-        "check": {"ready", "in-progress", "in-review", "ready feedback"},
-        "start": {"ready", "ready feedback"},
-        "continue": {"ready", "in-progress", "in-review", "ready feedback", "missing section"},
+        "check": {"ready", "in-progress", "in-review", "ready feedback", "prereq satisfied"},
+        "start": {"ready", "ready feedback", "prereq satisfied"},
+        "continue": {"ready", "in-progress", "in-review", "ready feedback", "missing section", "prereq satisfied"},
     }
 
     class _Admitted(Exception):
@@ -1257,8 +1351,13 @@ Read one file.
             parent = sdlc.load_parent_from(self.slice, issues, self.config, self.READ_OK)
             return self._evaluate(
                 self._passing_pr(), [self._receipt("fresh-codex")], self.slice, self.config, parent=parent,
+                prerequisites=self._prerequisite_errors(),
             ) == []
-        data = {"issues": [self.epic, self.slice], "pulls": [], "gate_comments": {"10": []}}
+        graph = self._graph_bundle()
+        data = {
+            "issues": [self.epic, self.slice, *graph.pop("prerequisites")], "pulls": [],
+            "gate_comments": {"10": []}, **graph,
+        }
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             if command == "check-slice":
@@ -1306,7 +1405,8 @@ Read one file.
                     self.assertEqual(expected, self._command_admits(command))
                     # The command's verdict is the shared predicate's verdict.
                     errors = sdlc.validate_slice(
-                        self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK, mode=mode)
+                        self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK,
+                        self._graph_source(), mode=mode)
                     self.assertEqual(expected, errors == [], errors)
 
     def test_resume_without_an_existing_claim_starts_new_work(self):
@@ -1396,7 +1496,7 @@ Read one file.
         for mode in sdlc.ADMISSION_MODES:
             with self.subTest(mode=mode):
                 errors = sdlc.validate_slice(
-                    self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK, mode=mode)
+                    self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK, self.NO_BLOCKERS, mode=mode)
                 self.assertTrue(any("`status:blocked`" in error for error in errors), errors)
 
     def test_closed_or_blocked_linked_issue_blocks_merge(self):
@@ -1418,9 +1518,290 @@ Read one file.
         self.assertIn("SKIPPED: issue #11", err.getvalue())
         self.assertIn("`status:blocked`", err.getvalue())
 
+    # --- native prerequisites (R3b) ---
+
+    def test_prerequisite_completion_matrix(self):
+        cases = {
+            "satisfied": (lambda: (self._prerequisite(5, prs=[7]), self._pull(7)), None),
+            "open": (lambda: self._prerequisite(5, state="OPEN", reason=None), "blocked by #5, which is still open"),
+            "reopened": (lambda: self._prerequisite(5, state="OPEN", reason="REOPENED", prs=[7]),
+                         "blocked by #5, which is still open"),
+            "not planned": (lambda: self._prerequisite(5, reason="NOT_PLANNED", prs=[7]), "closed as NOT_PLANNED"),
+            "duplicate": (lambda: self._prerequisite(5, reason="DUPLICATE"), "closed as DUPLICATE"),
+            "hand-closed, no PR": (lambda: self._prerequisite(5),
+                                   "no closing pull request is verified merged into `main`"),
+            "closing PR unmerged": (lambda: (self._prerequisite(5, prs=[7]), self._pull(7, state="OPEN", oid=None)),
+                                    "PR #7 is OPEN into `main`"),
+            "closing PR closed unmerged": (
+                lambda: (self._prerequisite(5, prs=[7]), self._pull(7, state="CLOSED", oid=None)),
+                "PR #7 is CLOSED into `main`"),
+            "merged into another base": (
+                lambda: (self._prerequisite(5, prs=[7]), self._pull(7, base="release")),
+                "PR #7 is MERGED into `release`"),
+            "merged without a full SHA": (
+                lambda: (self._prerequisite(5, prs=[7]), self._pull(7, oid="abc")),
+                "PR #7 is MERGED into `main`"),
+            "closing PR unreadable": (
+                lambda: (self._prerequisite(5, prs=[7]), self.graph["pulls"].update({7: sdlc.SdlcError("HTTP 502")})),
+                "PR #7 could not be read (HTTP 502)"),
+            "one of two PRs merged": (
+                lambda: (self._prerequisite(5, prs=[6, 7]), self._pull(6, state="CLOSED", oid=None), self._pull(7)),
+                None),
+            "missing prerequisite": (lambda: None, "blocked by #5, which could not be read (HTTP 404"),
+            "prerequisite forbidden": (
+                lambda: self.graph["issues"].update({5: sdlc.SdlcError("HTTP 403: Resource not accessible")}),
+                "blocked by #5, which could not be read (HTTP 403"),
+        }
+        for name, (prepare, expected) in cases.items():
+            with self.subTest(case=name):
+                self.setUp()
+                self._blocked_by(5)
+                prepare()
+                errors = self._prerequisite_errors()
+                if expected is None:
+                    self.assertEqual([], errors)
+                else:
+                    self.assertTrue(any(expected in error for error in errors), errors)
+
+    def test_verification_only_prerequisite_names_the_missing_evidence(self):
+        self._blocked_by(5)
+        self._prerequisite(5)
+        [error] = self._prerequisite_errors()
+        self.assertIn("closed COMPLETED, but no closing pull request is verified merged", error)
+        self.assertIn("verification-only prerequisite needs explicit completion evidence", error)
+
+    def test_closing_pr_in_another_repository_does_not_count(self):
+        self._blocked_by(5)
+        self._prerequisite(5)
+        self.graph["issues"][5]["closedByPullRequestsReferences"] = [
+            {"number": 7, "repository": {"name": "fork", "owner": {"login": "someone"}}}]
+        self._pull(7)  # Same number here, but it is not the PR that closed #5.
+        [error] = self._prerequisite_errors()
+        self.assertIn("someone/fork#7 is outside jeromebanks/cubism-rs", error)
+
+    def test_unreadable_closing_references_are_unknown(self):
+        self._blocked_by(5)
+        self._prerequisite(5, prs=[7])
+        del self.graph["issues"][5]["closedByPullRequestsReferences"]
+        [error] = self._prerequisite_errors()
+        self.assertIn("closing pull requests could not be read", error)
+
+    def test_every_blocker_must_be_complete(self):
+        self._blocked_by(5, 6)
+        self._prerequisite(5, prs=[7])
+        self._pull(7)
+        self._prerequisite(6, state="OPEN", reason=None)
+        self.assertEqual(["blocked by #6, which is still open"], self._prerequisite_errors())
+
+    def test_blocker_in_another_repository_fails_closed(self):
+        self.graph["blocked_by"][11] = [self._blocker(5, "https://api.github.com/repos/other/repo")]
+        [error] = self._prerequisite_errors()
+        self.assertIn("#11 is blocked by", error)
+        self.assertIn("outside jeromebanks/cubism-rs; its completion cannot be verified", error)
+
+    def test_cycles_are_reported_with_their_path(self):
+        # 11 <- 5 <- 6 <- 5: the cycle is upstream of the slice.
+        self._blocked_by(5)
+        self._prerequisite(5, prs=[7], blocked_by=[6])
+        self._prerequisite(6, prs=[8], blocked_by=[5])
+        self._pull(7)
+        self._pull(8)
+        self.assertEqual(
+            ["dependency cycle: #5 → #6 → #5 (each is blocked by the next); remove one link"],
+            self._prerequisite_errors())
+        # A cycle through the slice itself names it.
+        self.setUp()
+        self._blocked_by(5)
+        self._prerequisite(5, state="OPEN", reason=None, blocked_by=[11])
+        errors = self._prerequisite_errors()
+        self.assertIn("dependency cycle: #5 → #11 → #5 (each is blocked by the next); remove one link", errors)
+        # A self-loop is a cycle too.
+        self.setUp()
+        self._blocked_by(11)
+        self.assertTrue(any(e.startswith("dependency cycle: #11 → #11") for e in self._prerequisite_errors()))
+
+    def test_a_diamond_is_not_a_cycle(self):
+        self._blocked_by(5, 6)
+        self._prerequisite(5, prs=[7], blocked_by=[4])
+        self._prerequisite(6, prs=[7], blocked_by=[4])
+        self._prerequisite(4, prs=[7])
+        self._pull(7)
+        self.assertEqual([], self._prerequisite_errors())
+
+    def test_unreadable_upstream_links_block(self):
+        # Only #11's direct prerequisite need be complete, but the graph above
+        # it must be readable, or a cycle through it could hide.
+        self._blocked_by(5)
+        self._prerequisite(5, prs=[7])
+        self._pull(7)
+        self.graph["blocked_by"][5] = sdlc.SdlcError("HTTP 502 on page 2")
+        [error] = self._prerequisite_errors()
+        self.assertIn("prerequisites of #5 could not be read completely (HTTP 502 on page 2)", error)
+
+    def test_no_dependency_source_blocks(self):
+        errors = sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK)
+        self.assertTrue(any("prerequisites of #11 could not be read completely" in e for e in errors), errors)
+
+    def test_admission_requires_prerequisites_explicitly(self):
+        with self.assertRaises(TypeError):
+            sdlc.admission_errors(self.slice, self._open_parent(), self.config, mode="check")
+        with self.assertRaises(TypeError):
+            sdlc.evaluate_merge_gate(
+                self._passing_pr(), [self._receipt("fresh-codex")], self.slice, self.config,
+                parent=self._open_parent())
+
+    # The literal `gh api --paginate --slurp` output for codexsit#111 at
+    # per_page=1, trimmed to the fields admission reads: one list per page.
+    SLURPED_PAGES = [
+        [{"number": 110, "state": "open", "state_reason": None,
+          "repository_url": "https://api.github.com/repos/codexsit/codexsit.github.io"}],
+        [{"number": 114, "state": "open", "state_reason": None,
+          "repository_url": "https://api.github.com/repos/codexsit/codexsit.github.io"}],
+    ]
+
+    def test_blocked_by_reads_every_page(self):
+        calls = []
+        real = REAL_READERS["fetch_blocked_by"]
+        with patch.object(sdlc, "run_json", side_effect=lambda c: calls.append(c) or self.SLURPED_PAGES):
+            blockers = real(111, self.config)
+        self.assertEqual([110, 114], [b["number"] for b in blockers])
+        self.assertIn("--paginate", calls[-1])
+        self.assertIn("--slurp", calls[-1])
+        self.assertTrue(calls[-1][-1].endswith("/issues/111/dependencies/blocked_by?per_page=100"))
+        with patch.object(sdlc, "run_json", return_value=[[]]):
+            self.assertEqual([], real(98, self.config))
+
+    def test_malformed_or_failed_pages_fail_closed(self):
+        real = REAL_READERS["fetch_blocked_by"]
+        for response in (
+            sdlc.SdlcError("gh api: HTTP 502 (page 2)"),
+            sdlc.SdlcError("gh: Not Found (HTTP 404)"),
+            {"message": "Not Found"},
+            [[{"number": 110}], {"message": "rate limited"}],
+            [[{"number": 110}], ["not an issue"]],
+        ):
+            with self.subTest(response=response):
+                kwargs = {"side_effect": response} if isinstance(response, Exception) else {"return_value": response}
+                with patch.object(sdlc, "run_json", **kwargs), \
+                        patch.object(sdlc, "fetch_blocked_by", side_effect=real):
+                    errors = sdlc.prerequisite_errors(11, sdlc.live_dependencies(self.config), self.config)
+                self.assertEqual(1, len(errors), errors)
+                self.assertIn("prerequisites of #11 could not be read completely", errors[0])
+
+    def test_live_prerequisite_reads_use_the_probed_fields(self):
+        commands = []
+        responses = iter([
+            {"number": 5, "state": "CLOSED", "stateReason": "COMPLETED", "closedByPullRequestsReferences": [
+                {"number": 7, "repository": {"name": "cubism-rs", "owner": {"login": "jeromebanks"}}}]},
+            {"number": 7, "state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": "e" * 40}},
+        ])
+        with patch.object(sdlc, "fetch_prerequisite", new=REAL_READERS["fetch_prerequisite"]), \
+                patch.object(sdlc, "fetch_pull_merge", new=REAL_READERS["fetch_pull_merge"]), \
+                patch.object(sdlc, "run_json", side_effect=lambda c: commands.append(c) or next(responses)):
+            self.assertIsNone(sdlc.completion_error(5, sdlc.live_dependencies(self.config), self.config))
+        self.assertIn("stateReason", commands[0][-1])
+        self.assertIn("closedByPullRequestsReferences", commands[0][-1])
+        self.assertEqual(["gh", "pr", "view", "7"], commands[1][:4])
+        self.assertIn("mergeCommit", commands[1][-1])
+
+    def test_offline_bundle_must_supply_dependency_data(self):
+        import argparse
+        import contextlib
+        import io
+
+        def check(bundle):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "bundle.json"
+                path.write_text(json.dumps(bundle))
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = sdlc.command_check_slice(argparse.Namespace(issue=11, input=path), self.config)
+            return code, out.getvalue()
+
+        prerequisite = {
+            "number": 5, "state": "CLOSED", "stateReason": "COMPLETED",
+            "closedByPullRequestsReferences": [
+                {"number": 7, "repository": {"name": "cubism-rs", "owner": {"login": "jeromebanks"}}}],
+        }
+        merged = {"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": "e" * 40}}
+        base = {"issues": [self.epic, self.slice, prerequisite], "pulls": [], "gate_comments": {"10": []},
+                "dependencies": {"11": [self._blocker(5)], "5": []}}
+        self.assertEqual(0, check(dict(base, pull_requests={"7": merged}))[0])
+        # The demo: a prerequisite closed by hand does not count.
+        code, output = check(dict(base, pull_requests={"7": dict(merged, state="CLOSED", mergeCommit=None)}))
+        self.assertEqual(1, code)
+        self.assertIn("BLOCKED: blocked by #5: closed COMPLETED, but no closing pull request is verified merged", output)
+        code, output = check(dict(base))
+        self.assertEqual(1, code)
+        self.assertIn("no `pull_requests` entry for pull request #7", output)
+        code, output = check(dict(base, dependencies={"11": [self._blocker(5)]}, pull_requests={"7": merged}))
+        self.assertEqual(1, code)
+        self.assertIn("no `dependencies` entry for issue #5", output)
+        without_reason = {k: v for k, v in prerequisite.items() if k != "stateReason"}
+        code, output = check(dict(base, issues=[self.epic, self.slice, without_reason], pull_requests={"7": merged}))
+        self.assertEqual(1, code)
+        self.assertIn("no prerequisite record with `stateReason` for #5", output)
+
+    def test_prerequisite_reopened_after_claim_blocks_the_real_merge(self):
+        # Drive the real `load_gate_inputs` wiring, patching only GitHub reads.
+        import argparse
+        import contextlib
+        import io
+        pr = dict(self._passing_pr(head=self.CANDIDATE), number=99, headRefName="issue/11")
+        issues = {10: self.epic, 11: self.slice}
+        comments = {99: [self._receipt("fresh-codex", head=self.CANDIDATE)], 10: []}
+        self._blocked_by(5)
+        self._prerequisite(5, prs=[7])
+        self._pull(7)
+        self.assertEqual([], self._prerequisite_errors(), "admitted at claim time")
+        # Reopened after the claim.
+        self.graph["issues"][5].update(state="OPEN", stateReason="REOPENED")
+        writes = []
+        out = io.StringIO()
+        with patch.object(sdlc, "fetch_pr", return_value=pr), \
+                patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
+                patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
+                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT), \
+                patch.object(sdlc, "run_text", side_effect=lambda command, **k: writes.append(command) or ""), \
+                contextlib.redirect_stdout(out):
+            code = sdlc.command_merge(argparse.Namespace(pr=99, apply=True), self.config)
+        self.assertEqual(1, code)
+        self.assertEqual([], writes)
+        self.assertIn("BLOCKED: blocked by #5, which is still open", out.getvalue())
+        # And the same wiring admits it once #5 is complete again.
+        self.graph["issues"][5].update(state="CLOSED", stateReason="COMPLETED")
+        with patch.object(sdlc, "fetch_pr", return_value=pr), \
+                patch.object(sdlc, "fetch_issue", side_effect=lambda n, c: issues[n]), \
+                patch.object(sdlc, "fetch_comments", side_effect=lambda n, c: comments[n]), \
+                patch.object(sdlc, "fetch_commit_message", return_value=self.HEAD_COMMIT):
+            self.assertEqual((), sdlc.merge_eligibility(99, self.config).errors)
+
+    def test_next_and_claim_explain_an_unmet_prerequisite(self):
+        import argparse
+        import contextlib
+        import io
+        self._blocked_by(5)
+        self._prerequisite(5, reason="NOT_PLANNED")
+        data = {"issues": [self.epic, self.slice], "pulls": []}
+        err, out = io.StringIO(), io.StringIO()
+        with patch.object(sdlc, "fetch_status_data", return_value=data), \
+                patch.object(sdlc, "fetch_comments", return_value=[]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(1, sdlc.command_next(None, self.config))
+        self.assertIn("SKIPPED: issue #11: blocked by #5, closed as NOT_PLANNED", err.getvalue())
+        out = io.StringIO()
+        with patch.object(sdlc, "fetch_status_data", return_value=data), \
+                patch.object(sdlc, "fetch_comments", return_value=[]), \
+                patch.object(sdlc, "run_process", return_value=subprocess.CompletedProcess([], 2, "", "")), \
+                patch.object(sdlc, "run_text", side_effect=self._Admitted), \
+                patch.object(sdlc, "create_remote_ref", side_effect=self._Admitted), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(1, sdlc.command_claim(argparse.Namespace(issue=11, resume=False), self.config))
+        self.assertIn("BLOCKED: blocked by #5, closed as NOT_PLANNED", out.getvalue())
+
     def test_unknown_admission_mode_is_a_programming_error(self):
         with self.assertRaises(ValueError):
-            sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK, mode="merge")
+            sdlc.validate_slice(self.slice, {10: self.epic, 11: self.slice}, self.config, self.READ_OK, self.NO_BLOCKERS, mode="merge")
 
     def test_status_maps_epic_children_and_renders_html(self):
         data = {
