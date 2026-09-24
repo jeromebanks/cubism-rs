@@ -1271,18 +1271,19 @@ Read one file.
                 if command == "next":
                     sdlc.command_next(None, self.config)
                     return "NEXT=11" in out.getvalue()
-                # Claim's first effect after admission is inspecting the remote
-                # claim ref; reaching it means the issue was admitted. A resume
-                # first probes that ref, and continues only if it exists.
+                # Claim probes the remote claim ref once, before admission: a
+                # resume continues only if it exists. Any git effect after that
+                # probe means the issue was admitted.
                 resume = command.startswith("claim --resume")
-                probes = [0 if command == "claim --resume" else 2] if resume else []
+                probes = [0 if command == "claim --resume" else 2]
 
                 def run_process(args, **kwargs):
                     if probes:
                         return subprocess.CompletedProcess(args, probes.pop(), "", "")
                     raise self._Admitted
 
-                with patch.object(sdlc, "run_process", side_effect=run_process):
+                with patch.object(sdlc, "run_process", side_effect=run_process), \
+                        patch.object(sdlc, "run_text", side_effect=self._Admitted):
                     try:
                         code = sdlc.command_claim(argparse.Namespace(issue=11, resume=resume), self.config)
                     except self._Admitted:
@@ -1317,6 +1318,67 @@ Read one file.
                 self.ADMISSION_STATES[state](self)
                 self.assertEqual(
                     state in self.ADMITTED["start"], self._command_admits("claim --resume (unclaimed)"))
+
+    def test_claim_fails_closed_when_the_claim_probe_fails(self):
+        import argparse
+        import contextlib
+        import io
+        data = {"issues": [self.epic, self.slice], "pulls": []}
+        for resume in (False, True):
+            with self.subTest(resume=resume):
+                effects = []
+
+                def run_process(args, **kwargs):
+                    effects.append(args)
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: could not read from remote")
+
+                with patch.object(sdlc, "fetch_status_data", return_value=data), \
+                        patch.object(sdlc, "fetch_comments", return_value=[]), \
+                        patch.object(sdlc, "run_process", side_effect=run_process), \
+                        patch.object(sdlc, "run_text", side_effect=self._Admitted), \
+                        patch.object(sdlc, "create_remote_ref", side_effect=self._Admitted), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaisesRegex(sdlc.SdlcError, "could not read from remote"):
+                        sdlc.command_claim(argparse.Namespace(issue=11, resume=resume), self.config)
+                self.assertEqual(1, len(effects), "a failed probe must not be retried or acted on")
+
+    def test_resume_acts_on_the_probe_it_was_admitted_by(self):
+        # Admitted in continue mode because the claim existed, a resume must
+        # never then create a claim, even if the branch vanished meanwhile.
+        import argparse
+        import contextlib
+        import io
+        self._set_labels("type:slice", "in-progress")
+        data = {"issues": [self.epic, self.slice], "pulls": []}
+        calls = []
+
+        def run_process(args, **kwargs):
+            calls.append(args)
+            # The first probe sees the claim; any later probe would not.
+            return subprocess.CompletedProcess(args, 0 if len(calls) == 1 else 2, "", "")
+
+        with patch.object(sdlc, "fetch_status_data", return_value=data), \
+                patch.object(sdlc, "fetch_comments", return_value=[]), \
+                patch.object(sdlc, "run_process", side_effect=run_process), \
+                patch.object(sdlc, "run_text", return_value=""), \
+                patch.object(sdlc, "create_remote_ref", side_effect=AssertionError("resume created a claim")), \
+                patch.object(sdlc.Path, "exists", return_value=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, sdlc.command_claim(argparse.Namespace(issue=11, resume=True), self.config))
+        probes = [call for call in calls if call[:2] == ["git", "ls-remote"]]
+        self.assertEqual(1, len(probes))
+
+    def test_next_says_why_it_skips_any_ready_slice(self):
+        import contextlib
+        import io
+        self._set_labels("type:slice", "status:ready", "needs-slicing")
+        err = io.StringIO()
+        with patch.object(sdlc, "fetch_status_data", return_value={"issues": [self.epic, self.slice], "pulls": []}), \
+                patch.object(sdlc, "fetch_comments", return_value=[]), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(1, sdlc.command_next(None, self.config))
+        self.assertIn("SKIPPED: issue #11", err.getvalue())
+        self.assertIn("`needs-slicing`", err.getvalue())
 
     def test_blocked_slice_is_refused_with_its_cause(self):
         self._set_labels("type:slice", "status:ready", "status:blocked")

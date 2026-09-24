@@ -1045,16 +1045,10 @@ def command_next(args: argparse.Namespace, config: dict[str, Any]) -> int:
         if not errors:
             candidates.append(issue)
         else:
-            # A ready slice held back by an inconsistent or unknown gate, or
-            # by a contradictory blocked label, needs a human-visible reason,
-            # not just an empty queue.
+            # A slice labeled ready but refused is inconsistent state; say
+            # why, rather than leaving only an empty queue.
             for error in errors:
-                if (
-                    "conflicting gate labels" in error
-                    or "human gate is unknown" in error
-                    or f"`{labels['blocked']}`" in error
-                ):
-                    print(f"SKIPPED: issue #{number}: {error}", file=sys.stderr)
+                print(f"SKIPPED: issue #{number}: {error}", file=sys.stderr)
     if not candidates:
         print("NONE: no executable status:ready slice is available")
         return 1
@@ -1074,16 +1068,16 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
         raise SdlcError(f"issue #{args.issue} was not found")
     branch = f"issue/{args.issue}"
     remote_ref = f"refs/heads/{branch}"
-    # A fresh claim starts work and needs `status:ready`. `--resume` continues
-    # an attempt that already owns the claim and has moved past that label,
-    # but only when that claim exists: resuming nothing would start new work
-    # under the looser rule.
-    continuing = False
-    if args.resume:
-        probe = run_process(["git", "ls-remote", "--exit-code", "--heads", "origin", remote_ref], check=False)
-        if probe.returncode not in {0, 2}:
-            raise SdlcError(probe.stderr.strip() or "could not inspect remote claim branch")
-        continuing = probe.returncode == 0
+    # One probe of the remote claim decides both the admission mode and the
+    # effect. A fresh claim starts work and needs `status:ready`. `--resume`
+    # continues an attempt that already owns the claim and has moved past
+    # that label, but only when that claim exists: resuming nothing would
+    # start new work under the looser rule. Acting on the same probe means a
+    # claim deleted after it is never recreated under continue-mode admission.
+    remote = run_process(["git", "ls-remote", "--exit-code", "--heads", "origin", remote_ref], check=False)
+    if remote.returncode not in {0, 2}:
+        raise SdlcError(remote.stderr.strip() or "could not inspect remote claim branch")
+    continuing = args.resume and remote.returncode == 0
     errors = validate_slice(
         issue, issues, config, lambda number: fetch_gate_records(number, config),
         mode="continue" if continuing else "start",
@@ -1096,13 +1090,9 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
         if args.issue in linked_issue_numbers(pr):
             print(f"BLOCKED: issue #{args.issue} already has open PR #{pr['number']}")
             return 1
-
-    remote = run_process(["git", "ls-remote", "--exit-code", "--heads", "origin", remote_ref], check=False)
     if remote.returncode == 0 and not args.resume:
         print(f"BLOCKED: remote branch `{branch}` already claims issue #{args.issue}; use --resume only for an abandoned session")
         return 1
-    if remote.returncode not in {0, 2}:
-        raise SdlcError(remote.stderr.strip() or "could not inspect remote claim branch")
 
     run_text(["git", "fetch", "origin", config["default_branch"]])
     if remote.returncode == 2:
