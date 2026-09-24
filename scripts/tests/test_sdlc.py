@@ -1544,6 +1544,15 @@ Read one file.
             "closing PR unreadable": (
                 lambda: (self._prerequisite(5, prs=[7]), self.graph["pulls"].update({7: sdlc.SdlcError("HTTP 502")})),
                 "PR #7 could not be read (HTTP 502)"),
+            # R3b-1: an unreadable reference is unknown even beside a merged
+            # one, in either order, live or bundled.
+            "unreadable PR beside a merged one": (
+                lambda: (self._prerequisite(5, prs=[6, 7]), self._pull(7),
+                         self.graph["pulls"].update({6: sdlc.SdlcError("HTTP 403")})),
+                "a closing pull request could not be read (PR #6 could not be read (HTTP 403))"),
+            "merged PR beside an unreadable one": (
+                lambda: (self._prerequisite(5, prs=[7, 6]), self._pull(7)),
+                "a closing pull request could not be read (PR #6 could not be read (HTTP 404"),
             "one of two PRs merged": (
                 lambda: (self._prerequisite(5, prs=[6, 7]), self._pull(6, state="CLOSED", oid=None), self._pull(7)),
                 None),
@@ -1741,6 +1750,12 @@ Read one file.
         code, output = check(dict(base, dependencies={"11": [self._blocker(5)]}, pull_requests={"7": merged}))
         self.assertEqual(1, code)
         self.assertIn("no `dependencies` entry for issue #5", output)
+        # R3b-1: a closing PR the bundle omits is unknown beside a merged one.
+        two_refs = dict(prerequisite, closedByPullRequestsReferences=[
+            {"number": n, "repository": {"name": "cubism-rs", "owner": {"login": "jeromebanks"}}} for n in (6, 7)])
+        code, output = check(dict(base, issues=[self.epic, self.slice, two_refs], pull_requests={"7": merged}))
+        self.assertEqual(1, code)
+        self.assertIn("no `pull_requests` entry for pull request #6", output)
         without_reason = {k: v for k, v in prerequisite.items() if k != "stateReason"}
         code, output = check(dict(base, issues=[self.epic, self.slice, without_reason], pull_requests={"7": merged}))
         self.assertEqual(1, code)

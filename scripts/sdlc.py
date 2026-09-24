@@ -633,10 +633,14 @@ def _blocker_repository(blocker: dict[str, Any]) -> str:
     return match.group(1) if match else ""
 
 
-def _verified_merges(issue: dict[str, Any], source: DependencySource, config: dict[str, Any]) -> tuple[bool, list[str]]:
+def _verified_merges(issue: dict[str, Any], source: DependencySource, config: dict[str, Any]) -> tuple[bool, list[str], list[str]]:
     """Whether a closing PR of `issue` is verified merged into the default
-    branch, and what was checked when none is."""
+    branch, what was checked when none is, and which references could not be
+    read. Every reference is read: one that cannot be is unknown, and unknown
+    blocks even beside a merged one."""
+    merged = False
     checked: list[str] = []
+    unreadable: list[str] = []
     for ref in issue.get("closedByPullRequestsReferences") or []:
         repo = ref.get("repository") or {}
         name = f"{(repo.get('owner') or {}).get('login', '')}/{repo.get('name', '')}"
@@ -647,7 +651,7 @@ def _verified_merges(issue: dict[str, Any], source: DependencySource, config: di
         try:
             pull = source.pull(number)
         except (SdlcError, OSError) as exc:
-            checked.append(f"PR #{number} could not be read ({exc})")
+            unreadable.append(f"PR #{number} could not be read ({exc})")
             continue
         merge_sha = (pull.get("mergeCommit") or {}).get("oid") or ""
         if (
@@ -655,11 +659,12 @@ def _verified_merges(issue: dict[str, Any], source: DependencySource, config: di
             and pull.get("baseRefName") == config["default_branch"]
             and re.fullmatch(r"[0-9a-f]{40}", merge_sha)
         ):
-            return True, checked
+            merged = True
+            continue
         checked.append(
             f"PR #{number} is {pull.get('state')} into `{pull.get('baseRefName')}`"
         )
-    return False, checked
+    return merged, checked, unreadable
 
 
 def completion_error(number: int, source: DependencySource, config: dict[str, Any]) -> str | None:
@@ -683,7 +688,12 @@ def completion_error(number: int, source: DependencySource, config: dict[str, An
         )
     if "closedByPullRequestsReferences" not in issue:
         return f"blocked by #{number}: its closing pull requests could not be read; its completion is unknown"
-    merged, checked = _verified_merges(issue, source, config)
+    merged, checked, unreadable = _verified_merges(issue, source, config)
+    if unreadable:
+        return (
+            f"blocked by #{number}: a closing pull request could not be read "
+            f"({'; '.join(unreadable)}); its completion is unknown"
+        )
     if merged:
         return None
     detail = f" (checked: {'; '.join(checked)})" if checked else ""

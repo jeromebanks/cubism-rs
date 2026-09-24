@@ -80,8 +80,9 @@ prerequisite is **successfully completed**:
   merged into the default branch.
 
 Open, reopened, `NOT_PLANNED`, duplicate or hand-closed prerequisites do not
-count. A closing reference that is listed but unmerged, merged into another
-branch, or unreadable does not count either. Each refusal names the
+count. A closing reference that is listed but unmerged, or merged into another
+branch, does not count either. A closing reference that cannot be read blocks
+even when another one is merged. Each refusal names the
 prerequisite and the missing evidence. A verification-only prerequisite, one
 with no merged closing pull request, fails closed until an explicit evidence
 format exists (Stage C3). The following are all unknown, and unknown blocks:
