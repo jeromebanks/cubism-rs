@@ -59,16 +59,62 @@ every command that admits work. It has three modes:
 
 | Mode | Commands | Requires |
 | --- | --- | --- |
-| check | `check-slice` | open; `type:slice` or `type:feedback`; not an epic; no `status:blocked` or `needs-slicing`; the contract sections above; exactly one parent epic whose gate admits it |
+| check | `check-slice` | open; `type:slice` or `type:feedback`; not an epic; no `status:blocked` or `needs-slicing`; the contract sections above; exactly one parent epic whose gate admits it; every native prerequisite successfully completed |
 | start | `next`, `claim`, and `claim --resume` when no `issue/N` claim exists | everything `check` requires, and `status:ready` |
-| continue | `claim --resume` on an existing `issue/N` claim, `merge` | open; slice or feedback; no `status:blocked` or `needs-slicing`; exactly one parent epic whose gate admits it |
+| continue | `claim --resume` on an existing `issue/N` claim, `merge` | open; slice or feedback; no `status:blocked` or `needs-slicing`; exactly one parent epic whose gate admits it; every native prerequisite successfully completed |
 
 `check-slice` does not require `status:ready`: a planner runs it to decide
 whether an issue may be labeled ready. An already-owned attempt continues
 without regaining `status:ready` and is not re-judged on its contract sections,
 but a blocker, closure or gate pause recorded after the claim still stops it.
-Prerequisites between slices are not evaluated yet (R3b); check them by hand
-before starting or merging dependent work.
+
+### Prerequisites
+
+A prerequisite is a native GitHub issue dependency: the slice's `blocked_by`
+list. Every mode reads that list completely, following each prerequisite's own
+`blocked_by` transitively, and admits the slice only when each direct
+prerequisite is **successfully completed**:
+
+- closed with reason `COMPLETED`, and
+- closed by at least one pull request in this repository that is verified
+  merged into the default branch.
+
+Open, reopened, `NOT_PLANNED`, duplicate or hand-closed prerequisites do not
+count. A closing reference that is listed but unmerged, or merged into another
+branch, does not count either. A closing reference that is malformed, cannot
+be read, or leads to a pull request record inconsistent with its state blocks,
+even when another reference is merged. A consistent record has a known
+`state`, a `baseRefName`, and a `mergeCommit` that is null unless `MERGED` and
+carries a full SHA when `MERGED`. Each refusal names the
+prerequisite and the missing evidence. A verification-only prerequisite, one
+with no merged closing pull request, fails closed until an explicit evidence
+format exists (Stage C3). The following are all unknown, and unknown blocks:
+
+- a dependency cycle, reported with its path;
+- a blocker in another repository;
+- a failed or malformed page;
+- a malformed or incomplete issue, reference or pull request record, or a
+  closing-reference list not shown to be complete;
+- a 403 or 404.
+
+Dependencies recorded only in issue prose are not read. Adding native links is
+R3c's migration, and until it runs, prose prerequisites still need a check by
+hand.
+
+An offline `check-slice --input` bundle must supply the same data. Anything it
+omits blocks:
+
+- `"dependencies": {"<issue>": [<REST blocked_by issues>]}`, with an entry
+  for the slice and for every prerequisite reached from it;
+- each prerequisite in `issues`, carrying `state`, `stateReason` and the
+  complete `closedByPullRequestsReferences` list
+  (`[{"number", "repository": {"name", "owner": {"login"}}}]`);
+- `"pull_requests": {"<pr>": {"number", "state", "baseRefName", "mergeCommit"}}`.
+
+Each record must be the one asked for: its `number` matches, and it appears
+exactly once. A blocker's `repository_url` must be exactly
+`https://api.github.com/repos/<owner>/<repo>`, and every issue and pull request
+number must be a positive integer.
 
 The issue is the session handoff. Do not preload the entire epic, historical
 time-series handoffs, or unrelated architecture documents. Follow only the
@@ -133,11 +179,11 @@ need for more.
    The gate reloads the linked issue's parent epic and its gate records and
    applies the shared admission predicate in continue mode, so a pause, a
    `status:blocked` label or a closure recorded after the claim blocks the
-   merge. An unknown or unreadable parent blocks. Dependency/prerequisite
-   admission is not automated yet (R3b); recheck prerequisites before invoking
-   merge. A race remains: GitHub cannot
-   atomically bind an epic-label update to a PR merge, so a gate changed between
-   evaluation and `gh pr merge` is not seen. The expected-head precondition
+   merge. An unknown or unreadable parent blocks. Native prerequisites are
+   reloaded the same way, so one reopened after the claim blocks the merge. A
+   race remains: GitHub cannot atomically bind an epic-label or prerequisite
+   update to a PR merge, so a change between evaluation and `gh pr merge` is
+   not seen. The expected-head precondition
    protects the candidate, not cross-object gates.
    There is no routine human PR gate and no
    size-based exception to the requested auto-merge policy.
