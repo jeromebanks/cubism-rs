@@ -109,7 +109,12 @@ omits blocks:
 - each prerequisite in `issues`, carrying `state`, `stateReason` and the
   complete `closedByPullRequestsReferences` list
   (`[{"number", "repository": {"name", "owner": {"login"}}}]`);
-- `"pull_requests": {"<pr>": {"state", "baseRefName", "mergeCommit"}}`.
+- `"pull_requests": {"<pr>": {"number", "state", "baseRefName", "mergeCommit"}}`.
+
+Each record must be the one asked for: its `number` matches, and it appears
+exactly once. A blocker's `repository_url` must be exactly
+`https://api.github.com/repos/<owner>/<repo>`, and every issue and pull request
+number must be a positive integer.
 
 The issue is the session handoff. Do not preload the entire epic, historical
 time-series handoffs, or unrelated architecture documents. Follow only the

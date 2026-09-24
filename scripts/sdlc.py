@@ -627,10 +627,18 @@ def same_repository(repository: str, config: dict[str, Any]) -> bool:
 
 
 def _blocker_repository(blocker: dict[str, Any]) -> str:
-    # REST: https://api.github.com/repos/{owner}/{repo}
-    url = str(blocker.get("repository_url") or "")
-    match = re.search(r"/repos/([^/]+/[^/]+)/?$", url)
+    # REST: exactly https://api.github.com/repos/{owner}/{repo}; any other
+    # host or shape names no repository, so the blocker counts as foreign.
+    url = blocker.get("repository_url")
+    match = re.fullmatch(r"https://api\.github\.com/repos/([^/]+/[^/]+)", url) if isinstance(url, str) else None
     return match.group(1) if match else ""
+
+
+def issue_number(value: Any) -> int | None:
+    """A GitHub issue or PR number: a positive int, never a bool."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
 
 
 def _closing_reference(ref: Any) -> tuple[str, int] | None:
@@ -641,10 +649,8 @@ def _closing_reference(ref: Any) -> tuple[str, int] | None:
     owner = repo.get("owner") if isinstance(repo, dict) else None
     login = owner.get("login") if isinstance(owner, dict) else None
     name = repo.get("name") if isinstance(repo, dict) else None
-    number = ref.get("number")
-    if not (isinstance(login, str) and login and isinstance(name, str) and name):
-        return None
-    if not isinstance(number, int) or isinstance(number, bool):
+    number = issue_number(ref.get("number"))
+    if not (isinstance(login, str) and login and isinstance(name, str) and name) or number is None:
         return None
     return f"{login}/{name}", number
 
@@ -652,12 +658,12 @@ def _closing_reference(ref: Any) -> tuple[str, int] | None:
 PULL_STATES = ("OPEN", "CLOSED", "MERGED")
 
 
-def _pull_record_complete(pull: Any) -> bool:
+def _pull_record_complete(pull: Any, number: int) -> bool:
     """Whether a PR record is exactly consistent with its state, as GitHub
     reports it: a MERGED pull request has a `mergeCommit` with a full SHA, and
     any other has a null `mergeCommit`. Anything else is not evidence of either
     outcome, so it is unknown rather than read as "unmerged"."""
-    if not isinstance(pull, dict):
+    if not isinstance(pull, dict) or issue_number(pull.get("number")) != number:
         return False
     state, base = pull.get("state"), pull.get("baseRefName")
     if state not in PULL_STATES or not isinstance(base, str) or not base or "mergeCommit" not in pull:
@@ -691,9 +697,9 @@ def _verified_merges(issue: dict[str, Any], source: DependencySource, config: di
         except (SdlcError, OSError) as exc:
             unreadable.append(f"PR #{number} could not be read ({exc})")
             continue
-        if not _pull_record_complete(pull):
+        if not _pull_record_complete(pull, number):
             unreadable.append(
-                f"PR #{number} is not a complete record: it needs a known state, a base branch, "
+                f"PR #{number} is not a complete record: it needs its own number, a known state, a base branch, "
                 "and a mergeCommit that is null unless MERGED and has a full SHA when MERGED"
             )
             continue
@@ -715,7 +721,11 @@ def completion_error(number: int, source: DependencySource, config: dict[str, An
         issue = source.issue(number)
     except (SdlcError, OSError) as exc:
         return f"blocked by #{number}, which could not be read ({exc}); its completion is unknown"
-    if not isinstance(issue, dict) or issue.get("state") not in {"OPEN", "CLOSED"}:
+    if (
+        not isinstance(issue, dict)
+        or issue_number(issue.get("number")) != number
+        or issue.get("state") not in {"OPEN", "CLOSED"}
+    ):
         return f"blocked by #{number}, whose record is malformed; its completion is unknown"
     if issue.get("state") != "CLOSED":
         return f"blocked by #{number}, which is still open"
@@ -769,8 +779,8 @@ def prerequisite_errors(number: int, source: DependencySource, config: dict[str,
             return []
         found = []
         for blocker in blockers:
-            blocker_number = blocker.get("number") if isinstance(blocker, dict) else None
-            if not isinstance(blocker_number, int) or isinstance(blocker_number, bool):
+            blocker_number = issue_number(blocker.get("number")) if isinstance(blocker, dict) else None
+            if blocker_number is None:
                 errors.append(f"a prerequisite entry of #{node} is malformed; dependencies are unknown")
                 continue
             if not same_repository(_blocker_repository(blocker), config):
@@ -1116,10 +1126,16 @@ def fetch_prerequisite(number: int, config: dict[str, Any]) -> dict[str, Any]:
         raise SdlcError(f"issue #{number} was not returned")
     refs = issue.get("closedByPullRequestsReferences")
     nodes = refs.get("nodes") if isinstance(refs, dict) else None
+    if issue_number(issue.get("number")) != number:
+        raise SdlcError(f"GitHub answered for #{issue.get('number')} when #{number} was asked for")
+    total = refs.get("totalCount") if isinstance(refs, dict) else None
+    page_info = refs.get("pageInfo") if isinstance(refs, dict) else None
     if (
         not isinstance(nodes, list)
-        or (refs.get("pageInfo") or {}).get("hasNextPage") is not False
-        or refs.get("totalCount") != len(nodes)
+        or not isinstance(page_info, dict)
+        or page_info.get("hasNextPage") is not False
+        or not isinstance(total, int) or isinstance(total, bool)
+        or total != len(nodes)
     ):
         raise SdlcError(f"the closing pull requests of #{number} could not be read completely")
     return dict(issue, closedByPullRequestsReferences=nodes)
@@ -1162,10 +1178,15 @@ def bundle_dependencies(data: dict[str, Any]) -> DependencySource:
         return blockers
 
     def issue(number: int) -> dict[str, Any]:
-        for item in data.get("issues") or []:
-            if item.get("number") == number and "stateReason" in item:
-                return item
-        raise SdlcError(f"the bundle has no prerequisite record with `stateReason` for #{number}")
+        records = [
+            item for item in data.get("issues") or []
+            if isinstance(item, dict) and item.get("number") == number
+        ]
+        if len(records) > 1:
+            raise SdlcError(f"the bundle has {len(records)} records for #{number}; which is current is unknown")
+        if not records or "stateReason" not in records[0]:
+            raise SdlcError(f"the bundle has no prerequisite record with `stateReason` for #{number}")
+        return records[0]
 
     return DependencySource(blocked_by, issue, lambda number: keyed("pull_requests", number, "pull request"))
 

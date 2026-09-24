@@ -1662,6 +1662,71 @@ Read one file.
                 errors = self._prerequisite_errors()
                 self.assertTrue(any(expected in e for e in errors), errors)
 
+    def test_round_four_input_shapes_fail_closed(self):
+        # R3b-5..R3b-9 (Codex round 4). Each would otherwise admit the slice.
+        def satisfied():
+            self._blocked_by(5)
+            self._prerequisite(5, prs=[7])
+            self._pull(7)
+        for name, prepare, expected in (
+            # R3b-6: records must be the ones asked for.
+            ("issue answered for another number",
+             lambda: self.graph["issues"][5].update(number=6), "blocked by #5, whose record is malformed"),
+            ("PR answered for another number",
+             lambda: self.graph["pulls"][7].update(number=8), "PR #7 is not a complete record"),
+            ("PR record without a number",
+             lambda: self.graph["pulls"][7].pop("number"), "PR #7 is not a complete record"),
+            # R3b-7: only api.github.com names a repository.
+            ("blocker on another host", lambda: self.graph["blocked_by"].update({11: [dict(
+                self._blocker(5), repository_url="https://evil.example/repos/jeromebanks/cubism-rs")]}),
+             "outside jeromebanks/cubism-rs"),
+            ("blocker URL with a suffix", lambda: self.graph["blocked_by"].update({11: [dict(
+                self._blocker(5), repository_url=self.REPO_API + "/issues")]}),
+             "outside jeromebanks/cubism-rs"),
+            # R3b-8: numbers are positive.
+            ("blocker number 0", lambda: self.graph["blocked_by"].update({11: [self._blocker(0)]}),
+             "a prerequisite entry of #11 is malformed"),
+            ("negative blocker number", lambda: self.graph["blocked_by"].update({11: [self._blocker(-5)]}),
+             "a prerequisite entry of #11 is malformed"),
+            ("closing reference number 0",
+             lambda: self.graph["issues"][5]["closedByPullRequestsReferences"].append(
+                 {"number": 0, "repository": {"name": "cubism-rs", "owner": {"login": "jeromebanks"}}}),
+             "a closing reference is malformed"),
+        ):
+            with self.subTest(case=name):
+                self.setUp()
+                satisfied()
+                self.assertEqual([], self._prerequisite_errors(), "the unmodified graph admits")
+                prepare()
+                errors = self._prerequisite_errors()
+                self.assertTrue(any(expected in e for e in errors), errors)
+
+    def test_live_answers_must_be_complete_and_for_the_asked_issue(self):
+        # R3b-6 and R3b-9 on the live GraphQL reader.
+        answer = self._graphql_prerequisite()
+        issue = answer["data"]["repository"]["issue"]
+        for name, response in (
+            ("another issue", {"data": {"repository": {"issue": dict(issue, number=6)}}}),
+            ("boolean count", {"data": {"repository": {"issue": dict(issue, closedByPullRequestsReferences=dict(
+                issue["closedByPullRequestsReferences"], totalCount=True))}}}),
+            ("string count", {"data": {"repository": {"issue": dict(issue, closedByPullRequestsReferences=dict(
+                issue["closedByPullRequestsReferences"], totalCount="1"))}}}),
+            ("page info not an object", {"data": {"repository": {"issue": dict(
+                issue, closedByPullRequestsReferences=dict(issue["closedByPullRequestsReferences"], pageInfo=[]))}}}),
+        ):
+            with self.subTest(case=name):
+                with patch.object(sdlc, "fetch_prerequisite", new=REAL_READERS["fetch_prerequisite"]), \
+                        patch.object(sdlc, "run_json", return_value=response):
+                    error = sdlc.completion_error(5, sdlc.live_dependencies(self.config), self.config)
+                self.assertIn("blocked by #5, which could not be read", error)
+
+    def test_conflicting_bundle_records_are_unknown(self):
+        # R3b-5: two records for one prerequisite; neither is known current.
+        closed = {"number": 5, "state": "CLOSED", "stateReason": "COMPLETED", "closedByPullRequestsReferences": []}
+        source = sdlc.bundle_dependencies({"issues": [closed, dict(closed, state="OPEN", stateReason=None)]})
+        with self.assertRaisesRegex(sdlc.SdlcError, "2 records for #5"):
+            source.issue(5)
+
     def test_cycles_are_reported_with_their_path(self):
         # 11 <- 5 <- 6 <- 5: the cycle is upstream of the slice.
         self._blocked_by(5)
@@ -1836,7 +1901,7 @@ Read one file.
             "closedByPullRequestsReferences": [
                 {"number": 7, "repository": {"name": "cubism-rs", "owner": {"login": "jeromebanks"}}}],
         }
-        merged = {"state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": "e" * 40}}
+        merged = {"number": 7, "state": "MERGED", "baseRefName": "main", "mergeCommit": {"oid": "e" * 40}}
         base = {"issues": [self.epic, self.slice, prerequisite], "pulls": [], "gate_comments": {"10": []},
                 "dependencies": {"11": [self._blocker(5)], "5": []}}
         self.assertEqual(0, check(dict(base, pull_requests={"7": merged}))[0])
@@ -1862,7 +1927,7 @@ Read one file.
         self.assertIn("PR #6 is not a complete record", output)
         # R3b-4: `mergeCommit: {}` is not evidence of either outcome.
         code, output = check(dict(base, issues=[self.epic, self.slice, two_refs], pull_requests={
-            "6": dict(merged, mergeCommit={}), "7": merged}))
+            "6": dict(merged, number=6, mergeCommit={}), "7": merged}))
         self.assertEqual(1, code)
         self.assertIn("PR #6 is not a complete record", output)
         # R3b-2: a malformed bundled reference is unknown beside a merged one.
