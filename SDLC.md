@@ -216,11 +216,13 @@ need for more.
     `rtk python3 scripts/sdlc.py cleanup N` from the primary checkout. It owns
     the closing transition: it removes whichever of `in-progress` and
     `in-review` the closed issue still carries (other labels are left alone),
-    removes the worktree (never forced, so local changes block it) and local
-    branch, prunes, and regenerates the project cockpit **last**, so the view
-    never shows the stale label. Rerunning it after a partial failure edits
-    nothing already fixed. Update the parent epic checklist when GitHub did not
-    do so automatically.
+    removes the worktree (never forced, so local changes block it), prunes,
+    and deletes the local branch only when `origin/main` contains it — a
+    stale local `main` does not matter. A branch with commits not on
+    `origin/main` is kept and reported as blocked. It regenerates the project
+    cockpit **last**, so the view never shows the stale label. Rerunning it
+    after a partial failure edits nothing already fixed. Update the parent
+    epic checklist when GitHub did not do so automatically.
 
 Any new commit invalidates prior review receipts because the recorded SHA no
 longer matches. A review failure, missing tool, missing CI result, ambiguous issue

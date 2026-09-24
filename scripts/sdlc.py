@@ -1509,14 +1509,31 @@ def command_cleanup(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if worktree.exists():
         # Never forced: git refuses to remove a worktree with local changes.
         run_text(["git", "worktree", "remove", str(worktree)])
+    run_text(["git", "fetch", "origin", "--prune"])
+    # Whether the branch is merged is judged against the fetched remote
+    # default branch. `git branch -d` would judge it against a pruned
+    # upstream's fallback, this checkout's HEAD, which may be a stale local
+    # default branch; it then refuses a merged branch on every rerun.
+    kept = False
     local = run_process(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], check=False)
     if local.returncode == 0:
-        run_text(["git", "branch", "-d", branch])
-    run_text(["git", "fetch", "origin", "--prune"])
-    print(f"CLEANED: issue #{args.issue}")
+        base = f"refs/remotes/origin/{config['default_branch']}"
+        merged = run_process(["git", "merge-base", "--is-ancestor", f"refs/heads/{branch}", base], check=False)
+        if merged.returncode == 0:
+            run_text(["git", "branch", "-D", branch])
+        elif merged.returncode == 1:
+            kept = True
+            print(f"BLOCKED: kept local branch `{branch}`: it has commits not in origin/{config['default_branch']}")
+        else:
+            raise SdlcError(merged.stderr.strip() or f"could not compare `{branch}` with {base}")
+    elif local.returncode != 1:
+        raise SdlcError("could not inspect local claim branch")
     output = ROOT / config["status"]["output"]
     write_atomic(output, render_status(build_model(fetch_status_data(config), config)))
     print(f"WROTE {output}")
+    if kept:
+        return 1
+    print(f"CLEANED: issue #{args.issue}")
     return 0
 
 

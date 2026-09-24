@@ -2064,14 +2064,18 @@ Read one file.
         self.assertIn(f"BASE=origin/{default}\n", out.getvalue())
         self.assertIn(["git", "fetch", "origin", default], git)
         for args in git:
-            if args[0] != "git":
+            if args[0] != "git" or args == ["git", "fetch", "origin", default]:
                 continue
-            # No command that could move or check out the local default branch.
+            # No other command names the local default branch in any form,
+            # so none can move it (`branch -f main`, `fetch origin main:main`,
+            # `update-ref refs/heads/main`) or check it out.
             self.assertNotIn(args[1], {"pull", "merge", "update-ref", "checkout", "switch", "reset"}, args)
-            self.assertNotIn(f"refs/heads/{default}", args)
-            self.assertNotIn(f"{default}:{default}", " ".join(args))
+            for token in args[1:]:
+                self.assertNotEqual(default, token, args)
+                self.assertFalse(token.endswith(f":{default}") or token.endswith(f"/heads/{default}"), args)
 
-    def _cleanup(self, state="CLOSED", labels=("type:slice", "in-review"), worktree=False, local_branch=True):
+    def _cleanup(self, state="CLOSED", labels=("type:slice", "in-review"), worktree=False, local_branch=True,
+                 merged=True):
         """Run `cleanup 11` with every effect recorded in order, none performed."""
         import argparse
         import contextlib
@@ -2085,6 +2089,8 @@ Read one file.
 
         def run_process(args, **kwargs):
             effects.append(("run", args))
+            if args[1] == "merge-base":
+                return subprocess.CompletedProcess(args, 0 if merged else 1, "", "")
             return subprocess.CompletedProcess(args, 0 if local_branch else 1, "", "")
 
         def fetch_status_data(_config):
@@ -2137,6 +2143,31 @@ Read one file.
         self.assertEqual(0, code, out)
         self.assertEqual([], self._label_edits(effects))
         self.assertNotIn("CLEARED", out)
+        self.assertEqual(["status-read", "write"], [e[0] for e in effects][-2:])
+
+    def test_cleanup_judges_the_branch_merged_against_the_fetched_remote_base(self):
+        # A stale local default branch must not make a merged branch look
+        # unmerged: the prune happens first, and containment is checked
+        # against origin/<default>, never this checkout's HEAD.
+        default = self.config["default_branch"]
+        code, effects, out = self._cleanup(worktree=True)
+        self.assertEqual(0, code, out)
+        runs = [e[1] for e in effects if e[0] == "run"]
+        prune = runs.index(["git", "fetch", "origin", "--prune"])
+        check = runs.index(["git", "merge-base", "--is-ancestor", "refs/heads/issue/11",
+                            f"refs/remotes/origin/{default}"])
+        delete = runs.index(["git", "branch", "-D", "issue/11"])
+        self.assertLess(prune, check)
+        self.assertLess(check, delete)
+        self.assertNotIn(["git", "branch", "-d", "issue/11"], runs)
+
+    def test_cleanup_keeps_an_unmerged_branch_and_still_renders_status(self):
+        code, effects, out = self._cleanup(merged=False)
+        self.assertEqual(1, code)
+        self.assertIn("BLOCKED: kept local branch `issue/11`", out)
+        self.assertNotIn("CLEANED", out)
+        runs = [e[1] for e in effects if e[0] == "run"]
+        self.assertFalse([r for r in runs if r[:2] == ["git", "branch"]], "an unmerged branch must not be deleted")
         self.assertEqual(["status-read", "write"], [e[0] for e in effects][-2:])
 
     def test_cleanup_of_an_open_issue_has_no_effects(self):
