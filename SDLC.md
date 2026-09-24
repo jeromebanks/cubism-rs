@@ -147,7 +147,14 @@ need for more.
    `rtk python3 scripts/sdlc.py claim N`, which admits only in start mode. The stable remote branch `issue/N` is an
    atomic, cross-session claim: it is created through GitHub's create-only ref
    endpoint, so exactly one racing session wins and the others are told they
-   lost. The command then creates an isolated worktree and adds `in-progress`.
+   lost. The command then creates an isolated worktree, adds `in-progress`, and
+   prints `BASE=origin/main`.
+
+   `origin/<default branch>` is the only ref to diff, log, or rebase a slice
+   against (`git diff origin/main...HEAD`). `claim` fetches it but never moves
+   the local default branch, which may be checked out in the primary checkout
+   and so can be arbitrarily stale; a diff against local `main` can show
+   unrelated upstream commits.
 
    The claim has no heartbeat and no expiry. It establishes exclusive
    acquisition, not liveness: a session that dies holds `issue/N` until a human
@@ -205,9 +212,17 @@ need for more.
    protects the candidate, not cross-object gates.
    There is no routine human PR gate and no
    size-based exception to the requested auto-merge policy.
-10. **Reconcile.** Confirm the issue closed, run
-    `rtk python3 scripts/sdlc.py cleanup N`, regenerate the project cockpit, and
-    update the parent epic checklist when GitHub did not do so automatically.
+10. **Reconcile.** Confirm the issue closed, then run
+    `rtk python3 scripts/sdlc.py cleanup N` from the primary checkout. It owns
+    the closing transition: it removes whichever of `in-progress` and
+    `in-review` the closed issue still carries (other labels are left alone),
+    removes the worktree (never forced, so local changes block it), prunes,
+    and deletes the local branch only when `origin/main` contains it — a
+    stale local `main` does not matter. A branch with commits not on
+    `origin/main` is kept and reported as blocked. It regenerates the project
+    cockpit **last**, so the view never shows the stale label. Rerunning it
+    after a partial failure edits nothing already fixed. Update the parent
+    epic checklist when GitHub did not do so automatically.
 
 Any new commit invalidates prior review receipts because the recorded SHA no
 longer matches. A review failure, missing tool, missing CI result, ambiguous issue

@@ -2031,6 +2031,160 @@ Read one file.
         self.assertNotIn("<script>", page)
         self.assertIn("&lt;script&gt;", page)
 
+    def test_claim_names_the_remote_base_and_never_moves_local_main(self):
+        # The default branch may be checked out in the primary checkout, so
+        # claim only fetches it. The ref to diff and rebase against is the
+        # remote-tracking one, and claim says so.
+        import argparse
+        import contextlib
+        import io
+        default = self.config["default_branch"]
+        data = {"issues": [self.epic, self.slice], "pulls": []}
+        git = []
+
+        def run_process(args, **kwargs):
+            git.append(args)
+            # No remote claim yet; no local claim branch.
+            return subprocess.CompletedProcess(args, 2 if args[1] == "ls-remote" else 1, "", "")
+
+        def run_text(args):
+            git.append(args)
+            return "0" * 40 if args[1] == "rev-parse" else ""
+
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(sdlc, "ROOT", Path(tmp)), \
+                patch.object(sdlc, "fetch_status_data", return_value=data), \
+                patch.object(sdlc, "fetch_comments", return_value=[]), \
+                patch.object(sdlc, "run_process", side_effect=run_process), \
+                patch.object(sdlc, "run_text", side_effect=run_text), \
+                patch.object(sdlc, "create_remote_ref", return_value=True), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(0, sdlc.command_claim(argparse.Namespace(issue=11, resume=False), self.config))
+        self.assertIn(f"BASE=origin/{default}\n", out.getvalue())
+        self.assertIn(["git", "fetch", "origin", default], git)
+        for args in git:
+            if args[0] != "git":
+                continue
+            # An allowlist, not a denylist: claim runs only these read or
+            # claim-branch commands, with no global option (`-C <dir>`, `-c`,
+            # `--git-dir`) placed before them that could redirect one at the
+            # primary checkout. `reset`, `branch`, `pull`, `update-ref` and
+            # the rest are rejected by omission.
+            self.assertIn(args[1], {"ls-remote", "fetch", "rev-parse", "show-ref", "worktree"}, args)
+            if args[1] == "worktree":
+                self.assertEqual("add", args[2], args)
+            if args == ["git", "fetch", "origin", default]:
+                continue
+            # No other command names the local default branch in any form,
+            # so none can move it (`fetch origin main:main`) or check it out
+            # (`worktree add <path> main`).
+            for token in args[1:]:
+                self.assertNotEqual(default, token, args)
+                self.assertFalse(token.endswith(f":{default}") or token.endswith(f"/heads/{default}"), args)
+
+    def _cleanup(self, state="CLOSED", labels=("type:slice", "in-review"), worktree=False, local_branch=True,
+                 merged=True):
+        """Run `cleanup 11` with every effect recorded in order, none performed."""
+        import argparse
+        import contextlib
+        import io
+        issue = {"number": 11, "state": state, "labels": [{"name": name} for name in labels]}
+        effects = []
+
+        def run_text(args):
+            effects.append(("run", args))
+            return ""
+
+        def run_process(args, **kwargs):
+            effects.append(("run", args))
+            if args[1] == "merge-base":
+                return subprocess.CompletedProcess(args, 0 if merged else 1, "", "")
+            return subprocess.CompletedProcess(args, 0 if local_branch else 1, "", "")
+
+        def fetch_status_data(_config):
+            effects.append(("status-read",))
+            return {"repository": "example/repo", "generated_at": "now", "issues": [], "pulls": []}
+
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            if worktree:
+                (root / ".worktrees" / "issue-11").mkdir(parents=True)
+            with patch.object(sdlc, "ROOT", root), \
+                    patch.object(sdlc, "fetch_issue", return_value=issue), \
+                    patch.object(sdlc, "run_text", side_effect=run_text), \
+                    patch.object(sdlc, "run_process", side_effect=run_process), \
+                    patch.object(sdlc, "fetch_status_data", side_effect=fetch_status_data), \
+                    patch.object(sdlc, "write_atomic", side_effect=lambda path, _c: effects.append(("write", path))), \
+                    contextlib.redirect_stdout(out):
+                code = sdlc.command_cleanup(argparse.Namespace(issue=11), self.config)
+        return code, effects, out.getvalue()
+
+    @staticmethod
+    def _label_edits(effects):
+        return [e[1] for e in effects if e[0] == "run" and e[1][:3] == ["gh", "issue", "edit"]]
+
+    def test_cleanup_clears_delivery_labels_before_regenerating_status(self):
+        code, effects, out = self._cleanup(labels=("type:slice", "in-review", "in-progress", "area:docs"), worktree=True)
+        self.assertEqual(0, code, out)
+        edits = self._label_edits(effects)
+        self.assertEqual(1, len(edits))
+        removed = [edits[0][i + 1] for i, arg in enumerate(edits[0]) if arg == "--remove-label"]
+        self.assertEqual(sorted(["in-review", "in-progress"]), sorted(removed))
+        self.assertNotIn("--add-label", edits[0])
+        # Status is read and written only after the label edit, and last.
+        kinds = [e[0] for e in effects]
+        self.assertLess(effects.index(("run", edits[0])), kinds.index("status-read"))
+        self.assertEqual(["status-read", "write"], kinds[-2:])
+
+    def test_cleanup_removes_the_worktree_without_force(self):
+        _code, effects, _out = self._cleanup(worktree=True)
+        removes = [e[1] for e in effects if e[0] == "run" and e[1][:3] == ["git", "worktree", "remove"]]
+        self.assertEqual(1, len(removes))
+        self.assertNotIn("--force", removes[0])
+        self.assertNotIn("-f", removes[0])
+
+    def test_cleanup_rerun_edits_no_labels_and_still_renders_status(self):
+        # A rerun after a partial failure: labels already cleared, worktree
+        # and branch already gone. Nothing is edited; status is still rendered.
+        code, effects, out = self._cleanup(labels=("type:slice", "area:docs"), local_branch=False)
+        self.assertEqual(0, code, out)
+        self.assertEqual([], self._label_edits(effects))
+        self.assertNotIn("CLEARED", out)
+        self.assertEqual(["status-read", "write"], [e[0] for e in effects][-2:])
+
+    def test_cleanup_judges_the_branch_merged_against_the_fetched_remote_base(self):
+        # A stale local default branch must not make a merged branch look
+        # unmerged: the prune happens first, and containment is checked
+        # against origin/<default>, never this checkout's HEAD.
+        default = self.config["default_branch"]
+        code, effects, out = self._cleanup(worktree=True)
+        self.assertEqual(0, code, out)
+        runs = [e[1] for e in effects if e[0] == "run"]
+        prune = runs.index(["git", "fetch", "origin", "--prune"])
+        check = runs.index(["git", "merge-base", "--is-ancestor", "refs/heads/issue/11",
+                            f"refs/remotes/origin/{default}"])
+        delete = runs.index(["git", "branch", "-D", "issue/11"])
+        self.assertLess(prune, check)
+        self.assertLess(check, delete)
+        self.assertNotIn(["git", "branch", "-d", "issue/11"], runs)
+
+    def test_cleanup_keeps_an_unmerged_branch_and_still_renders_status(self):
+        code, effects, out = self._cleanup(merged=False)
+        self.assertEqual(1, code)
+        self.assertIn("BLOCKED: kept local branch `issue/11`", out)
+        self.assertNotIn("CLEANED", out)
+        runs = [e[1] for e in effects if e[0] == "run"]
+        self.assertFalse([r for r in runs if r[:2] == ["git", "branch"]], "an unmerged branch must not be deleted")
+        self.assertEqual(["status-read", "write"], [e[0] for e in effects][-2:])
+
+    def test_cleanup_of_an_open_issue_has_no_effects(self):
+        code, effects, out = self._cleanup(state="OPEN")
+        self.assertEqual(1, code)
+        self.assertIn("BLOCKED", out)
+        self.assertEqual([], effects)
+
 
 if __name__ == "__main__":
     unittest.main()
