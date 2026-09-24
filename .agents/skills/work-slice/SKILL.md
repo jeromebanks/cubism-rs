@@ -20,7 +20,9 @@ needed for implementation.
    PRIMARY=$(rtk proxy git rev-parse --show-toplevel)
    ```
 
-   Perform all edits, commits, and tests in that worktree. Use `--resume` only after
+   Perform all edits, commits, and tests in that worktree. Diff, log, and
+   rebase against the printed `BASE=origin/main`, never local `main`: claim
+   does not move it. Use `--resume` only after
    confirming the existing `issue/N` branch is abandoned or belongs to this
    resumed session.
 3. Write a compact plan tied to acceptance criteria. If running in Claude Code
@@ -99,17 +101,17 @@ needed for implementation.
    Either way the head SHA changes, which invalidates the review. Follow
    [`codex-review`](../codex-review/SKILL.md) section 5 — it owns head changes
    for rebases exactly as for fix commits — then run step 8 again.
-10. GitHub closes the issue on merge but leaves its `in-review` label, and no
-    command clears it yet. Clear it **before** regenerating status, or the
-    status view is built from the stale label. Then run cleanup from `$PRIMARY`
-    — the checkout captured in step 2 — and not from the slice worktree:
+10. GitHub closes the issue on merge but leaves its `in-review` label.
+    `cleanup` clears the delivery labels, removes the worktree and local
+    branch, and regenerates status last, so the view never shows the stale
+    label. Run it from `$PRIMARY` — the checkout captured in step 2 — and not
+    from the slice worktree:
 
     ```bash
-    rtk proxy gh issue edit N --remove-label in-review
-    cd "$PRIMARY" \
-      && rtk python3 scripts/sdlc.py cleanup N \
-      && rtk python3 scripts/sdlc.py status
+    cd "$PRIMARY" && rtk python3 scripts/sdlc.py cleanup N
     ```
+
+    It is safe to rerun after a partial failure.
 
     `cleanup` resolves the worktree relative to the checkout containing the
     `sdlc.py` that ran, not the current directory. Invoked from the slice

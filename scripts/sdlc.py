@@ -1480,6 +1480,10 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     ])
     print(f"CLAIMED: issue #{args.issue} on `{branch}`")
     print(f"WORKTREE={worktree}")
+    # The fetch above advanced only the remote-tracking ref. A checked-out
+    # local default branch is never moved here, so it may be stale: diff and
+    # rebase against this ref, never the local one.
+    print(f"BASE=origin/{config['default_branch']}")
     return 0
 
 
@@ -1488,15 +1492,31 @@ def command_cleanup(args: argparse.Namespace, config: dict[str, Any]) -> int:
     if issue.get("state") != "CLOSED":
         print(f"BLOCKED: issue #{args.issue} is not closed")
         return 1
+    # Delivery labels are cleared first and the status view rendered last, so
+    # the view never shows a closed slice as still in progress or in review.
+    # Only labels actually present are removed: a rerun after a partial
+    # failure edits nothing it already fixed, and unrelated labels stay.
+    delivery = [config["labels"][key] for key in ("in_progress", "in_review")]
+    stale = [label for label in delivery if label in label_names(issue)]
+    if stale:
+        command = ["gh", "issue", "edit", str(args.issue), "--repo", config["repository"]]
+        for label in stale:
+            command += ["--remove-label", label]
+        run_text(command)
+        print(f"CLEARED: {', '.join(stale)} from issue #{args.issue}")
     branch = f"issue/{args.issue}"
     worktree = ROOT / ".worktrees" / f"issue-{args.issue}"
     if worktree.exists():
+        # Never forced: git refuses to remove a worktree with local changes.
         run_text(["git", "worktree", "remove", str(worktree)])
     local = run_process(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], check=False)
     if local.returncode == 0:
         run_text(["git", "branch", "-d", branch])
     run_text(["git", "fetch", "origin", "--prune"])
     print(f"CLEANED: issue #{args.issue}")
+    output = ROOT / config["status"]["output"]
+    write_atomic(output, render_status(build_model(fetch_status_data(config), config)))
+    print(f"WROTE {output}")
     return 0
 
 
@@ -1891,7 +1911,7 @@ def build_parser() -> argparse.ArgumentParser:
     claim.add_argument("--resume", action="store_true", help="reuse an existing remote claim branch")
     claim.set_defaults(func=command_claim)
 
-    cleanup = sub.add_parser("cleanup", help="remove a closed slice's worktree and local branch")
+    cleanup = sub.add_parser("cleanup", help="after merge: clear delivery labels, remove the worktree and local branch, then regenerate status")
     cleanup.add_argument("issue", type=int)
     cleanup.set_defaults(func=command_cleanup)
 
