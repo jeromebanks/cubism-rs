@@ -1164,7 +1164,10 @@ Read one file.
                 contextlib.redirect_stdout(out):
             code = sdlc.command_merge(argparse.Namespace(pr=99, apply=True), self.config)
         self.assertEqual(1, code)
-        self.assertEqual([], writes, "a merge-commit head with no trailer must never reach `gh pr merge`")
+        self.assertEqual(
+            [], writes,
+            "a same-account receipt on a merge-commit head with no trailer must never reach `gh pr merge`",
+        )
         self.assertIn("rebase", out.getvalue())
         self.assertIn("gh pr update-branch", out.getvalue())
         self.assertNotIn("add an", out.getvalue())
