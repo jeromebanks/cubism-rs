@@ -1783,6 +1783,13 @@ def command_renew_review_budget(args: argparse.Namespace, config: dict[str, Any]
     decided_by = (args.decided_by or "").strip()
     if not decided_by:
         raise SdlcError("--decided-by must name the person who authorized this renewal")
+    # `-->` would close the HTML comment early and a newline would break the
+    # single-line marker, so `BUDGET_RECORD_RE` would stop mid-JSON and the
+    # record would be silently unparseable -- posted successfully, printed as
+    # `RENEWED`, but never actually raising the budget. Same guard `set-gate`
+    # applies to `--checkpoint`/`--decided-by`.
+    if "-->" in decided_by or any(char in decided_by for char in "\r\n"):
+        raise SdlcError("--decided-by must be a single line and must not contain `-->`")
     if args.rounds <= 0:
         raise SdlcError("--rounds must be a positive integer")
     record = f"{budget_marker(args.kind, args.rounds, decided_by)}\n\n{note}\n"

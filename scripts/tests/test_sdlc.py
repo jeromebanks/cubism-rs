@@ -581,12 +581,34 @@ Read one file.
             self._receipt("fresh-codex", "fail", head="bbb"),
             self._receipt("fresh-codex", "pass", head="ccc"),
         ])
-        # Not just the current head: a rebase moves `headRefOid` but posts no
-        # new receipt, so re-running this over the same parsed receipts (as a
-        # fresh session would, after reconstructing state from GitHub) must
-        # not change the count.
         self.assertEqual(3, sdlc.consumed_review_rounds(receipts, "codex"))
-        self.assertEqual(3, sdlc.consumed_review_rounds(receipts, "codex"))
+
+    def test_a_rebase_alone_does_not_change_the_gate_level_consumed_count(self):
+        # Not a call-it-twice tautology: this drives `evaluate_merge_gate`
+        # itself, once against the head the rounds were recorded on and once
+        # against a different head -- modeling a rebase that moves
+        # `headRefOid` without posting a new review. Four rounds are already
+        # over the default budget of 3, and the reported consumed count must
+        # be identical either way: the rebase itself posts no new receipt.
+        comments = [
+            self._receipt("fresh-codex", "fail", head="aaa"),
+            self._receipt("fresh-codex", "fail", head="bbb"),
+            self._receipt("fresh-codex", "fail", head="ccc"),
+            self._receipt("fresh-codex", "pass", head="abc123"),
+        ]
+        before = self._evaluate(dict(self._passing_pr(head="abc123"), number=110), comments, self.slice, self.config)
+        after = self._evaluate(dict(self._passing_pr(head="rebased0"), number=110), comments, self.slice, self.config)
+        for errors in (before, after):
+            self.assertTrue(any("4 rounds recorded, budget is 3" in e for e in errors), errors)
+
+    def test_exactly_the_default_budget_does_not_block(self):
+        # Pins the boundary: a budget of 3 permits 3 rounds outright.
+        comments = [
+            self._receipt("fresh-codex", "fail", head="aaa"),
+            self._receipt("fresh-codex", "fail", head="bbb"),
+            self._receipt("fresh-codex", "pass", head="abc123"),
+        ]
+        self.assertEqual([], self._evaluate(self._passing_pr(), comments, self.slice, self.config))
 
     def test_consumed_review_rounds_is_scoped_to_one_kind(self):
         receipts = sdlc.parse_review_receipts([
@@ -640,14 +662,12 @@ Read one file.
             self._receipt("fresh-codex", "fail", head="ccc"),
             self._receipt("fresh-codex", "pass", head="abc123"),
         ]
-        errors = self._evaluate(self._passing_pr(), comments, self.slice, self.config)
-        self.assertTrue(
-            any(
-                "`codex` review budget exhausted" in e
-                and "4 rounds recorded, budget is 3" in e
-                and "renew-review-budget --pr" in e
-                for e in errors
-            ),
+        pr = dict(self._passing_pr(), number=110)
+        errors = self._evaluate(pr, comments, self.slice, self.config)
+        self.assertIn(
+            "`codex` review budget exhausted for PR #110: 4 rounds recorded, budget is 3; "
+            "record a human decision with `renew-review-budget --pr 110 --kind codex "
+            "--rounds 4 --decided-by <human> --note-file <path> --apply`",
             errors,
         )
 
@@ -701,65 +721,134 @@ Read one file.
                     self._passing_pr(), [self._receipt("fresh-codex")], self.slice, config)
                 self.assertTrue(any("review.max_rounds" in e for e in errors), errors)
 
-    def test_renew_review_budget_requires_apply_to_post(self):
+    def _renew_args(self, tmp, **overrides):
         import argparse
+        note = Path(tmp) / "note.md"
+        note.write_text(overrides.pop("note_text", "Approved after reviewing round 4's findings.\n"), encoding="utf-8")
+        fields = dict(pr=110, kind="codex", rounds=4, decided_by="jerome", note_file=note, apply=True)
+        fields.update(overrides)
+        return argparse.Namespace(**fields)
+
+    def test_renew_review_budget_requires_apply_to_post(self):
         with tempfile.TemporaryDirectory() as tmp:
-            note = Path(tmp) / "note.md"
-            note.write_text("Approved after reviewing round 4's findings.\n", encoding="utf-8")
-            args = argparse.Namespace(
-                pr=110, kind="codex", rounds=4, decided_by="jerome", note_file=note, apply=False,
-            )
-            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
+            args = self._renew_args(tmp, apply=False)
+            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}) as fetch, \
                  patch.object(sdlc, "run_json") as poster:
                 self.assertEqual(0, sdlc.command_renew_review_budget(args, self.config))
+            fetch.assert_called_once_with(110, self.config)
             poster.assert_not_called()
 
     def test_renew_review_budget_refuses_without_decided_by(self):
-        import argparse
         with tempfile.TemporaryDirectory() as tmp:
-            note = Path(tmp) / "note.md"
-            note.write_text("note\n", encoding="utf-8")
-            args = argparse.Namespace(
-                pr=110, kind="codex", rounds=4, decided_by="  ", note_file=note, apply=True,
-            )
-            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}):
-                with self.assertRaises(sdlc.SdlcError):
+            args = self._renew_args(tmp, decided_by="  ")
+            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
+                 patch.object(sdlc, "run_json") as poster:
+                with self.assertRaisesRegex(sdlc.SdlcError, "must name the person"):
                     sdlc.command_renew_review_budget(args, self.config)
+            poster.assert_not_called()
+
+    def test_renew_review_budget_refuses_a_decided_by_that_would_break_the_marker(self):
+        # #1: `-->` would close the HTML comment early; a bare newline breaks
+        # the single-line marker. Either way `BUDGET_RECORD_RE` would stop
+        # mid-JSON and the record would be silently unparseable even though
+        # the command reported success -- so refuse before posting anything.
+        for bad in ("evil --> injected", "two\nlines"):
+            with self.subTest(decided_by=bad):
+                with tempfile.TemporaryDirectory() as tmp:
+                    args = self._renew_args(tmp, decided_by=bad)
+                    with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
+                         patch.object(sdlc, "run_json") as poster:
+                        with self.assertRaisesRegex(sdlc.SdlcError, "must be a single line"):
+                            sdlc.command_renew_review_budget(args, self.config)
+                    poster.assert_not_called()
+
+    def test_renew_review_budget_refuses_a_non_positive_rounds_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._renew_args(tmp, rounds=0)
+            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
+                 patch.object(sdlc, "run_json") as poster:
+                with self.assertRaisesRegex(sdlc.SdlcError, "positive integer"):
+                    sdlc.command_renew_review_budget(args, self.config)
+            poster.assert_not_called()
+
+    def test_renew_review_budget_refuses_an_empty_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._renew_args(tmp, note_text="   \n")
+            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
+                 patch.object(sdlc, "run_json") as poster:
+                with self.assertRaisesRegex(sdlc.SdlcError, "must not be empty"):
+                    sdlc.command_renew_review_budget(args, self.config)
+            poster.assert_not_called()
 
     def test_renew_review_budget_refuses_a_pr_that_does_not_resolve(self):
-        import argparse
         with tempfile.TemporaryDirectory() as tmp:
-            note = Path(tmp) / "note.md"
-            note.write_text("note\n", encoding="utf-8")
-            args = argparse.Namespace(
-                pr=999999, kind="codex", rounds=4, decided_by="jerome", note_file=note, apply=True,
-            )
-            with patch.object(sdlc, "fetch_pr", side_effect=sdlc.SdlcError("no such PR")):
-                with self.assertRaises(sdlc.SdlcError):
+            args = self._renew_args(tmp, pr=999999)
+            with patch.object(sdlc, "fetch_pr", side_effect=sdlc.SdlcError("no such PR")), \
+                 patch.object(sdlc, "run_json") as poster:
+                with self.assertRaisesRegex(sdlc.SdlcError, "no such PR"):
+                    sdlc.command_renew_review_budget(args, self.config)
+            poster.assert_not_called()
+
+    def test_renew_review_budget_refuses_a_response_with_no_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._renew_args(tmp)
+            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
+                 patch.object(sdlc, "run_json", return_value={"id": 900}):
+                with self.assertRaisesRegex(sdlc.SdlcError, "returned no URL"):
                     sdlc.command_renew_review_budget(args, self.config)
 
-    def test_renew_review_budget_posts_the_expected_marker_and_note(self):
-        import argparse
+    def test_renew_review_budget_posts_the_expected_marker_note_and_command(self):
         posted = {}
 
         def run_json(command):
             # Read the `--input` payload while the temp file still exists:
             # the real command deletes it in a `finally` right after this
             # call returns.
+            posted["command"] = command
             posted["body"] = json.loads(Path(command[command.index("--input") + 1]).read_text())["body"]
             return {"html_url": "https://example/comment/1"}
 
         with tempfile.TemporaryDirectory() as tmp:
-            note = Path(tmp) / "note.md"
-            note.write_text("Approved after reviewing round 4's findings.\n", encoding="utf-8")
-            args = argparse.Namespace(
-                pr=110, kind="codex", rounds=4, decided_by="jerome", note_file=note, apply=True,
-            )
-            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
+            args = self._renew_args(tmp)
+            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}) as fetch, \
                  patch.object(sdlc, "run_json", side_effect=run_json):
                 self.assertEqual(0, sdlc.command_renew_review_budget(args, self.config))
+        fetch.assert_called_once_with(110, self.config)
+        self.assertEqual(
+            ["gh", "api", "--method", "POST", f"repos/{self.config['repository']}/issues/110/comments"],
+            posted["command"][:5],
+        )
+        self.assertEqual("--input", posted["command"][5])
         self.assertIn(sdlc.budget_marker("codex", 4, "jerome"), posted["body"])
         self.assertIn("Approved after reviewing round 4's findings.", posted["body"])
+
+    def test_merge_gate_and_merge_both_block_on_an_exhausted_budget(self):
+        # Acceptance: "`merge --apply` and `merge-gate` both block" -- driven
+        # through the real commands, not just `evaluate_merge_gate` directly,
+        # and proving `gh pr merge` is never reached.
+        import argparse
+        import contextlib
+        import io
+        pr = dict(self._passing_pr(), number=110)
+        comments = [
+            self._receipt("fresh-codex", "fail", head="aaa"),
+            self._receipt("fresh-codex", "fail", head="bbb"),
+            self._receipt("fresh-codex", "fail", head="ccc"),
+            self._receipt("fresh-codex", "pass", head="abc123"),
+        ]
+        gate_inputs = sdlc.GateInputs(pr, comments, self.slice, "", self._open_parent(), ())
+        out = io.StringIO()
+        with patch.object(sdlc, "load_gate_inputs", return_value=gate_inputs), \
+             patch.object(sdlc, "run_text") as merge_call, \
+             contextlib.redirect_stdout(out):
+            gate_code = sdlc.command_merge_gate(argparse.Namespace(pr=110), self.config)
+            merge_code = sdlc.command_merge(argparse.Namespace(pr=110, apply=True), self.config)
+        self.assertEqual(1, gate_code)
+        self.assertEqual(1, merge_code)
+        merge_call.assert_not_called()
+        output = out.getvalue()
+        self.assertIn("BLOCKED:", output)
+        self.assertIn("review budget exhausted", output)
 
     # --- applied merge ---
 
