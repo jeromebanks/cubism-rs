@@ -2374,6 +2374,7 @@ Read one file.
         def run_text(args):
             if args[:3] == ["gh", "issue", "edit"]:
                 self.assertEqual("11", args[3], args)
+                self.assertEqual(["--repo", self.config["repository"]], args[4:6], args)
             effects.append(args)
             return ""
 
@@ -2529,6 +2530,7 @@ Read one file.
                 # crash happens before this call, not as part of it.
                 if args[:3] == ["gh", "issue", "edit"]:
                     self.assertEqual("11", args[3], args)
+                    self.assertEqual(["--repo", self.config["repository"]], args[4:6], args)
                     k = counter["n"]
                     maybe_interrupt(k, before=True)
                     calls.append(("text", args))
