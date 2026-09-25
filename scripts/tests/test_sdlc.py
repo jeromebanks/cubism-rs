@@ -2875,5 +2875,72 @@ Read one file.
                     run_after_mark(fail_at, mode)
 
 
+class CodexReviewEnvelopeTests(unittest.TestCase):
+    """`.agents/skills/codex-review/SKILL.md` derives reviewer identity by
+    scraping `model:` and `session id:` labels out of `codex exec`'s stderr.
+    Nothing else notices if OpenAI renames or reformats either label: the
+    skill already refuses to record an empty identity, so drift fails
+    closed, but only at review time, mid-slice, looking like a Codex
+    malfunction rather than a version skew. This is the loud, earlier
+    signal instead.
+    """
+
+    SKILL_PATH = ROOT / ".agents" / "skills" / "codex-review" / "SKILL.md"
+
+    def test_codex_exec_stderr_matches_reviewer_identity_patterns(self):
+        import re
+        import shutil
+        import subprocess
+
+        skill_text = self.SKILL_PATH.read_text()
+        # The same `sed -n '<script>'` scripts the skill runs against
+        # `$REPORT.err`, pulled from its own source so this test and the
+        # skill can never silently diverge (single source of truth).
+        sed_scripts = re.findall(r"sed -n '(s/[^']*)'", skill_text)
+        self.assertEqual(
+            2, len(sed_scripts),
+            f"expected exactly two `sed -n '...'` reviewer-identity scripts "
+            f"in {self.SKILL_PATH}, found {sed_scripts}; update this test if "
+            f"the skill's identity derivation intentionally changed")
+
+        if not shutil.which("codex"):
+            self.skipTest("codex is unavailable")
+
+        # Mirrors codex-review/SKILL.md section 1 exactly: the same flags,
+        # the same closed stdin, stdout and stderr captured separately.
+        # Any flag that could change the stderr header must match the
+        # skill's own invocation.
+        try:
+            result = subprocess.run(
+                ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check",
+                 "Say hello in one word."],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired as exc:
+            self.fail(
+                "codex exec did not finish within 120s; this is a codex "
+                f"problem (hung run), not envelope drift. Captured so far:\n"
+                f"stdout: {exc.stdout!r}\nstderr: {exc.stderr!r}")
+
+        self.assertEqual(
+            0, result.returncode,
+            f"codex exec exited {result.returncode}; this indicates codex "
+            f"could not run (auth, network, or config), not envelope drift. "
+            f"stderr:\n{result.stderr[-2000:]}")
+
+        for script in sed_scripts:
+            sed_result = subprocess.run(
+                ["sed", "-n", script], input=result.stderr,
+                capture_output=True, text=True)
+            lines = sed_result.stdout.splitlines()
+            first_line = lines[0] if lines else ""
+            self.assertTrue(
+                first_line.strip(),
+                f"reviewer-identity pattern {script!r} matched nothing in "
+                f"`codex exec`'s stderr; the envelope has likely drifted "
+                f"and the merge gate would refuse every receipt with "
+                f"\"cannot identify the reviewer\". Captured stderr:\n"
+                f"{result.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main()
