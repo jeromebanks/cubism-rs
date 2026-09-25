@@ -814,6 +814,65 @@ Read one file.
             sdlc.collect_findings(receipts, "codex")
         self.assertIn("https://example/comment/9", str(ctx.exception))
 
+    def test_a_renumbered_id_does_not_close_the_original(self):
+        # The documented sharp edge codex-review/SKILL.md section 2/3 name:
+        # `collect_findings` folds strictly by exact id string. A reviewer
+        # that reuses `x-1`'s prose but reports it under a new id (`x-1a`)
+        # instead of the id the `findings` read command told it was still
+        # open leaves `x-1` open forever -- there is nothing in this layer
+        # that can recognize the two as the same finding. This is a
+        # characterization test for that limitation, not a fix: the fix is
+        # the reviewer prompt telling a reviewer to reuse the id verbatim.
+        receipts = sdlc.parse_review_receipts([
+            self._receipt(
+                "reviewer-a", "fail", head="aaa", created_at="2026-01-01T00:00:00Z",
+                findings=[{"id": "x-1", "blocking": True, "disposition": "open"}],
+            ),
+            self._receipt(
+                "reviewer-a", "pass", head="bbb", created_at="2026-01-02T00:00:00Z",
+                findings=[{"id": "x-1a", "blocking": False, "disposition": "fixed", "evidence": "commit abc"}],
+            ),
+        ])
+        found = sdlc.collect_findings(receipts, "codex")
+        self.assertEqual("open", found["x-1"]["disposition"])
+        self.assertEqual("fixed", found["x-1a"]["disposition"])
+        self.assertEqual(["x-1"], [f["id"] for f in sdlc.unresolved_blocking_findings(receipts, "codex")])
+
+    def test_command_findings_prints_an_empty_map_for_a_pr_with_none(self):
+        import argparse
+        args = argparse.Namespace(pr=116, kind="codex")
+        with patch.object(sdlc, "fetch_comments", return_value=[self._receipt("reviewer-a", "pass", head="aaa")]), \
+             patch("builtins.print") as mock_print:
+            self.assertEqual(0, sdlc.command_findings(args, self.config))
+        mock_print.assert_called_once_with("{}")
+
+    def test_command_findings_prints_the_folded_result_as_compact_sorted_json(self):
+        import argparse
+        args = argparse.Namespace(pr=116, kind="codex")
+        comments = [
+            self._receipt(
+                "reviewer-a", "fail", head="aaa", created_at="2026-01-01T00:00:00Z",
+                findings=[{"id": "x-1", "blocking": True, "disposition": "open"}],
+            ),
+        ]
+        with patch.object(sdlc, "fetch_comments", return_value=comments), \
+             patch("builtins.print") as mock_print:
+            self.assertEqual(0, sdlc.command_findings(args, self.config))
+        mock_print.assert_called_once_with(
+            '{"x-1":{"blocking":true,"comment_url":null,"disposition":"open","evidence":null,"id":"x-1"}}')
+
+    def test_command_findings_fails_closed_on_a_malformed_receipt(self):
+        import argparse
+        args = argparse.Namespace(pr=116, kind="codex")
+        comments = [{
+            "body": '<!-- nightshift-review {"schema":1,"kind":"codex","head_sha":"aaa",'
+                    '"verdict":"pass","reviewer":"reviewer-a","findings":"not-a-list"} -->',
+            "user": {"login": "reviewer-a"}, "created_at": "2026-01-01T00:00:00Z",
+        }]
+        with patch.object(sdlc, "fetch_comments", return_value=comments):
+            with self.assertRaises(sdlc.SdlcError):
+                sdlc.command_findings(args, self.config)
+
     def test_unresolved_blocking_findings_excludes_non_blocking(self):
         receipts = sdlc.parse_review_receipts([
             self._receipt(
@@ -3602,6 +3661,97 @@ class CodexEnvelopeTests(unittest.TestCase):
                 else:
                     self.assertEqual(expected, sdlc.parse_codex_verdict(report_text))
 
+    # (name, report text, expected parsed findings list, or None for a
+    # fail-closed `SdlcError`, or the string "raises" when only the error
+    # matters and the exact message is asserted separately below).
+    FINDINGS_CASES = [
+        ("no_findings_line_at_all", "findings...\nVERDICT: pass\n", []),
+        ("explicit_empty_list", "FINDINGS: []\nVERDICT: pass\n", []),
+        (
+            "well_formed_single_entry",
+            'FINDINGS: [{"id":"x-1","blocking":true,"disposition":"open"}]\nVERDICT: pass\n',
+            [{"id": "x-1", "blocking": True, "disposition": "open", "evidence": None}],
+        ),
+        ("malformed_json", "FINDINGS: not-json\nVERDICT: pass\n", "raises"),
+        (
+            "payload_parse_findings_itself_rejects",
+            'FINDINGS: [{"id":"","blocking":true,"disposition":"open"}]\nVERDICT: pass\n',
+            "raises",
+        ),
+        ("findings_line_after_the_verdict_line", "VERDICT: pass\nFINDINGS: []\n", "raises"),
+        (
+            "findings_line_not_immediately_before_verdict",
+            "FINDINGS: []\nmore text\nVERDICT: pass\n",
+            "raises",
+        ),
+        ("no_verdict_line_at_all_but_a_findings_line_present", "FINDINGS: []\n", "raises"),
+        (
+            # The asymmetry a bare CRLF check on the whole report would miss:
+            # only the FINDINGS line itself carries a trailing `\r`, while the
+            # VERDICT line is clean LF and parses fine on its own.
+            # `json.loads` treats a trailing `\r` as whitespace and would
+            # otherwise accept this silently.
+            "crlf_on_the_findings_line_specifically",
+            "FINDINGS: []\r\nVERDICT: pass\n",
+            "raises",
+        ),
+        # Near-misses a markdown-writing model is likely to actually produce.
+        # A bare `str.startswith(FINDINGS_LINE_PREFIX)` check would miss every
+        # one of these and silently read the report as having no findings at
+        # all -- exactly the dropped-blocking-finding failure mode the broader
+        # `_FINDINGS_ATTEMPT_RE` detector exists to close.
+        ("indented_findings_line", "  FINDINGS: []\nVERDICT: pass\n", "raises"),
+        ("findings_line_in_backticks", "`FINDINGS: []`\nVERDICT: pass\n", "raises"),
+        ("findings_line_as_a_list_item", "- FINDINGS: []\nVERDICT: pass\n", "raises"),
+        ("findings_line_missing_the_space_after_the_colon", "FINDINGS:[]\nVERDICT: pass\n", "raises"),
+        ("lowercase_findings_line", "findings: []\nVERDICT: pass\n", "raises"),
+        ("blockquoted_findings_line", "> FINDINGS: []\nVERDICT: pass\n", "raises"),
+        (
+            "bold_findings_line_with_a_real_payload",
+            '**FINDINGS:** [{"id":"x-1","blocking":true,"disposition":"open"}]\nVERDICT: pass\n',
+            "raises",
+        ),
+        ("misplaced_backticked_findings_line", "VERDICT: pass\n`FINDINGS: []`\n", "raises"),
+        # Negative cases: ordinary report prose that happens to start with
+        # the word "findings" is NOT an attempt at the structured line and
+        # must return `[]`, not raise. Section 2 tells a reviewer with
+        # nothing to report to "say so explicitly", which routinely produces
+        # exactly this shape. An earlier, looser detector (matching on the
+        # word alone, with no requirement for a following `[`) failed all
+        # three of these -- it would have forced an ordinary clean-pass
+        # round into `VERDICT: fail`, burning a round of the budget for
+        # nothing. Confirmed separately against every codex receipt already
+        # recorded on PRs #109, #111, #113 and #115: none raise.
+        ("prose_findings_colon_no_brackets", "Findings: none material.\nVERDICT: pass\n", []),
+        ("bold_findings_header", "**Findings:** none material.\nVERDICT: pass\n", []),
+        ("findings_colon_then_a_prose_numbered_list", "Findings:\n1. some prose finding\nVERDICT: pass\n", []),
+    ]
+
+    def test_parse_codex_findings_matches_section_2s_report_contract(self):
+        for name, report_text, expected in self.FINDINGS_CASES:
+            with self.subTest(case=name):
+                if expected == "raises":
+                    with self.assertRaises(sdlc.SdlcError):
+                        sdlc.parse_codex_findings(report_text)
+                else:
+                    self.assertEqual(expected, sdlc.parse_codex_findings(report_text))
+
+    def test_parse_codex_findings_rejects_a_carriage_return_with_its_own_message(self):
+        with self.assertRaises(sdlc.SdlcError) as cm:
+            sdlc.parse_codex_findings("FINDINGS: []\r\nVERDICT: pass\n")
+        self.assertEqual("FINDINGS line must not contain a carriage return", str(cm.exception))
+
+    def test_parse_codex_findings_misplaced_line_raises_the_placement_message(self):
+        with self.assertRaises(sdlc.SdlcError) as cm:
+            sdlc.parse_codex_findings("VERDICT: pass\nFINDINGS: []\n")
+        self.assertEqual(
+            "a `FINDINGS:` line must be written exactly as `FINDINGS: <json>` "
+            "at the start of the line -- no leading whitespace, list marker, "
+            "blockquote, or code formatting -- and must be the last non-blank "
+            "line before the trailing `VERDICT: pass|fail` line",
+            str(cm.exception),
+        )
+
     def test_require_nonempty_report_matches_section_1s_test_dash_s(self):
         with self.assertRaises(sdlc.SdlcError) as cm:
             sdlc.require_nonempty_report("", Path("/tmp/review.md.err"))
@@ -3637,6 +3787,24 @@ class CodexEnvelopeTests(unittest.TestCase):
                 self.assertEqual(0, sdlc.command_codex_envelope(args, self.config))
             mock_print.assert_called_once_with("pass")
 
+    def test_command_codex_envelope_findings_field_prints_compact_sorted_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._envelope_args(
+                tmp,
+                report_text='FINDINGS: [{"id":"x-1","blocking":true,"disposition":"open"}]\nVERDICT: pass\n',
+                err_text="model: gpt-5\nsession id: sess-1\n", field="findings")
+            with patch("builtins.print") as mock_print:
+                self.assertEqual(0, sdlc.command_codex_envelope(args, self.config))
+            mock_print.assert_called_once_with(
+                '[{"blocking":true,"disposition":"open","evidence":null,"id":"x-1"}]')
+
+            args = self._envelope_args(
+                tmp, report_text="findings\nVERDICT: pass\n",
+                err_text="model: gpt-5\nsession id: sess-1\n", field="findings")
+            with patch("builtins.print") as mock_print:
+                self.assertEqual(0, sdlc.command_codex_envelope(args, self.config))
+            mock_print.assert_called_once_with("[]")
+
     def test_command_codex_envelope_reads_files_raw_not_universal_newlines(self):
         # A `Path.read_text()` default call normalizes `\r\n` to `\n` before
         # the parser ever sees it, which would make a CRLF report pass when
@@ -3653,7 +3821,7 @@ class CodexEnvelopeTests(unittest.TestCase):
                 "report does not end with a verdict line; refusing to record", str(cm.exception))
 
     def test_command_codex_envelope_empty_report_fails_before_either_field(self):
-        for field in ("reviewer", "verdict"):
+        for field in ("reviewer", "verdict", "findings"):
             with self.subTest(field=field):
                 with tempfile.TemporaryDirectory() as tmp:
                     args = self._envelope_args(
@@ -3743,6 +3911,15 @@ class CodexEnvelopeTests(unittest.TestCase):
         self.assertEqual(1, sdlc.consumed_review_rounds(receipts, "codex"))
 
     SKILL_PATH = ROOT / ".agents" / "skills" / "codex-review" / "SKILL.md"
+    # The merge commit of #111 -- the last commit before #112 introduced
+    # `codex-envelope` and rewrote section 3 to call it. A fixed commit, not
+    # `origin/main`: that ref moves forward with every later merge (#113
+    # already carried it past #112 once), so pinning to it silently stopped
+    # being "the pre-#112 baseline" the day #112 itself merged. `git show
+    # <sha>:path` only needs the object in history, which a normal clone or
+    # `claim`'s `git fetch origin main` both retain regardless of what branch
+    # is currently checked out.
+    PRE_112_BASELINE_SHA = "70bb534b7abc90829bd04c1c493a51f12c223f60"
 
     @staticmethod
     def _extract_section(skill_text, heading, next_marker="^## "):
@@ -3796,31 +3973,64 @@ class CodexEnvelopeTests(unittest.TestCase):
                      "REPORT": str(report_path)},
                 capture_output=True, text=True, timeout=30)
 
-    def test_section_3_block_derives_both_values_through_a_real_codex_envelope_call(self):
-        code_text = self._section_code_block("## 3. Derive identity and verdict from the run")
+    SECTION_3_HEADING = "## 3. Derive identity, verdict, and findings from the run"
+
+    def test_section_3_block_derives_all_three_values_through_a_real_codex_envelope_call(self):
+        code_text = self._section_code_block(self.SECTION_3_HEADING)
         result = self._run_with_real_passthrough(
             code_text, report_text="findings\nVERDICT: pass\n",
             err_text="model: gpt-5\nsession id: sess-1\n",
-            extra_script='\nprintf "%s\\n%s\\n" "$REVIEWER" "$VERDICT"\n')
+            extra_script='\nprintf "%s\\n%s\\n%s\\n" "$REVIEWER" "$VERDICT" "$FINDINGS_JSON"\n')
         self.assertEqual(
             0, result.returncode,
             f"section 3's code block failed against a well-formed fixture; "
             f"this means it no longer calls codex-envelope correctly. "
             f"stdout: {result.stdout!r} stderr: {result.stderr!r}")
-        self.assertEqual(["Codex gpt-5 / sess-1", "pass"], result.stdout.splitlines())
+        self.assertEqual(["Codex gpt-5 / sess-1", "pass", "[]"], result.stdout.splitlines())
+
+    def test_section_3_block_derives_a_well_formed_findings_line(self):
+        code_text = self._section_code_block(self.SECTION_3_HEADING)
+        result = self._run_with_real_passthrough(
+            code_text,
+            report_text='FINDINGS: [{"id":"x-1","blocking":true,"disposition":"open"}]\nVERDICT: pass\n',
+            err_text="model: gpt-5\nsession id: sess-1\n",
+            extra_script='\nprintf "%s\\n" "$FINDINGS_JSON"\n')
+        self.assertEqual(0, result.returncode, f"stderr: {result.stderr!r}")
+        self.assertEqual(
+            ['[{"blocking":true,"disposition":"open","evidence":null,"id":"x-1"}]'],
+            result.stdout.splitlines())
 
     def test_section_3_block_fails_closed_when_the_helper_cannot_identify_the_reviewer(self):
         # No `session id:` line at all. `codex-envelope`'s diagnostic reaches
         # stderr, not `$REVIEWER` -- section 3 no longer folds the two
         # streams together, so a stray stderr line on an otherwise
         # successful run can never end up inside a recorded receipt.
-        code_text = self._section_code_block("## 3. Derive identity and verdict from the run")
+        code_text = self._section_code_block(self.SECTION_3_HEADING)
         result = self._run_with_real_passthrough(
             code_text, report_text="findings\nVERDICT: pass\n", err_text="model: gpt-5\n",
-            extra_script='\nprintf "%s\\n%s\\n" "$REVIEWER" "$VERDICT"\n')
+            extra_script='\nprintf "%s\\n%s\\n%s\\n" "$REVIEWER" "$VERDICT" "$FINDINGS_JSON"\n')
         self.assertNotEqual(0, result.returncode)
         self.assertEqual("", result.stdout)
         self.assertIn("cannot identify the reviewer; refusing to record", result.stderr)
+
+    def test_section_3_block_forces_a_fail_when_the_findings_line_is_malformed(self):
+        # A well-formed reviewer identity and a clean `VERDICT: pass` line,
+        # but a `FINDINGS:` line the parser rejects (here: indented, so it is
+        # recognized as an attempt and not silently read as "none"). Section
+        # 3 must not abort after `$VERDICT` is already known-good -- that
+        # would either lose a real verdict or tempt a re-run that discards
+        # it. It forces `VERDICT=fail` and `FINDINGS_JSON=[]` instead, and
+        # keeps going (exit 0), so section 4 still records this round.
+        code_text = self._section_code_block(self.SECTION_3_HEADING)
+        result = self._run_with_real_passthrough(
+            code_text, report_text="  FINDINGS: []\nVERDICT: pass\n",
+            err_text="model: gpt-5\nsession id: sess-1\n",
+            extra_script='\nprintf "%s\\n%s\\n%s\\n" "$REVIEWER" "$VERDICT" "$FINDINGS_JSON"\n')
+        self.assertEqual(0, result.returncode, f"stderr: {result.stderr!r}")
+        self.assertEqual(["Codex gpt-5 / sess-1", "fail", "[]"], result.stdout.splitlines())
+        self.assertIn(
+            "report's FINDINGS line is malformed; recording this round as a "
+            "forced fail with no findings", result.stderr)
 
     # A shim that logs every call's arguments and returns a distinguishing
     # sentinel instead of doing real work, and fails loudly on anything it
@@ -3850,8 +4060,13 @@ class CodexEnvelopeTests(unittest.TestCase):
         'elif [ "$1" = "python3" ] && [ "$2" = "scripts/sdlc.py" ] '
         '&& [ "$3" = "codex-envelope" ] && [ "$4" = "--field" ] && [ "$5" = "verdict" ]; then\n'
         '  echo "SENTINEL-VERDICT"\n'
+        'elif [ "$1" = "python3" ] && [ "$2" = "scripts/sdlc.py" ] '
+        '&& [ "$3" = "codex-envelope" ] && [ "$4" = "--field" ] && [ "$5" = "findings" ]; then\n'
+        '  echo "SENTINEL-FINDINGS"\n'
         'elif [ "$1" = "python3" ] && [ "$2" = "scripts/sdlc.py" ] && [ "$3" = "codex-await-head" ]; then\n'
         '  echo "SENTINEL-HEAD"\n'
+        'elif [ "$1" = "python3" ] && [ "$2" = "scripts/sdlc.py" ] && [ "$3" = "review-receipt" ]; then\n'
+        '  echo "SENTINEL-RECEIPT"\n'
         'elif [ "$1" = "git" ] && [ "$2" = "rev-parse" ] && [ "$3" = "HEAD" ] && [ "$#" -eq 3 ]; then\n'
         '  echo "LOCAL-HEAD"\n'
         'else\n'
@@ -3881,21 +4096,50 @@ class CodexEnvelopeTests(unittest.TestCase):
             log_lines = log_path.read_text().splitlines() if log_path.exists() else []
             return result, log_lines
 
-    def test_section_3_block_structurally_calls_codex_envelope_for_both_fields(self):
-        code_text = self._section_code_block("## 3. Derive identity and verdict from the run")
+    def test_section_3_block_structurally_calls_codex_envelope_for_all_three_fields(self):
+        code_text = self._section_code_block(self.SECTION_3_HEADING)
         result, log_lines = self._run_with_sentinel_shim(
             code_text, env_extra={"REPORT": "/fake/review.md"},
-            script_suffix='\nprintf "%s\\n%s\\n" "$REVIEWER" "$VERDICT"\n')
+            script_suffix='\nprintf "%s\\n%s\\n%s\\n" "$REVIEWER" "$VERDICT" "$FINDINGS_JSON"\n')
         self.assertEqual(
             0, result.returncode,
             f"section 3's block made no recognized codex-envelope call; "
             f"stdout={result.stdout!r} stderr={result.stderr!r} log={log_lines!r}")
-        self.assertEqual(["SENTINEL-REVIEWER", "SENTINEL-VERDICT"], result.stdout.splitlines())
-        self.assertEqual(2, len(log_lines))
+        self.assertEqual(
+            ["SENTINEL-REVIEWER", "SENTINEL-VERDICT", "SENTINEL-FINDINGS"],
+            result.stdout.splitlines())
+        self.assertEqual(3, len(log_lines))
         self.assertIn("codex-envelope --field reviewer", log_lines[0])
         self.assertIn("--report /fake/review.md --err /fake/review.md.err", log_lines[0])
         self.assertIn("codex-envelope --field verdict", log_lines[1])
         self.assertIn("--report /fake/review.md --err /fake/review.md.err", log_lines[1])
+        self.assertIn("codex-envelope --field findings", log_lines[2])
+        self.assertIn("--report /fake/review.md --err /fake/review.md.err", log_lines[2])
+
+    def test_section_4_block_structurally_calls_review_receipt_with_findings(self):
+        code_text = self._section_code_block("## 4. Record the receipt")
+        result, log_lines = self._run_with_sentinel_shim(
+            code_text,
+            env_extra={
+                "PR": "116", "HEAD_SHA": "a" * 40, "REPORT": "/fake/review.md",
+                "REVIEWER": "Codex gpt-5 / sess-1", "VERDICT": "pass",
+                "FINDINGS_JSON": '[{"id":"x-1","blocking":true,"disposition":"open"}]',
+            },
+            script_suffix="")
+        self.assertEqual(
+            0, result.returncode,
+            f"section 4's block made no recognized review-receipt call; "
+            f"stdout={result.stdout!r} stderr={result.stderr!r} log={log_lines!r}")
+        self.assertEqual(1, len(log_lines))
+        self.assertIn("review-receipt", log_lines[0])
+        self.assertIn("--pr 116", log_lines[0])
+        self.assertIn("--kind codex", log_lines[0])
+        self.assertIn("--verdict pass", log_lines[0])
+        self.assertIn("--reviewer Codex gpt-5 / sess-1", log_lines[0])
+        self.assertIn("--body-file /fake/review.md", log_lines[0])
+        self.assertIn(f"--expect-sha {'a' * 40}", log_lines[0])
+        self.assertIn(
+            '--findings [{"id":"x-1","blocking":true,"disposition":"open"}]', log_lines[0])
 
     def test_section_5_block_structurally_calls_codex_await_head_with_the_local_head(self):
         code_text = self._section_code_block("## 5. After the head changes")
@@ -3919,23 +4163,22 @@ class CodexEnvelopeTests(unittest.TestCase):
         # `sed`/`awk`/a manual retry loop would show up as a content
         # mismatch, not a crash a reviewer could dismiss as unrelated.
         #
-        # `origin/main` is a real ref in a developer/agent checkout (SDLC.md
-        # makes it the one diff/rebase base, and `claim`/`cleanup` fetch it),
-        # but CI's `sdlc tooling` job is a plain `actions/checkout@v4` with no
-        # extra fetch step, so a PR branch's checkout there does not carry
-        # `origin/main` at all. Skip rather than error when it is missing, the
-        # same way the codex-gated test below skips when `codex` is absent --
-        # this is an environment limitation, not a code failure.
+        # CI's `sdlc tooling` job is a plain `actions/checkout@v4` with no
+        # extra fetch step, so a shallow, single-ref checkout of a PR branch
+        # does not carry this commit at all. Skip rather than error when it
+        # is missing, the same way the codex-gated test below skips when
+        # `codex` is absent -- this is an environment limitation, not a code
+        # failure.
         git_show = subprocess.run(
-            ["git", "show", "origin/main:.agents/skills/codex-review/SKILL.md"],
+            ["git", "show", f"{self.PRE_112_BASELINE_SHA}:.agents/skills/codex-review/SKILL.md"],
             cwd=ROOT, capture_output=True, text=True, timeout=10,
         )
         if git_show.returncode != 0:
             self.skipTest(
-                f"origin/main is not resolvable in this checkout (e.g. a "
-                f"shallow, single-ref CI checkout of a PR branch); skipping "
-                f"the meta-verification against the pre-#112 baseline. "
-                f"git stderr: {git_show.stderr.strip()}")
+                f"{self.PRE_112_BASELINE_SHA} is not resolvable in this "
+                f"checkout (e.g. a shallow, single-ref CI checkout of a PR "
+                f"branch); skipping the meta-verification against the "
+                f"pre-#112 baseline. git stderr: {git_show.stderr.strip()}")
         old_skill_text = git_show.stdout
         old_section_3 = self._code_block(
             old_skill_text, "## 3. Derive identity and verdict from the run",
