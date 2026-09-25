@@ -2372,6 +2372,8 @@ Read one file.
         effects = []
 
         def run_text(args):
+            if args[:3] == ["gh", "issue", "edit"]:
+                self.assertEqual("11", args[3], args)
             effects.append(args)
             return ""
 
@@ -2439,7 +2441,14 @@ Read one file.
         once overall, however many retries it took. `git fetch --prune` and
         the read-only `show-ref`/`merge-base` probes are intentionally
         re-issued on every resume; that is expected rerun cost, not a
-        duplicate mutation.
+        duplicate mutation. It also covers both directions of the
+        merge/closure boundary itself: `cleanup` refusing a still-open
+        issue with no effects, and `mark-in-review` refusing an
+        already-closed one with no effects (the race where a resumed
+        session does not yet know the PR merged). GitHub closes the issue
+        atomically as part of accepting the merge, so there is no code of
+        ours sequenced *between* merge and closure to interrupt; both
+        checks assert what we actually own at that boundary.
         """
         import argparse
         import contextlib
@@ -2491,6 +2500,7 @@ Read one file.
                 # recorded in `calls` until it is known to have started: the
                 # crash happens before this call, not as part of it.
                 if args[:3] == ["gh", "issue", "edit"]:
+                    self.assertEqual("11", args[3], args)
                     k = counter["n"]
                     maybe_interrupt(k, before=True)
                     calls.append(("text", args))
@@ -2576,6 +2586,19 @@ Read one file.
                     self.assertEqual(effects_before, calls, "cleanup on an open issue must have no effects")
 
                     world["state"] = "CLOSED"
+
+                    # The reverse race: a resumed session that still believes
+                    # it needs to run mark-in-review discovers the PR already
+                    # merged (closing the issue) in the meantime. GitHub
+                    # closes the issue atomically as part of accepting the
+                    # merge, so there is no code of ours sequenced "between"
+                    # merge and closure to interrupt; what we own is refusing
+                    # correctly once we observe the closed state, without
+                    # touching labels.
+                    effects_before = list(calls)
+                    self.assertEqual(1, mark())
+                    self.assertEqual(effects_before, calls, "mark-in-review on a closed issue must have no effects")
+
                     self.assertEqual(0, run_with_retry(clean))
 
             self.assertEqual({"type:slice"}, world["labels"])
