@@ -2384,18 +2384,31 @@ Read one file.
         issue_obj = {"number": issue, "state": state, "labels": [{"name": name} for name in labels]}
         effects = []
 
-        def fetch_issue(number, _config):
+        def fetch_issue(number, config):
             self.assertEqual(issue, number, "fetch_issue must be asked for the issue under test, not any issue")
+            self.assertIs(self.config, config)
             return issue_obj
 
         def run_text(args):
-            if args[:3] == ["gh", "issue", "edit"]:
-                self._assert_gh_edit_shape(args, issue)
+            # An allowlist: `mark-in-review` has exactly one kind of
+            # effect. Anything else -- including a call routed through
+            # `run_process`/`run_json` instead, patched below to fail on
+            # any call -- must fail the test loudly rather than silently
+            # doing nothing (or, unpatched, running a real command against
+            # real issue #11).
+            if args[:3] != ["gh", "issue", "edit"]:
+                self.fail(f"unexpected run_text command: {args}")
+            self._assert_gh_edit_shape(args, issue)
             effects.append(args)
             return ""
 
+        def fail_on_any_call(*args, **kwargs):
+            self.fail(f"unexpected call: {args!r} {kwargs!r}")
+
         out = io.StringIO()
         with patch.object(sdlc, "fetch_issue", side_effect=fetch_issue), \
+                patch.object(sdlc, "run_process", side_effect=fail_on_any_call), \
+                patch.object(sdlc, "run_json", side_effect=fail_on_any_call), \
                 patch.object(sdlc, "run_text", side_effect=run_text), \
                 contextlib.redirect_stdout(out):
             code = sdlc.command_mark_in_review(argparse.Namespace(issue=issue), self.config)
@@ -2501,6 +2514,20 @@ Read one file.
         equal. `remove in-progress` happens exactly once in every position,
         since whichever command still finds it present removes it, and only
         one ever does.
+
+        The mocks are allowlists: an unexpected `run_text`/`run_process`
+        call fails the test via `self.fail`, rather than being silently
+        accepted, so a command mark-in-review or cleanup should not issue
+        (e.g. an extra `gh issue comment`) is caught. `run_process` also
+        asserts `check=False` on both of cleanup's calls -- `cleanup`'s own
+        source passes it explicitly, because a nonzero return there is an
+        expected outcome to branch on, not a process failure; `check=True`
+        would raise on exactly the rerun-after-branch-deleted case this
+        sweep exists to prove safe. Deliberately left unchecked: the
+        rendered status content passed to `write_atomic` (status
+        rendering is pre-existing, unrelated code, and #82's own tests pin
+        its call ordering) and the informational text printed to stdout
+        (nothing parses it).
         """
         import argparse
         import contextlib
@@ -2599,17 +2626,34 @@ Read one file.
                     world["local_branch"] = False
                     counter["n"] += 1
                     maybe_interrupt(k, before=False)
-                else:
+                elif args == ["git", "fetch", "origin", "--prune"]:
                     calls.append(("text", args))
+                else:
+                    # An allowlist, not a passthrough: an unexpected command
+                    # -- e.g. mark-in-review or cleanup issuing a `gh issue
+                    # close` -- must fail the test loudly rather than be
+                    # silently accepted the way the three branches above
+                    # were before this was added.
+                    self.fail(f"unexpected run_text command: {args}")
                 return ""
 
             def run_process(args, **kwargs):
-                calls.append(("proc", args))
-                if args[:2] == ["git", "show-ref"]:
+                # Same allowlist principle as `run_text`. `check=False` is
+                # asserted, not just accepted: `cleanup`'s own source passes
+                # it explicitly for both of these calls specifically because
+                # a nonzero return here (an absent local branch, or one not
+                # yet merged) is an expected outcome to branch on, not a
+                # process failure -- `check=True` would raise on exactly the
+                # rerun-after-branch-deleted case this sweep exists to prove
+                # safe.
+                self.assertEqual({"check": False}, kwargs, args)
+                if args == ["git", "show-ref", "--verify", "--quiet", "refs/heads/issue/11"]:
+                    calls.append(("proc", args))
                     return subprocess.CompletedProcess(args, 0 if world["local_branch"] else 1, "", "")
-                if args[:2] == ["git", "merge-base"]:
+                if args == ["git", "merge-base", "--is-ancestor", "refs/heads/issue/11", "refs/remotes/origin/main"]:
+                    calls.append(("proc", args))
                     return subprocess.CompletedProcess(args, 0, "", "")
-                return subprocess.CompletedProcess(args, 0, "", "")
+                self.fail(f"unexpected run_process command: {args}")
 
             def write_atomic(path, _content):
                 self.assertEqual(sdlc.ROOT / self.config["status"]["output"], path, path)
@@ -2620,11 +2664,13 @@ Read one file.
                 counter["n"] += 1
                 maybe_interrupt(k, before=False)
 
-            def fetch_issue(number, _config):
+            def fetch_issue(number, config):
                 self.assertEqual(11, number, "fetch_issue must be asked for the issue under test, not any issue")
+                self.assertIs(self.config, config)
                 return {"number": 11, "state": world["state"], "labels": [{"name": n} for n in world["labels"]]}
 
-            def fetch_status_data(_config):
+            def fetch_status_data(config):
+                self.assertIs(self.config, config)
                 return {"repository": "example/repo", "generated_at": "now", "issues": [], "pulls": []}
 
             return world, calls, counter, fired, fail_at_box, mode_box, run_text, run_process, write_atomic, fetch_issue, fetch_status_data
