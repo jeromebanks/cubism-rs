@@ -183,9 +183,9 @@ Read one file.
             "statusCheckRollup": [{"name": "CI required checks", "conclusion": "SUCCESS"}],
         }
 
-    def _receipt(self, author, verdict="pass", head="abc123", created_at=None, reviewer="fresh-codex"):
+    def _receipt(self, author, verdict="pass", head="abc123", created_at=None, reviewer="fresh-codex", findings=None):
         return {
-            "body": sdlc.review_marker("codex", head, verdict, reviewer),
+            "body": sdlc.review_marker("codex", head, verdict, reviewer, findings=findings),
             "user": {"login": author},
             "created_at": created_at,
         }
@@ -680,6 +680,148 @@ Read one file.
         receipts = [{"schema": True, "kind": "codex", "head_sha": "aaa"}]
         self.assertEqual(0, sdlc.consumed_review_rounds(receipts, "codex"))
 
+    # --- structured findings: parsing, marker embedding, cross-head folding ---
+
+    def test_parse_findings_accepts_a_well_formed_list(self):
+        findings = sdlc.parse_findings([
+            {"id": "114-1", "blocking": True, "disposition": "open"},
+            {"id": "114-2", "blocking": False, "disposition": "fixed", "evidence": "commit abc"},
+        ])
+        self.assertEqual(
+            [
+                {"id": "114-1", "blocking": True, "disposition": "open", "evidence": None},
+                {"id": "114-2", "blocking": False, "disposition": "fixed", "evidence": "commit abc"},
+            ],
+            findings,
+        )
+
+    def test_parse_findings_rejects_malformed_input(self):
+        bad_inputs = [
+            {},
+            [1],
+            [{"blocking": True, "disposition": "open"}],
+            [{"id": "  ", "blocking": True, "disposition": "open"}],
+            [{"id": "a", "blocking": "yes", "disposition": "open"}],
+            [{"id": "a", "blocking": True, "disposition": "maybe"}],
+            [{"id": "a", "blocking": True, "disposition": "fixed"}],
+            [{"id": "a", "blocking": True, "disposition": "fixed", "evidence": "  "}],
+            [
+                {"id": "a", "blocking": True, "disposition": "open"},
+                {"id": "a", "blocking": False, "disposition": "open"},
+            ],
+            [{"id": "a-->b", "blocking": True, "disposition": "open"}],
+            [{"id": "a\nb", "blocking": True, "disposition": "open"}],
+            [{"id": "a", "blocking": True, "disposition": "fixed", "evidence": "closes -->here"}],
+        ]
+        for raw in bad_inputs:
+            with self.subTest(raw=raw):
+                self.assertRaises(sdlc.SdlcError, sdlc.parse_findings, raw)
+
+    def test_review_marker_without_findings_is_byte_identical_to_before(self):
+        plain = sdlc.review_marker("codex", "abc123", "pass", "fresh-codex")
+        self.assertEqual(plain, sdlc.review_marker("codex", "abc123", "pass", "fresh-codex", findings=None))
+        self.assertEqual(plain, sdlc.review_marker("codex", "abc123", "pass", "fresh-codex", findings=[]))
+        self.assertNotIn("findings", plain)
+
+    def test_review_marker_findings_round_trip_through_parse_review_receipts(self):
+        findings = [{"id": "114-1", "blocking": True, "disposition": "open", "evidence": None}]
+        marker = sdlc.review_marker("codex", "abc123", "pass", "fresh-codex", findings=findings)
+        receipts = sdlc.parse_review_receipts([{"body": marker, "user": {"login": "owner"}}])
+        self.assertEqual(findings, receipts[0]["findings"])
+
+    def test_collect_findings_folds_newest_wins_across_heads(self):
+        receipts = sdlc.parse_review_receipts([
+            self._receipt(
+                "reviewer-a", "fail", head="aaa", created_at="2026-01-01T00:00:00Z",
+                findings=[{"id": "114-1", "blocking": True, "disposition": "open"}],
+            ),
+            self._receipt(
+                "reviewer-a", "pass", head="bbb", created_at="2026-01-02T00:00:00Z",
+                findings=[{"id": "114-1", "blocking": True, "disposition": "fixed", "evidence": "commit xyz"}],
+            ),
+        ])
+        self.assertEqual("fixed", sdlc.collect_findings(receipts, "codex")["114-1"]["disposition"])
+
+    def test_collect_findings_ignores_a_receipt_with_no_findings_key(self):
+        receipts = sdlc.parse_review_receipts([self._receipt("reviewer-a", "pass", head="aaa")])
+        self.assertEqual({}, sdlc.collect_findings(receipts, "codex"))
+
+    def test_collect_findings_raises_on_a_present_but_invalid_findings_value(self):
+        # Modeled on a hand-edited comment, not a real command path: a
+        # present-but-unparseable `findings` value must fail closed, never
+        # read the same as "no findings" the way an absent key does.
+        receipts = [{
+            "schema": 1, "kind": "codex", "head_sha": "aaa", "findings": "not-a-list",
+            "comment_url": "https://example/comment/9",
+        }]
+        with self.assertRaises(sdlc.SdlcError) as ctx:
+            sdlc.collect_findings(receipts, "codex")
+        self.assertIn("https://example/comment/9", str(ctx.exception))
+
+    def test_unresolved_blocking_findings_excludes_non_blocking(self):
+        receipts = sdlc.parse_review_receipts([
+            self._receipt(
+                "reviewer-a", "pass", head="aaa",
+                findings=[{"id": "114-1", "blocking": False, "disposition": "open"}],
+            ),
+        ])
+        self.assertEqual([], sdlc.unresolved_blocking_findings(receipts, "codex"))
+
+    def test_unresolved_blocking_findings_reports_the_disposing_receipt(self):
+        receipts = sdlc.parse_review_receipts([{
+            "body": sdlc.review_marker(
+                "codex", "aaa", "fail", "reviewer-a",
+                findings=[{"id": "114-1", "blocking": True, "disposition": "open"}],
+            ),
+            "user": {"login": "reviewer-a"},
+            "html_url": "https://example/comment/1",
+        }])
+        unresolved = sdlc.unresolved_blocking_findings(receipts, "codex")
+        self.assertEqual(["114-1"], [finding["id"] for finding in unresolved])
+        self.assertEqual("https://example/comment/1", unresolved[0]["comment_url"])
+
+    # --- structured findings: merge-gate integration ---
+
+    def test_merge_gate_blocks_on_an_unresolved_blocking_finding_from_an_earlier_head(self):
+        comments = [
+            self._receipt(
+                "reviewer-a", "fail", head="aaa",
+                findings=[{"id": "114-1", "blocking": True, "disposition": "open"}],
+            ),
+            self._receipt("reviewer-a", "pass", head="abc123"),
+        ]
+        errors = self._evaluate(self._passing_pr(), comments, self.slice, self.config)
+        self.assertTrue(
+            any("unresolved blocking finding" in e and "114-1" in e for e in errors), errors,
+        )
+
+    def test_merge_gate_admits_once_the_blocking_finding_is_resolved(self):
+        comments = [
+            self._receipt(
+                "reviewer-a", "fail", head="aaa",
+                findings=[{"id": "114-1", "blocking": True, "disposition": "open"}],
+            ),
+            self._receipt(
+                "reviewer-a", "pass", head="abc123",
+                findings=[{"id": "114-1", "blocking": True, "disposition": "fixed", "evidence": "commit xyz"}],
+            ),
+        ]
+        self.assertEqual([], self._evaluate(self._passing_pr(), comments, self.slice, self.config))
+
+    def test_merge_gate_blocks_on_a_malformed_findings_value_even_with_a_passing_verdict(self):
+        # `findings="not-a-list"` models a hand-corrupted receipt: a truthy
+        # string embeds as the JSON string `"not-a-list"`, which
+        # `parse_findings` rejects as not a list.
+        comments = [{
+            "body": sdlc.review_marker("codex", "abc123", "pass", "fresh-codex", findings="not-a-list"),
+            "user": {"login": "reviewer-a"},
+            "html_url": "https://example/comment/7",
+        }]
+        errors = self._evaluate(self._passing_pr(), comments, self.slice, self.config)
+        self.assertTrue(
+            any("invalid `findings` value" in e and "https://example/comment/7" in e for e in errors), errors,
+        )
+
     def test_budget_exhaustion_blocks_merge_even_on_a_passing_round(self):
         # The historical shape of #75/#98/#105's real repair sequences: three
         # recorded fails against earlier heads, then a clean independent pass
@@ -1112,7 +1254,7 @@ Read one file.
         def read_text(self, encoding=None):
             return self.text
 
-    def _record_receipt(self, expect_sha, actual_sha, dry_run=False):
+    def _record_receipt(self, expect_sha, actual_sha, dry_run=False, findings="[]"):
         """Run command_review_receipt against a PR whose head is actual_sha.
 
         Returns (exit code, gh commands invoked, stdout).
@@ -1133,6 +1275,7 @@ Read one file.
                 code = sdlc.command_review_receipt(argparse.Namespace(
                     pr=99, kind="codex", verdict="pass", reviewer="fresh-codex",
                     body_file=report, dry_run=dry_run, expect_sha=expect_sha,
+                    findings=findings,
                 ), self.config)
         finally:
             sdlc.fetch_pr, sdlc.run_text = original_fetch, original_run
@@ -1169,6 +1312,60 @@ Read one file.
         self.assertEqual(1, len(calls))
         self.assertEqual(["gh", "pr", "comment", "99"], calls[0][:4])
         self.assertIn("RECORDED: codex=pass for same", out)
+
+    def test_receipt_with_valid_findings_still_posts(self):
+        try:
+            with tempfile.NamedTemporaryFile():
+                pass
+        except OSError as exc:
+            self.skipTest(f"no writable temporary directory: {exc}")
+        code, calls, out = self._record_receipt(
+            expect_sha="same", actual_sha="same",
+            findings='[{"id": "114-1", "blocking": true, "disposition": "open"}]',
+        )
+        self.assertEqual(0, code)
+        self.assertEqual(1, len(calls))
+        self.assertIn("RECORDED: codex=pass for same", out)
+
+    def test_receipt_refuses_invalid_findings_json_before_posting(self):
+        # Neither refusal below reaches command_review_receipt's own
+        # NamedTemporaryFile -- the JSON/schema check runs first -- so, like
+        # the two refusal tests above, this stays hermetic with no temp-dir
+        # dependency.
+        import argparse
+        calls = []
+        report = self._StubReport("1. `a.py:1` something\n\nVERDICT: pass\n")
+        original_fetch, original_run = sdlc.fetch_pr, sdlc.run_text
+        sdlc.fetch_pr = lambda number, config: {"headRefOid": "same"}
+        sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
+        try:
+            with self.assertRaises(sdlc.SdlcError):
+                sdlc.command_review_receipt(argparse.Namespace(
+                    pr=99, kind="codex", verdict="pass", reviewer="fresh-codex",
+                    body_file=report, dry_run=False, expect_sha="same",
+                    findings="not json",
+                ), self.config)
+        finally:
+            sdlc.fetch_pr, sdlc.run_text = original_fetch, original_run
+        self.assertEqual([], calls)
+
+    def test_receipt_refuses_a_findings_payload_parse_findings_rejects(self):
+        import argparse
+        calls = []
+        report = self._StubReport("1. `a.py:1` something\n\nVERDICT: pass\n")
+        original_fetch, original_run = sdlc.fetch_pr, sdlc.run_text
+        sdlc.fetch_pr = lambda number, config: {"headRefOid": "same"}
+        sdlc.run_text = lambda command, **kwargs: calls.append(command) or ""
+        try:
+            with self.assertRaises(sdlc.SdlcError):
+                sdlc.command_review_receipt(argparse.Namespace(
+                    pr=99, kind="codex", verdict="pass", reviewer="fresh-codex",
+                    body_file=report, dry_run=False, expect_sha="same",
+                    findings='[{"id": "", "blocking": true, "disposition": "open"}]',
+                ), self.config)
+        finally:
+            sdlc.fetch_pr, sdlc.run_text = original_fetch, original_run
+        self.assertEqual([], calls)
 
     # --- on-the-wire protocol identifiers ---
 

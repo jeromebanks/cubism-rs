@@ -1014,14 +1014,31 @@ def validate_slice(
     return admission_errors(issue, parent, config, mode=mode, prerequisites=prerequisites)
 
 
-def review_marker(kind: str, head_sha: str, verdict: str, reviewer: str) -> str:
-    payload = json.dumps({
+def review_marker(
+    kind: str,
+    head_sha: str,
+    verdict: str,
+    reviewer: str,
+    *,
+    findings: list[dict[str, Any]] | None = None,
+) -> str:
+    fields: dict[str, Any] = {
         "schema": 1,
         "kind": kind,
         "head_sha": head_sha,
         "verdict": verdict,
         "reviewer": reviewer,
-    }, separators=(",", ":"), sort_keys=True)
+    }
+    if findings:
+        # Omitted entirely when empty, not written as `[]`: every receipt
+        # recorded before this field existed had no `findings` key, and an
+        # empty list means the same "nothing to track" thing -- writing one
+        # would make old and new clean-pass receipts differ structurally for
+        # no reason a reader could act on. Every existing call site, and
+        # every future call that does not pass `findings`, is therefore
+        # byte-identical to today.
+        fields["findings"] = findings
+    payload = json.dumps(fields, separators=(",", ":"), sort_keys=True)
     return f"{REVIEW_PREFIX}{payload}{REVIEW_SUFFIX}"
 
 
@@ -1138,6 +1155,125 @@ def latest_receipt(
         return None
     matching.sort(key=lambda receipt: (receipt.get("created_at") or "", receipt.get("sequence") or 0))
     return matching[-1]
+
+
+FINDING_DISPOSITIONS = {"open", "fixed", "resolved"}
+
+
+def parse_findings(raw: Any) -> list[dict[str, Any]]:
+    """Validates a structured-findings payload, failing closed on any defect.
+
+    Each entry needs a non-empty string `id`, a boolean `blocking`, a
+    `disposition` in `FINDING_DISPOSITIONS`, and a non-empty string
+    `evidence` once that disposition is not `open` -- the plan's
+    "fix/resolution evidence" travelling with the finding it closes, not
+    just the finding's id. A malformed entry raises rather than being
+    dropped: a finding that failed to parse must not be indistinguishable
+    from one nobody reported.
+
+    `id` and `evidence` are free text embedded in the marker's own
+    `<!-- ... -->` JSON payload. `-->` would close that comment (and, inside
+    `REVIEW_PREFIX`'s non-greedy `(\\{.*?\\})REVIEW_SUFFIX` match, truncate
+    the JSON before this entry) and an interior newline would break the
+    marker's required single-line shape -- the same reason
+    `command_set_gate`/`command_renew_review_budget` already guard
+    `--checkpoint`/`--decided-by` this way. Either would silently drop the
+    whole receipt, verdict included, not just this finding, so it is
+    checked here rather than left to a caller.
+    """
+    if not isinstance(raw, list):
+        raise SdlcError(f"findings must be a JSON list, got {type(raw).__name__}")
+    findings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise SdlcError(f"finding entry must be an object: {entry!r}")
+        finding_id = entry.get("id")
+        blocking = entry.get("blocking")
+        disposition = entry.get("disposition")
+        evidence = entry.get("evidence")
+        if not isinstance(finding_id, str) or not finding_id.strip():
+            raise SdlcError(f"finding entry missing a non-empty string `id`: {entry!r}")
+        finding_id = finding_id.strip()
+        evidence_text = evidence.strip() if isinstance(evidence, str) else ""
+        for label, value in (("id", finding_id), ("evidence", evidence_text)):
+            if "-->" in value or any(char in value for char in "\r\n"):
+                raise SdlcError(
+                    f"finding `{label}` must be a single line and must not contain `-->`: {value!r}"
+                )
+        if finding_id in seen:
+            raise SdlcError(f"duplicate finding id {finding_id!r} in one findings payload")
+        seen.add(finding_id)
+        if not isinstance(blocking, bool):
+            raise SdlcError(f"finding {finding_id!r} needs a boolean `blocking`, got {blocking!r}")
+        if disposition not in FINDING_DISPOSITIONS:
+            raise SdlcError(
+                f"finding {finding_id!r} has disposition {disposition!r}; "
+                f"must be one of {sorted(FINDING_DISPOSITIONS)}"
+            )
+        if disposition != "open" and not evidence_text:
+            raise SdlcError(f"finding {finding_id!r} is {disposition!r} but has no non-empty `evidence`")
+        findings.append({
+            "id": finding_id,
+            "blocking": blocking,
+            "disposition": disposition,
+            "evidence": evidence_text or None,
+        })
+    return findings
+
+
+def collect_findings(receipts: Iterable[dict[str, Any]], kind: str) -> dict[str, dict[str, Any]]:
+    """Rebuilds the cumulative finding set for one review `kind`.
+
+    Scans every schema-1 receipt of this `kind` -- via `_is_schema_one`, the
+    same bool-safe check `consumed_review_rounds` uses, not a looser
+    `.get("schema") == 1` -- across every head SHA the PR has carried in its
+    repair sequence, mirroring `consumed_review_rounds`'s own scope, so a
+    finding raised in an earlier round is not forgotten once the head moves.
+    Newest receipt wins per finding id, the same newest-first resolution
+    `latest_receipt` applies to verdicts: a later disposition (a fix, an
+    explicit resolution, or a re-raised `open`) supersedes an earlier one for
+    the same id.
+
+    A receipt with no `findings` key contributes nothing -- the ordinary
+    "nothing recorded" case every receipt before this feature existed, and
+    every future receipt recorded without `--findings`, is in. A receipt
+    that *does* carry a `findings` key but fails `parse_findings` raises
+    `SdlcError` naming that receipt, instead of being silently treated the
+    same as "recorded nothing": present-but-invalid must never read as
+    "resolved" or "no findings".
+    """
+    ordered = sorted(
+        (r for r in receipts if _is_schema_one(r) and r.get("kind") == kind),
+        key=lambda r: (r.get("created_at") or "", r.get("sequence") or 0),
+    )
+    latest: dict[str, dict[str, Any]] = {}
+    for receipt in ordered:
+        if "findings" not in receipt:
+            continue
+        try:
+            findings = parse_findings(receipt["findings"])
+        except SdlcError as exc:
+            location = receipt.get("comment_url") or f"head {receipt.get('head_sha')}"
+            raise SdlcError(f"`{kind}` receipt at {location} carries an invalid `findings` value: {exc}") from exc
+        for finding in findings:
+            latest[finding["id"]] = {**finding, "comment_url": receipt.get("comment_url")}
+    return latest
+
+
+def unresolved_blocking_findings(receipts: Iterable[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
+    """Findings still `blocking` with no `fixed`/`resolved` disposition.
+
+    May raise `SdlcError` -- see `collect_findings` -- when some receipt's
+    `findings` value is present but malformed; that failure must block a
+    merge exactly as an unresolved blocking finding would, not be treated as
+    "no findings" by a caller that only checks the returned list.
+    """
+    findings = collect_findings(receipts, kind)
+    return [
+        finding for finding_id, finding in sorted(findings.items())
+        if finding.get("blocking") and finding.get("disposition") not in {"fixed", "resolved"}
+    ]
 
 
 # Codex review envelope: `.agents/skills/codex-review/SKILL.md` sections 1, 3
@@ -1604,6 +1740,29 @@ def evaluate_merge_gate(
                         f"--kind {kind} --rounds {consumed} --decided-by <human> "
                         "--note-file <path> --apply`"
                     )
+        # Also evaluated unconditionally per kind, appended as its own error:
+        # a blocking finding raised on an earlier head must not be silently
+        # buried by a later, unrelated `pass` on the current head, so this
+        # does not gate on `latest`/`considered` above at all -- it reads
+        # every schema-1 receipt of this `kind`, any head, the same scope
+        # `consumed_review_rounds` reads. A malformed `findings` value on
+        # some receipt fails closed here too, exactly like the malformed
+        # `max_rounds` case just above.
+        try:
+            unresolved = unresolved_blocking_findings(receipts, kind)
+        except SdlcError as exc:
+            errors.append(str(exc))
+        else:
+            if unresolved:
+                named = "; ".join(
+                    f"{finding['id']} ({finding.get('comment_url') or 'no comment url'})"
+                    for finding in unresolved
+                )
+                errors.append(
+                    f"`{kind}` has unresolved blocking finding(s) for PR #{pr.get('number')}: "
+                    f"{named}; record a `fixed` or `resolved` disposition with evidence via "
+                    "`review-receipt --findings`"
+                )
     return errors
 
 
@@ -1918,8 +2077,13 @@ def command_review_receipt(args: argparse.Namespace, config: dict[str, Any]) -> 
         print("longer this branch's head. Re-run the review against the new head, then")
         print(f"record it with --expect-sha {head}.")
         return 1
+    try:
+        raw_findings = json.loads(args.findings)
+    except json.JSONDecodeError as exc:
+        raise SdlcError(f"--findings is not valid JSON: {exc}") from exc
+    findings = parse_findings(raw_findings)
     report = args.body_file.read_text(encoding="utf-8")
-    marker = review_marker(args.kind, head, args.verdict, args.reviewer)
+    marker = review_marker(args.kind, head, args.verdict, args.reviewer, findings=findings)
     body = f"{marker}\n\n## {args.kind.title()} review\n\n{report.strip()}\n"
     if args.dry_run:
         print(body)
@@ -2398,6 +2562,10 @@ def build_parser() -> argparse.ArgumentParser:
     receipt.add_argument(
         "--expect-sha", required=True,
         help="full head SHA the review actually read; recording is refused if the PR head has moved",
+    )
+    receipt.add_argument(
+        "--findings", default="[]",
+        help="JSON list of {id, blocking, disposition, evidence} structured findings (default: none)",
     )
     receipt.add_argument("--body-file", type=Path, required=True)
     receipt.add_argument("--dry-run", action="store_true")

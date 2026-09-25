@@ -189,6 +189,28 @@ need for more.
    either. The reviewer string is self-declared. It prevents a session from
    grading its own work; it is not an anti-fraud control, and the durable
    guarantee is that a human can read the receipt and the reviewer's session log.
+
+   `review-receipt` accepts an optional `--findings` JSON list of
+   `{"id", "blocking", "disposition", "evidence"}` entries — `disposition`
+   one of `open`, `fixed`, `resolved`; `evidence` required once it is not
+   `open`. This is a separate, optional channel alongside the free-form
+   numbered findings already in the report body, not a replacement for them.
+   `merge`/`merge-gate` rebuild the cumulative finding set for a required
+   review kind across **every** head SHA the PR has carried in its repair
+   sequence — the same cross-head scope the round budget below reads — and
+   block while any `blocking` finding still lacks a `fixed`/`resolved`
+   disposition from some receipt of that kind, naming the id(s) and the
+   receipt that last touched each. A finding raised in one round therefore
+   survives a later round's clean `pass`, on the same head or a rebased one,
+   until a receipt explicitly closes it with evidence. A receipt recorded
+   without `--findings` carries none and is unaffected either way.
+
+   No current step wires a real reviewer to emit `--findings`; the mechanism
+   is dormant until a future slice teaches the codex-review prompt to emit
+   and carry forward structured ids. Recording a disposition change is not
+   independently verified beyond the same account/reviewer checks already
+   applied to the verdict itself — self-attesting, like the mechanisms
+   above, pending the R6 trusted-execution-boundary work.
 9. **Merge automatically.** Run `rtk python3 scripts/sdlc.py merge --pr P --apply`. It
    refuses to merge unless the PR closes one slice, required CI is green, the
    branch is current and conflict-free, and every required review has a clean
