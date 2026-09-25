@@ -1194,6 +1194,13 @@ def parse_findings(raw: Any) -> list[dict[str, Any]]:
         evidence = entry.get("evidence")
         if not isinstance(finding_id, str) or not finding_id.strip():
             raise SdlcError(f"finding entry missing a non-empty string `id`: {entry!r}")
+        # `evidence` is optional (absent or `None` both mean "none supplied"),
+        # but once present it must be a string -- a number, list, or object
+        # must not be silently coerced to "no evidence" for an `open`
+        # finding, where a missing-evidence check would otherwise never
+        # catch it. Round-2 Codex finding.
+        if evidence is not None and not isinstance(evidence, str):
+            raise SdlcError(f"finding {finding_id!r} has a non-string `evidence`: {evidence!r}")
         evidence_raw = evidence if isinstance(evidence, str) else ""
         # Checked on the *raw* value, before `.strip()`: stripping first (as
         # `command_set_gate`/`command_renew_review_budget` do for

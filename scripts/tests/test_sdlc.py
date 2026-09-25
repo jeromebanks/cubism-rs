@@ -723,6 +723,12 @@ Read one file.
             # `in` against a set.
             [{"id": "a", "blocking": True, "disposition": ["open"]}],
             [{"id": "a", "blocking": True, "disposition": {"open": True}}],
+            # Round-2 Codex finding: a non-string `evidence` on an `open`
+            # finding must not be silently coerced to "no evidence" --
+            # the missing-evidence check only fires for a non-`open`
+            # disposition, so this would otherwise pass unnoticed.
+            [{"id": "a", "blocking": True, "disposition": "open", "evidence": 7}],
+            [{"id": "a", "blocking": True, "disposition": "open", "evidence": {}}],
         ]
         for raw in bad_inputs:
             with self.subTest(raw=raw):
