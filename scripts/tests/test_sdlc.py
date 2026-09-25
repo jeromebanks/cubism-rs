@@ -2892,16 +2892,11 @@ class CodexReviewEnvelopeTests(unittest.TestCase):
         import re
         import shutil
         import subprocess
+        import tempfile
 
         skill_text = self.SKILL_PATH.read_text()
-        # Scope extraction to section 3's own fenced *code block*, not its
-        # prose and not the whole file: a stale copy of an old
-        # `MODEL=`/`SESSION=` line anywhere else -- another section, or even
-        # prose *within* section 3 (round 2's finding: a superseded example
-        # sentence, "Failure modes", etc.) -- could otherwise be miscounted
-        # as the active one, silently validating the wrong text while the
-        # skill's real derivation drifted unnoticed. Only a fenced code
-        # block is the thing actually executed.
+        # Scope to section 3's own fenced *code block* -- the text that
+        # actually runs -- not the whole file and not the section's prose.
         section_match = re.search(
             r"^## 3\. Derive identity and verdict from the run\n(.*?)(?=^## |\Z)",
             skill_text, re.DOTALL | re.MULTILINE)
@@ -2917,30 +2912,19 @@ class CodexReviewEnvelopeTests(unittest.TestCase):
             1, len(code_blocks),
             f"expected exactly one fenced code block in section 3 of "
             f"{self.SKILL_PATH}, found {len(code_blocks)}; update this test "
-            f"if the skill was restructured, so extraction keeps reading "
-            f"only the code that actually runs")
+            f"if the skill was restructured, so this keeps executing only "
+            f"the code that actually runs")
         code_text = code_blocks[0]
-
-        # The same `sed -n '<script>'` scripts the skill runs against
-        # `$REPORT.err`, pulled from its own source so this test and the
-        # skill can never silently diverge (single source of truth).
-        # Anchored to the `MODEL=`/`SESSION=` assignments specifically, not
-        # any `sed -n '...'` in the code block, so an unrelated sed can't be
-        # miscounted as one of these two.
-        labeled_patterns = {
-            "MODEL": r"^MODEL=\$\(sed -n '(s/[^']*)'",
-            "SESSION": r"^SESSION=\$\(sed -n '(s/[^']*)'",
-        }
-        sed_scripts = {}
-        for label, pattern in labeled_patterns.items():
-            matches = re.findall(pattern, code_text, re.MULTILINE)
-            self.assertEqual(
-                1, len(matches),
-                f"expected exactly one `{label}=$(sed -n '...')` "
-                f"reviewer-identity assignment in section 3's code block of "
-                f"{self.SKILL_PATH}, found {len(matches)}; update this test "
-                f"if the skill's identity derivation intentionally changed")
-            sed_scripts[label] = matches[0]
+        self.assertIn(
+            "MODEL=", code_text,
+            f"section 3's code block in {self.SKILL_PATH} no longer assigns "
+            f"MODEL; update this test if identity derivation intentionally "
+            f"changed")
+        self.assertIn(
+            "SESSION=", code_text,
+            f"section 3's code block in {self.SKILL_PATH} no longer assigns "
+            f"SESSION; update this test if identity derivation intentionally "
+            f"changed")
 
         if not shutil.which("codex"):
             self.skipTest("codex is unavailable")
@@ -2975,25 +2959,63 @@ class CodexReviewEnvelopeTests(unittest.TestCase):
             f"could not run (auth, network, or config), not envelope drift. "
             f"stderr:\n{result.stderr[-2000:]}")
 
-        for label, script in sed_scripts.items():
-            sed_result = subprocess.run(
-                ["sed", "-n", script], input=result.stderr,
-                capture_output=True, text=True)
-            self.assertEqual(
-                0, sed_result.returncode,
-                f"`sed -n {script!r}` (the {label} pattern) failed (exit "
-                f"{sed_result.returncode}); this indicates a local `sed` "
-                f"incompatibility, not envelope drift. stderr:\n"
-                f"{sed_result.stderr}")
-            lines = sed_result.stdout.splitlines()
-            first_line = lines[0] if lines else ""
-            self.assertTrue(
-                first_line.strip(),
-                f"the {label} reviewer-identity pattern {script!r} matched "
-                f"nothing in `codex exec`'s stderr; the envelope has likely "
-                f"drifted and the merge gate would refuse every receipt "
-                f"with \"cannot identify the reviewer\". Captured stderr:\n"
-                f"{result.stderr}")
+        # Execute section 3's block verbatim against the real stderr, rather
+        # than re-deriving its `sed` patterns by regex and running those
+        # separately. Three review rounds each found a different way a
+        # regex re-derivation could be fooled by a stale or decoy
+        # assignment (elsewhere in the file, in section 3's prose, or a
+        # second, differently-quoted assignment of the same name inside the
+        # fence -- a later assignment wins at runtime and a regex counting
+        # only one *form* would miss it). Running the block sidesteps the
+        # whole class: bash resolves `$MODEL`/`$SESSION` exactly as
+        # codex-review itself would, so there is nothing left to fool.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = os.path.join(tmpdir, "report")
+            # The block reads "$REPORT" (for the verdict line) and
+            # "$REPORT.err" (for MODEL/SESSION). The verdict half is not
+            # this issue's concern -- identity derivation is -- so the
+            # fixture report ends with a valid verdict line purely so that
+            # half of the block doesn't `exit 1` for an unrelated reason.
+            with open(report_path, "w") as f:
+                f.write("VERDICT: pass\n")
+            with open(report_path + ".err", "w") as f:
+                f.write(result.stderr)
+
+            probe_script = code_text + '\nprintf "%s\\n%s\\n" "$MODEL" "$SESSION"\n'
+            try:
+                block_result = subprocess.run(
+                    ["bash", "-c", probe_script],
+                    env={**os.environ, "REPORT": report_path},
+                    capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired as exc:
+                self.fail(
+                    "section 3's code block did not finish within 30s "
+                    f"against real `codex exec` stderr. Captured so far:\n"
+                    f"stdout: {exc.stdout!r}\nstderr: {exc.stderr!r}")
+
+        if block_result.returncode != 0:
+            self.fail(
+                f"section 3's code block exited {block_result.returncode} "
+                f"against real `codex exec` stderr -- the merge gate would "
+                f"refuse every receipt with the same failure (most likely "
+                f"\"cannot identify the reviewer\"), which means the "
+                f"envelope has drifted. Block stdout: {block_result.stdout!r}\n"
+                f"Block stderr: {block_result.stderr!r}\n"
+                f"codex exec stderr was:\n{result.stderr}")
+
+        printed = block_result.stdout.splitlines()
+        self.assertEqual(
+            2, len(printed),
+            f"expected section 3's block to print MODEL then SESSION on "
+            f"exit 0; got {printed!r} (stderr: {block_result.stderr!r})")
+        model_value, session_value = printed
+        self.assertTrue(
+            model_value.strip() and session_value.strip(),
+            f"section 3's block derived an empty MODEL or SESSION from "
+            f"real `codex exec` stderr without exiting non-zero, which "
+            f"should be impossible given its own guard -- treat this as a "
+            f"bug in this test, not envelope drift. codex exec stderr:\n"
+            f"{result.stderr}")
 
 
 if __name__ == "__main__":

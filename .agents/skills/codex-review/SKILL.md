@@ -285,10 +285,11 @@ steps**:
   the optional pass in the previous section.
 
 `python3 -m unittest scripts.tests.test_sdlc.CodexReviewEnvelopeTests -v`
-extracts these two `sed` patterns from this file and, when `codex` is on `PATH`
-outside a Codex sandbox, runs the real CLI and asserts both still match its
-stderr — a CLI upgrade that renames either label fails that command instead of
-surfacing mid-slice as "cannot identify the reviewer".
+executes this section's own code block against real `codex exec` stderr, when
+`codex` is on `PATH` outside a Codex sandbox — a CLI upgrade that renames either
+label fails that command with the same "cannot identify the reviewer" error
+this section raises, instead of surfacing it mid-slice as an apparent Codex
+malfunction.
 
 So: after a CLI upgrade, run that command (outside a Codex sandbox). After a plugin
 upgrade, re-check the companion's subcommand list. Doing only the second is the
