@@ -2434,21 +2434,44 @@ Read one file.
         that own an issue's delivery labels: `mark-in-review` (add
         `in-review`, remove `in-progress`) and, after the issue closes,
         `cleanup` (remove `in-review`, remove the worktree, delete the local
-        branch, write status). It simulates a crash immediately before or
-        after each of those six mutations, resumes with the interrupted
-        command, then runs the remaining steps, and checks that every run
-        ends in the same clean state with each label mutation applied exactly
-        once overall, however many retries it took. `git fetch --prune` and
-        the read-only `show-ref`/`merge-base` probes are intentionally
-        re-issued on every resume; that is expected rerun cost, not a
-        duplicate mutation. It also covers both directions of the
-        merge/closure boundary itself: `cleanup` refusing a still-open
-        issue with no effects, and `mark-in-review` refusing an
-        already-closed one with no effects (the race where a resumed
-        session does not yet know the PR merged). GitHub closes the issue
-        atomically as part of accepting the merge, so there is no code of
-        ours sequenced *between* merge and closure to interrupt; both
-        checks assert what we actually own at that boundary.
+        branch, write status).
+
+        GitHub closes the issue as a side effect of merging the PR; that
+        merge/closure step is not code either of our commands runs, so
+        there is nothing of ours to fail-inject there directly. What *is*
+        real is where that closure can land relative to our own mutations,
+        since a session can die and resume at any point. `closure_position`
+        sweeps three placements:
+
+        - "before-mark": the issue is already closed before mark-in-review
+          is ever attempted (e.g. a very fast merge, or a resumed session
+          that never got to open the PR's review step). mark-in-review must
+          refuse with no effects; cleanup does the whole job alone.
+        - "mid-mark": mark-in-review's own add/remove is interrupted, and
+          the issue closes before the session resumes -- so the resumed
+          call must refuse rather than try to finish a transition on a
+          closed issue, leaving cleanup to remove whatever labels are left.
+        - "after-mark": mark-in-review completes while the PR has already
+          merged but the issue has not yet closed (a real lag between the
+          two): to mark-in-review and cleanup this is indistinguishable
+          from an ordinary open issue, so cleanup must still refuse and a
+          mark-in-review rerun must still be a no-op, both with no effects,
+          until closure actually lands.
+
+        Within "mid-mark" and "after-mark", a crash immediately before or
+        after each mutating step is additionally swept (12 cases total
+        across the three positions), resuming with the interrupted command
+        and then the remaining steps. `git fetch --prune` and the read-only
+        `show-ref`/`merge-base` probes are intentionally re-issued on every
+        resume; that is expected rerun cost, not a duplicate mutation.
+
+        Because closure can land before mark-in-review ever adds
+        `in-review`, `add in-review` and the later `remove in-review` by
+        cleanup are not always exactly one each -- they are both 0 (closure
+        landed first) or both 1 (mark-in-review got there first), always
+        equal. `remove in-progress` happens exactly once in every position,
+        since whichever command still finds it present removes it, and only
+        one ever does.
         """
         import argparse
         import contextlib
@@ -2476,7 +2499,7 @@ Read one file.
                         i += 1
             return ops
 
-        def run(fail_at, mode):
+        def build_world():
             world = {
                 "state": "OPEN",
                 "labels": {"type:slice", "in-progress"},
@@ -2487,8 +2510,13 @@ Read one file.
             calls = []
             counter = {"n": 0}
             fired = {"v": False}
+            fail_at_box = {"v": None}
+            mode_box = {"v": None}
 
             def maybe_interrupt(k, before):
+                fail_at, mode = fail_at_box["v"], mode_box["v"]
+                if fail_at is None:
+                    return
                 matches = (before and mode == "before") or (not before and mode == "after")
                 if not fired["v"] and k == fail_at and matches:
                     fired["v"] = True
@@ -2558,6 +2586,104 @@ Read one file.
             def fetch_status_data(_config):
                 return {"repository": "example/repo", "generated_at": "now", "issues": [], "pulls": []}
 
+            return world, calls, counter, fired, fail_at_box, mode_box, run_text, run_process, write_atomic, fetch_issue, fetch_status_data
+
+        def assert_clean_end(world, calls, label):
+            self.assertEqual({"type:slice"}, world["labels"], label)
+            self.assertFalse(world["worktree"], label)
+            self.assertFalse(world["local_branch"], label)
+            # Status is a re-rendered projection, not a delivery label: a
+            # rerun that reaches it re-writes it, which is idempotent and
+            # expected, not a duplicate mutation to guard against.
+            self.assertGreaterEqual(world["status_written"], 1, label)
+            ops = Counter(label_ops(calls))
+            adds = ops[("add", "in-review")]
+            removes_review = ops[("remove", "in-review")]
+            self.assertEqual(1, ops[("remove", "in-progress")], label)
+            self.assertIn(adds, (0, 1), label)
+            self.assertEqual(adds, removes_review, label)
+            self.assertEqual(
+                {("remove", "in-progress")} | ({("add", "in-review"), ("remove", "in-review")} if adds else set()),
+                set(ops),
+                f"{label}: no label operation outside the expected set",
+            )
+
+        def run_before_mark(fail_at, mode):
+            # Closed before mark-in-review is ever attempted: mark-in-review
+            # must refuse untouched, and cleanup alone does the whole job.
+            # Only cleanup's four steps can be interrupted here.
+            label = f"before-mark fail_at={fail_at} mode={mode}"
+            (world, calls, counter, fired, fail_at_box, mode_box, run_text, run_process,
+             write_atomic, fetch_issue, fetch_status_data) = build_world()
+            world["state"] = "CLOSED"
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / ".worktrees" / "issue-11").mkdir(parents=True)
+                with patch.object(sdlc, "ROOT", root), \
+                        patch.object(sdlc, "fetch_issue", side_effect=fetch_issue), \
+                        patch.object(sdlc, "run_text", side_effect=run_text), \
+                        patch.object(sdlc, "run_process", side_effect=run_process), \
+                        patch.object(sdlc, "fetch_status_data", side_effect=fetch_status_data), \
+                        patch.object(sdlc, "write_atomic", side_effect=write_atomic), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    mark = lambda: sdlc.command_mark_in_review(argparse.Namespace(issue=11), self.config)
+                    clean = lambda: sdlc.command_cleanup(argparse.Namespace(issue=11), self.config)
+
+                    self.assertEqual(1, mark(), label)
+                    self.assertEqual([], calls, f"{label}: mark-in-review on a closed issue must have no effects")
+
+                    fail_at_box["v"], mode_box["v"] = fail_at, mode
+                    try:
+                        code = clean()
+                    except Interrupted:
+                        code = clean()
+                    self.assertEqual(0, code, label)
+                    self.assertTrue(fired["v"], f"{label}: the injected interruption never fired")
+            assert_clean_end(world, calls, label)
+
+        def run_mid_mark(fail_at, mode):
+            # mark-in-review's own add/remove is interrupted; closure lands
+            # before the resume. The resumed call must refuse, not try to
+            # finish the transition; cleanup then finishes uninterrupted.
+            label = f"mid-mark fail_at={fail_at} mode={mode}"
+            (world, calls, counter, fired, fail_at_box, mode_box, run_text, run_process,
+             write_atomic, fetch_issue, fetch_status_data) = build_world()
+            fail_at_box["v"], mode_box["v"] = fail_at, mode
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / ".worktrees" / "issue-11").mkdir(parents=True)
+                with patch.object(sdlc, "ROOT", root), \
+                        patch.object(sdlc, "fetch_issue", side_effect=fetch_issue), \
+                        patch.object(sdlc, "run_text", side_effect=run_text), \
+                        patch.object(sdlc, "run_process", side_effect=run_process), \
+                        patch.object(sdlc, "fetch_status_data", side_effect=fetch_status_data), \
+                        patch.object(sdlc, "write_atomic", side_effect=write_atomic), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    mark = lambda: sdlc.command_mark_in_review(argparse.Namespace(issue=11), self.config)
+                    clean = lambda: sdlc.command_cleanup(argparse.Namespace(issue=11), self.config)
+
+                    with self.assertRaises(Interrupted, msg=label):
+                        mark()
+                    self.assertTrue(fired["v"], f"{label}: the injected interruption never fired")
+
+                    world["state"] = "CLOSED"
+                    effects_before = list(calls)
+                    self.assertEqual(1, mark(), label)
+                    self.assertEqual(effects_before, calls, f"{label}: resumed mark-in-review on a closed issue must have no effects")
+
+                    self.assertEqual(0, clean(), label)
+            assert_clean_end(world, calls, label)
+
+        def run_after_mark(fail_at, mode):
+            # mark-in-review completes normally (itself swept for
+            # interruption); then a merged-but-not-yet-closed lag, during
+            # which both commands must be no-ops; then closure, then
+            # cleanup (also swept).
+            label = f"after-mark fail_at={fail_at} mode={mode}"
+            (world, calls, counter, fired, fail_at_box, mode_box, run_text, run_process,
+             write_atomic, fetch_issue, fetch_status_data) = build_world()
+            fail_at_box["v"], mode_box["v"] = fail_at, mode
+
             def run_with_retry(fn):
                 try:
                     return fn()
@@ -2577,54 +2703,42 @@ Read one file.
                     mark = lambda: sdlc.command_mark_in_review(argparse.Namespace(issue=11), self.config)
                     clean = lambda: sdlc.command_cleanup(argparse.Namespace(issue=11), self.config)
 
-                    self.assertEqual(0, run_with_retry(mark))
+                    self.assertEqual(0, run_with_retry(mark), label)
+                    if fail_at < 2:
+                        self.assertTrue(fired["v"], f"{label}: the injected interruption never fired")
 
-                    # Merge/closure boundary: cleanup must refuse a still-open
-                    # issue, with no effects, before the issue actually closes.
+                    # Merged but not yet closed: indistinguishable from an
+                    # ordinary open issue to both commands.
                     effects_before = list(calls)
-                    self.assertEqual(1, clean())
-                    self.assertEqual(effects_before, calls, "cleanup on an open issue must have no effects")
+                    self.assertEqual(1, clean(), label)
+                    self.assertEqual(effects_before, calls, f"{label}: cleanup on an open issue must have no effects")
+                    self.assertEqual(0, mark(), label)
+                    self.assertEqual(effects_before, calls, f"{label}: mark-in-review rerun during the merged-but-not-closed lag must have no effects")
 
                     world["state"] = "CLOSED"
+                    self.assertEqual(0, run_with_retry(clean), label)
+                    self.assertTrue(fired["v"], f"{label}: the injected interruption never fired")
+            assert_clean_end(world, calls, label)
 
-                    # The reverse race: a resumed session that still believes
-                    # it needs to run mark-in-review discovers the PR already
-                    # merged (closing the issue) in the meantime. GitHub
-                    # closes the issue atomically as part of accepting the
-                    # merge, so there is no code of ours sequenced "between"
-                    # merge and closure to interrupt; what we own is refusing
-                    # correctly once we observe the closed state, without
-                    # touching labels.
-                    effects_before = list(calls)
-                    self.assertEqual(1, mark())
-                    self.assertEqual(effects_before, calls, "mark-in-review on a closed issue must have no effects")
+        # "before-mark": only cleanup's four steps (label edit, worktree
+        # remove, branch delete, status write) can be interrupted.
+        for fail_at in range(4):
+            for mode in ("before", "after"):
+                with self.subTest(closure_position="before-mark", fail_at=fail_at, mode=mode):
+                    run_before_mark(fail_at, mode)
 
-                    self.assertEqual(0, run_with_retry(clean))
+        # "mid-mark": only mark-in-review's own two steps (add, remove).
+        for fail_at in range(2):
+            for mode in ("before", "after"):
+                with self.subTest(closure_position="mid-mark", fail_at=fail_at, mode=mode):
+                    run_mid_mark(fail_at, mode)
 
-            self.assertEqual({"type:slice"}, world["labels"])
-            self.assertFalse(world["worktree"])
-            self.assertFalse(world["local_branch"])
-            # Status is a re-rendered projection, not a delivery label: a
-            # rerun that reaches it re-writes it, which is idempotent and
-            # expected, not a duplicate mutation to guard against.
-            self.assertGreaterEqual(world["status_written"], 1)
-            ops = Counter(label_ops(calls))
-            self.assertEqual(
-                Counter({("add", "in-review"): 1, ("remove", "in-progress"): 1, ("remove", "in-review"): 1}),
-                ops,
-                f"fail_at={fail_at} mode={mode}: each label mutation must happen exactly once overall",
-            )
-
-        # Six mutating steps in lifecycle order: mark-in-review's add and
-        # remove, cleanup's label edit, worktree removal, branch deletion, and
-        # status write. Each is swept in both directions: "before" (the write
-        # never applied) and "after" (applied, then the process is lost
-        # before the response is recorded, the case that actually tests "no
-        # duplicate edits").
+        # "after-mark": all six steps, exactly as the original sweep, plus
+        # the merged-but-not-closed lag check.
         for fail_at in range(6):
             for mode in ("before", "after"):
-                with self.subTest(fail_at=fail_at, mode=mode):
-                    run(fail_at, mode)
+                with self.subTest(closure_position="after-mark", fail_at=fail_at, mode=mode):
+                    run_after_mark(fail_at, mode)
 
 
 if __name__ == "__main__":
