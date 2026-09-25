@@ -1557,6 +1557,33 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
     return 0
 
 
+def command_mark_in_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    issue = fetch_issue(args.issue, config)
+    if issue.get("state") != "OPEN":
+        print(f"BLOCKED: issue #{args.issue} is not open (state: {issue.get('state')!r}); "
+              f"if it is closed, run `cleanup` instead")
+        return 1
+    names = label_names(issue)
+    in_progress = config["labels"]["in_progress"]
+    in_review = config["labels"]["in_review"]
+    if in_progress not in names and in_review not in names:
+        print(f"BLOCKED: issue #{args.issue} carries neither `{in_progress}` nor `{in_review}`; nothing to transition")
+        return 1
+    edit = ["gh", "issue", "edit", str(args.issue), "--repo", config["repository"]]
+    # Two writes, add before remove, mirroring `command_set_gate`: one `gh
+    # issue edit` carrying both flags is not known to be atomic, and removing
+    # first could leave the issue carrying neither label. Each write is
+    # skipped when its label is already in the state it would produce, so a
+    # rerun after a partial failure edits nothing already fixed, and a rerun
+    # after full success edits nothing at all.
+    if in_review not in names:
+        run_text(edit + ["--add-label", in_review])
+    if in_progress in names:
+        run_text(edit + ["--remove-label", in_progress])
+    print(f"IN-REVIEW: issue #{args.issue}")
+    return 0
+
+
 def command_cleanup(args: argparse.Namespace, config: dict[str, Any]) -> int:
     issue = fetch_issue(args.issue, config)
     if issue.get("state") != "CLOSED":
@@ -2014,6 +2041,10 @@ def build_parser() -> argparse.ArgumentParser:
     claim.add_argument("issue", type=int)
     claim.add_argument("--resume", action="store_true", help="reuse an existing remote claim branch")
     claim.set_defaults(func=command_claim)
+
+    mark_in_review = sub.add_parser("mark-in-review", help="own the in-progress -> in-review transition once a slice's PR opens")
+    mark_in_review.add_argument("issue", type=int)
+    mark_in_review.set_defaults(func=command_mark_in_review)
 
     cleanup = sub.add_parser("cleanup", help="after merge: clear delivery labels, remove the worktree and local branch, then regenerate status")
     cleanup.add_argument("issue", type=int)

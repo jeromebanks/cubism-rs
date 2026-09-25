@@ -175,7 +175,7 @@ need for more.
    advisor pass when available.
 7. **Open the PR.** The PR closes exactly one slice (`Closes #N`), describes the
    observable result, and reports actual validation. Move the issue from
-   `in-progress` to `in-review`.
+   `in-progress` to `in-review` with `rtk python3 scripts/sdlc.py mark-in-review N`.
 8. **Independent review.** A fresh Codex agent reviews the committed PR diff.
    The implementer may not impersonate this reviewer. Findings are fixed or
    explicitly resolved, then the updated head is reviewed again. The reviewer

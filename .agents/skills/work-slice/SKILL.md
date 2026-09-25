@@ -59,11 +59,10 @@ needed for implementation.
    [`codex-review`](../codex-review/SKILL.md) section 5, which owns it. Reading
    `headRefOid` once can return a head GitHub has not settled on yet.
 
-   Then move the issue from `in-progress` to `in-review`. No `sdlc.py` command
-   owns this transition yet, so run it directly:
+   Then move the issue from `in-progress` to `in-review`:
 
    ```bash
-   rtk proxy gh issue edit N --add-label in-review --remove-label in-progress
+   rtk python3 scripts/sdlc.py mark-in-review N
    ```
 8. Have a fresh Codex agent/session review the committed PR diff, following
    [`.agents/skills/codex-review/SKILL.md`](../codex-review/SKILL.md). That file
