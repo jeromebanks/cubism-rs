@@ -2875,5 +2875,148 @@ Read one file.
                     run_after_mark(fail_at, mode)
 
 
+class CodexReviewEnvelopeTests(unittest.TestCase):
+    """`.agents/skills/codex-review/SKILL.md` derives reviewer identity by
+    scraping `model:` and `session id:` labels out of `codex exec`'s stderr.
+    Nothing else notices if OpenAI renames or reformats either label: the
+    skill already refuses to record an empty identity, so drift fails
+    closed, but only at review time, mid-slice, looking like a Codex
+    malfunction rather than a version skew. This is the loud, earlier
+    signal instead.
+    """
+
+    SKILL_PATH = ROOT / ".agents" / "skills" / "codex-review" / "SKILL.md"
+
+    def test_codex_exec_stderr_matches_reviewer_identity_patterns(self):
+        import os
+        import re
+        import shutil
+        import subprocess
+        import tempfile
+
+        skill_text = self.SKILL_PATH.read_text()
+        # Scope to section 3's own fenced *code block* -- the text that
+        # actually runs -- not the whole file and not the section's prose.
+        section_match = re.search(
+            r"^## 3\. Derive identity and verdict from the run\n(.*?)(?=^## |\Z)",
+            skill_text, re.DOTALL | re.MULTILINE)
+        self.assertIsNotNone(
+            section_match,
+            f"expected a '## 3. Derive identity and verdict from the run' "
+            f"section in {self.SKILL_PATH}; update this test if the skill "
+            f"was restructured")
+        section_text = section_match.group(1)
+
+        code_blocks = re.findall(r"```(?:[a-zA-Z]*)\n(.*?)```", section_text, re.DOTALL)
+        self.assertEqual(
+            1, len(code_blocks),
+            f"expected exactly one fenced code block in section 3 of "
+            f"{self.SKILL_PATH}, found {len(code_blocks)}; update this test "
+            f"if the skill was restructured, so this keeps executing only "
+            f"the code that actually runs")
+        code_text = code_blocks[0]
+        self.assertIn(
+            "MODEL=", code_text,
+            f"section 3's code block in {self.SKILL_PATH} no longer assigns "
+            f"MODEL; update this test if identity derivation intentionally "
+            f"changed")
+        self.assertIn(
+            "SESSION=", code_text,
+            f"section 3's code block in {self.SKILL_PATH} no longer assigns "
+            f"SESSION; update this test if identity derivation intentionally "
+            f"changed")
+
+        if not shutil.which("codex"):
+            self.skipTest("codex is unavailable")
+
+        if os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1":
+            self.skipTest(
+                "running inside a Codex sandbox (CODEX_SANDBOX/"
+                "CODEX_SANDBOX_NETWORK_DISABLED set); a nested `codex exec` "
+                "cannot initialize or reach the network from in here "
+                "(confirmed: it fails with \"failed to initialize "
+                "in-process app-server client\"); run this test outside the "
+                "sandbox with `codex` on PATH")
+
+        # Mirrors codex-review/SKILL.md section 1 exactly: the same flags,
+        # the same closed stdin, stdout and stderr captured separately.
+        # Any flag that could change the stderr header must match the
+        # skill's own invocation.
+        try:
+            result = subprocess.run(
+                ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check",
+                 "Say hello in one word."],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired as exc:
+            self.fail(
+                "codex exec did not finish within 120s; this is a codex "
+                f"problem (hung run), not envelope drift. Captured so far:\n"
+                f"stdout: {exc.stdout!r}\nstderr: {exc.stderr!r}")
+
+        self.assertEqual(
+            0, result.returncode,
+            f"codex exec exited {result.returncode}; this indicates codex "
+            f"could not run (auth, network, or config), not envelope drift. "
+            f"stderr:\n{result.stderr[-2000:]}")
+
+        # Execute section 3's block verbatim against the real stderr, rather
+        # than re-deriving its `sed` patterns by regex and running those
+        # separately. Three review rounds each found a different way a
+        # regex re-derivation could be fooled by a stale or decoy
+        # assignment (elsewhere in the file, in section 3's prose, or a
+        # second, differently-quoted assignment of the same name inside the
+        # fence -- a later assignment wins at runtime and a regex counting
+        # only one *form* would miss it). Running the block sidesteps the
+        # whole class: bash resolves `$MODEL`/`$SESSION` exactly as
+        # codex-review itself would, so there is nothing left to fool.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = os.path.join(tmpdir, "report")
+            # The block reads "$REPORT" (for the verdict line) and
+            # "$REPORT.err" (for MODEL/SESSION). The verdict half is not
+            # this issue's concern -- identity derivation is -- so the
+            # fixture report ends with a valid verdict line purely so that
+            # half of the block doesn't `exit 1` for an unrelated reason.
+            with open(report_path, "w") as f:
+                f.write("VERDICT: pass\n")
+            with open(report_path + ".err", "w") as f:
+                f.write(result.stderr)
+
+            probe_script = code_text + '\nprintf "%s\\n%s\\n" "$MODEL" "$SESSION"\n'
+            try:
+                block_result = subprocess.run(
+                    ["bash", "-c", probe_script],
+                    env={**os.environ, "REPORT": report_path},
+                    capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired as exc:
+                self.fail(
+                    "section 3's code block did not finish within 30s "
+                    f"against real `codex exec` stderr. Captured so far:\n"
+                    f"stdout: {exc.stdout!r}\nstderr: {exc.stderr!r}")
+
+        if block_result.returncode != 0:
+            self.fail(
+                f"section 3's code block exited {block_result.returncode} "
+                f"against real `codex exec` stderr -- the merge gate would "
+                f"refuse every receipt with the same failure (most likely "
+                f"\"cannot identify the reviewer\"), which means the "
+                f"envelope has drifted. Block stdout: {block_result.stdout!r}\n"
+                f"Block stderr: {block_result.stderr!r}\n"
+                f"codex exec stderr was:\n{result.stderr}")
+
+        printed = block_result.stdout.splitlines()
+        self.assertEqual(
+            2, len(printed),
+            f"expected section 3's block to print MODEL then SESSION on "
+            f"exit 0; got {printed!r} (stderr: {block_result.stderr!r})")
+        model_value, session_value = printed
+        self.assertTrue(
+            model_value.strip() and session_value.strip(),
+            f"section 3's block derived an empty MODEL or SESSION from "
+            f"real `codex exec` stderr without exiting non-zero, which "
+            f"should be impossible given its own guard -- treat this as a "
+            f"bug in this test, not envelope drift. codex exec stderr:\n"
+            f"{result.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -284,6 +284,13 @@ steps**:
   subcommands or the `disable-model-invocation` frontmatter. That affects only
   the optional pass in the previous section.
 
-So: after a CLI upgrade, re-check section 3's two `sed` patterns. After a plugin
+`python3 -m unittest scripts.tests.test_sdlc.CodexReviewEnvelopeTests -v`
+executes this section's own code block against real `codex exec` stderr, when
+`codex` is on `PATH` outside a Codex sandbox — a CLI upgrade that renames either
+label fails that command with the same "cannot identify the reviewer" error
+this section raises, instead of surfacing it mid-slice as an apparent Codex
+malfunction.
+
+So: after a CLI upgrade, run that command (outside a Codex sandbox). After a plugin
 upgrade, re-check the companion's subcommand list. Doing only the second is the
 easy mistake, because the plugin is the thing that looks like a dependency.
