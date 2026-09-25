@@ -21,7 +21,7 @@ precisely so nothing is lost without it.
 | --- | --- |
 | `$PR` | the pull request number |
 | `$N` | the issue the PR closes |
-| `$HEAD_SHA` | the head the review must read, from `gh pr view "$PR" --json headRefOid -q .headRefOid` |
+| `$HEAD_SHA` | the head the review must read; section 5 owns the one capture procedure, via `codex-await-head` |
 | round | which attempt this is, and the verdicts of previous rounds |
 
 ## The independence rule
@@ -42,8 +42,10 @@ REPORT="${TMPDIR:-/tmp}/review-pr$PR.md"
 codex exec --sandbox read-only --skip-git-repo-check "<prompt from section 2>" \
   < /dev/null > "$REPORT" 2> "$REPORT.err" \
   || { echo "review did not run; see $REPORT.err"; exit 1; }
-test -s "$REPORT" || { echo "empty report; see $REPORT.err"; exit 1; }
 ```
+
+The empty-report guard moved into section 3's `codex-envelope` call, which
+reads `$REPORT` anyway; there is no need to check it twice.
 
 All three redirections matter.
 
@@ -114,29 +116,48 @@ Two authoring rules, both learned from real rounds:
 ## 3. Derive identity and verdict from the run
 
 Never from this session's judgement. An empty identity string is still non-empty
-enough for the gate to accept, so check the parts, not the result:
+enough for the gate to accept, so check the parts, not the result. `sdlc.py`'s
+`codex-envelope` command owns this parsing — see "What is ours and what is
+OpenAI's" below for why it, not this skill file, is what a fresh session edits
+after a `codex exec` upgrade:
 
 ```bash
-MODEL=$(sed -n 's/^model: //p' "$REPORT.err" | head -1)
-SESSION=$(sed -n 's/^session id: //p' "$REPORT.err" | head -1)
-[ -n "$MODEL" ] && [ -n "$SESSION" ] \
-  || { echo "cannot identify the reviewer; refusing to record"; exit 1; }
-REVIEWER="Codex $MODEL / $SESSION"
+REVIEWER=$(rtk proxy python3 scripts/sdlc.py codex-envelope --field reviewer \
+  --report "$REPORT" --err "$REPORT.err") || exit 1
+[ -n "$REVIEWER" ] || { echo "cannot identify the reviewer; refusing to record"; exit 1; }
 
-LAST=$(awk 'NF {line=$0} END {print line}' "$REPORT")
-case "$LAST" in
-  "VERDICT: pass") VERDICT=pass ;;
-  "VERDICT: fail") VERDICT=fail ;;
-  *) echo "report does not end with a verdict line; refusing to record"; exit 1 ;;
-esac
+VERDICT=$(rtk proxy python3 scripts/sdlc.py codex-envelope --field verdict \
+  --report "$REPORT" --err "$REPORT.err") || exit 1
+[ -n "$VERDICT" ] || { echo "report does not end with a verdict line; refusing to record"; exit 1; }
 ```
 
-Match the **last non-empty line**, not any line that looks like a verdict.
-Searching the whole report accepts one that says `VERDICT: pass` and then keeps
-talking, which is a malformed report whose real conclusion is unknown. The
-contract in section 2 says the verdict is the final line; this is where that is
-enforced, so a reviewer that ignores the contract fails closed instead of having
-a verdict guessed for it.
+`rtk proxy` matters here exactly as it does in section 5: the value captured
+is read back verbatim by later steps, not summarized for a human to read.
+`$(...)` only ever captures stdout, so `codex-envelope`'s own diagnostic —
+printed to stderr by `sdlc.py`'s top-level error handler, exactly like every
+other command in this CLI — still reaches the operator directly instead of
+being folded into `$REVIEWER`/`$VERDICT` (section 1's "the two streams go to
+separate files" rule applies here too: merging them would let a stray stderr
+line, not just an error, end up recorded in the receipt on an otherwise
+successful run). The trailing `[ -n ... ]` guard is only a last-resort net
+against an empty success that should be structurally impossible.
+
+`codex-envelope --field verdict` matches the **last non-empty line**, not any
+line that looks like a verdict. Searching the whole report accepts one that
+says `VERDICT: pass` and then keeps talking, which is a malformed report whose
+real conclusion is unknown. The contract in section 2 says the verdict is the
+final line; this is where that is enforced, so a reviewer that ignores the
+contract fails closed instead of having a verdict guessed for it.
+
+Both parsers are byte-literal matches for the `sed`/`awk` they replace —
+splitting on `\n` alone and treating only a run of spaces/tabs as blank, never
+`str.splitlines()`/`str.strip()`'s wider notion of whitespace — so a CRLF
+report or a stray form-feed line fails exactly as it always has.
+`scripts/tests/test_sdlc.py` pins the fixture table this was verified against,
+including an always-on test that runs this very code block (with a
+`rtk`-shimmed `PATH`) against those fixtures, so a future edit to this section
+that quietly stops calling `codex-envelope` is itself a caught regression, not
+just a hoped-for convention.
 
 ## 4. Record the receipt
 
@@ -162,33 +183,24 @@ This section owns **every** way the head moves -- a fix commit, a rebase onto
 the default branch, an amend, anything. `work-slice` defers here rather than
 repeating it, because two copies drifted once already.
 
-Push, then **re-capture `$HEAD_SHA` before running this skill again**:
+Push, then **re-capture `$HEAD_SHA` before running this skill again**. GitHub's
+API can report the pre-push head for several seconds, so a single read can
+return the SHA you just replaced. `sdlc.py`'s `codex-await-head` retries a
+fresh read against local `HEAD` until they agree, up to five attempts with a
+delay between, and fails closed if they never do:
 
 ```bash
-HEAD_SHA=$(rtk proxy gh pr view "$PR" --json headRefOid -q .headRefOid)
+HEAD_SHA=$(rtk proxy python3 scripts/sdlc.py codex-await-head --pr "$PR" \
+  --local-head "$(rtk proxy git rev-parse HEAD)") || exit 1
 ```
 
-Skipping that leaves the next reviewer comparing the new head against the old
-SHA and stopping, which looks like a review failure and is not one — and if the
-reviewer does not catch it, `--expect-sha` refuses the receipt.
-
-GitHub's API can report the pre-push head for several seconds, so a single
-capture can return the SHA you just replaced. Re-query until it agrees with
-local `HEAD`:
-
-```bash
-for _ in 1 2 3 4 5; do
-  HEAD_SHA=$(rtk proxy gh pr view "$PR" --json headRefOid -q .headRefOid)
-  [ "$HEAD_SHA" = "$(rtk proxy git rev-parse HEAD)" ] && break
-  sleep 4
-done
-[ "$HEAD_SHA" = "$(rtk proxy git rev-parse HEAD)" ] \
-  || { echo "GitHub still reports a different head; not reviewing yet"; exit 1; }
-```
-
-Capturing once after a rebase is the specific way this goes wrong: the reviewer
-is handed a stale SHA, refuses to review a head that does not match, and the
-result looks like a review failure rather than a race.
+Skipping the retry — capturing once, immediately after the push — is the
+specific way this goes wrong: the reviewer is handed a stale SHA, refuses to
+review a head that does not match, and the result looks like a review failure
+rather than a race. And skipping the re-capture entirely leaves the next
+reviewer comparing the new head against the old SHA and stopping, which looks
+like a review failure and is not one — and if the reviewer does not catch it,
+`--expect-sha` refuses the receipt.
 
 This is also how `$HEAD_SHA` is produced in the first place. `work-slice` step 7
 creates the pull request and then calls this section for the capture rather than
@@ -266,31 +278,43 @@ repository's tooling.
 ## What is ours and what is OpenAI's
 
 Ours, and safe to change: the prompt, the `VERDICT: pass|fail` contract, the
-stream handling, the identity derivation, `review-receipt` and `--expect-sha`.
+stream handling, `scripts/sdlc.py`'s `codex-envelope`/`codex-await-head`
+commands and the functions behind them (`parse_codex_identity`,
+`parse_codex_verdict`, `require_nonempty_report`, `await_matching_head`),
+`review-receipt` and `--expect-sha`.
 
 OpenAI's, and subject to drift on upgrade: `codex exec` flags and its stderr
-format — `model:` and `session id:` are scraped in section 3 and a rename breaks
-identity derivation; `codex-companion.mjs` subcommands; the
+format — `model:` and `session id:` are scraped by `parse_codex_identity` and a
+rename breaks identity derivation; `codex-companion.mjs` subcommands; the
 `disable-model-invocation` frontmatter.
 
 These are **two independently versioned things, and they break different
 steps**:
 
 - Upgrading the **Codex CLI** (`codex exec`) can change the stderr labels that
-  section 3 scrapes. That breaks identity derivation and makes receipts
-  unrecordable -- the required path. A plugin upgrade cannot validate this, and
-  a CLI upgrade happens without touching the plugin at all.
+  `parse_codex_identity` scrapes. That breaks identity derivation and makes
+  receipts unrecordable -- the required path. A plugin upgrade cannot validate
+  this, and a CLI upgrade happens without touching the plugin at all.
 - Upgrading the **Claude Code plugin** can change `codex-companion.mjs`
   subcommands or the `disable-model-invocation` frontmatter. That affects only
   the optional pass in the previous section.
 
-`python3 -m unittest scripts.tests.test_sdlc.CodexReviewEnvelopeTests -v`
-executes this section's own code block against real `codex exec` stderr, when
-`codex` is on `PATH` outside a Codex sandbox — a CLI upgrade that renames either
-label fails that command with the same "cannot identify the reviewer" error
-this section raises, instead of surfacing it mid-slice as an apparent Codex
+Two test layers guard identity/verdict derivation, and they catch different
+things. `python3 scripts/tests/test_sdlc.py` runs a fixture table (CRLF, a
+stray form-feed line, an empty-then-non-empty `model:` match, and more) against
+`parse_codex_identity`/`parse_codex_verdict` directly, and a structural
+companion test that executes section 3's actual fenced code block (with `rtk`
+shimmed on `PATH`) against those same fixtures — so a future edit that quietly
+stops calling `codex-envelope`, not just a changed label, fails a test every
+run, with no `codex` binary required. `python3 -m unittest
+scripts.tests.test_sdlc.CodexReviewEnvelopeTests -v` additionally exercises
+`parse_codex_identity` against a real `codex exec` run's stderr, when `codex`
+is on `PATH` outside a Codex sandbox — a CLI upgrade that renames either label
+fails that command with the same "cannot identify the reviewer" error this
+section raises, instead of surfacing it mid-slice as an apparent Codex
 malfunction.
 
-So: after a CLI upgrade, run that command (outside a Codex sandbox). After a plugin
-upgrade, re-check the companion's subcommand list. Doing only the second is the
-easy mistake, because the plugin is the thing that looks like a dependency.
+So: after a CLI upgrade, run that command (outside a Codex sandbox); it is the
+only layer that needs a real `codex` binary. After a plugin upgrade, re-check
+the companion's subcommand list. Doing only the second is the easy mistake,
+because the plugin is the thing that looks like a dependency.
