@@ -2894,11 +2894,14 @@ class CodexReviewEnvelopeTests(unittest.TestCase):
         import subprocess
 
         skill_text = self.SKILL_PATH.read_text()
-        # Scope extraction to section 3's own code block, not the whole
-        # file: a stale copy of an old `MODEL=`/`SESSION=` line elsewhere
-        # (prose, a superseded example, "Failure modes") could otherwise be
-        # miscounted as the active one, silently validating the wrong text
-        # while the skill's real derivation drifted unnoticed.
+        # Scope extraction to section 3's own fenced *code block*, not its
+        # prose and not the whole file: a stale copy of an old
+        # `MODEL=`/`SESSION=` line anywhere else -- another section, or even
+        # prose *within* section 3 (round 2's finding: a superseded example
+        # sentence, "Failure modes", etc.) -- could otherwise be miscounted
+        # as the active one, silently validating the wrong text while the
+        # skill's real derivation drifted unnoticed. Only a fenced code
+        # block is the thing actually executed.
         section_match = re.search(
             r"^## 3\. Derive identity and verdict from the run\n(.*?)(?=^## |\Z)",
             skill_text, re.DOTALL | re.MULTILINE)
@@ -2909,11 +2912,20 @@ class CodexReviewEnvelopeTests(unittest.TestCase):
             f"was restructured")
         section_text = section_match.group(1)
 
+        code_blocks = re.findall(r"```(?:[a-zA-Z]*)\n(.*?)```", section_text, re.DOTALL)
+        self.assertEqual(
+            1, len(code_blocks),
+            f"expected exactly one fenced code block in section 3 of "
+            f"{self.SKILL_PATH}, found {len(code_blocks)}; update this test "
+            f"if the skill was restructured, so extraction keeps reading "
+            f"only the code that actually runs")
+        code_text = code_blocks[0]
+
         # The same `sed -n '<script>'` scripts the skill runs against
         # `$REPORT.err`, pulled from its own source so this test and the
         # skill can never silently diverge (single source of truth).
         # Anchored to the `MODEL=`/`SESSION=` assignments specifically, not
-        # any `sed -n '...'` in the section, so an unrelated sed can't be
+        # any `sed -n '...'` in the code block, so an unrelated sed can't be
         # miscounted as one of these two.
         labeled_patterns = {
             "MODEL": r"^MODEL=\$\(sed -n '(s/[^']*)'",
@@ -2921,11 +2933,11 @@ class CodexReviewEnvelopeTests(unittest.TestCase):
         }
         sed_scripts = {}
         for label, pattern in labeled_patterns.items():
-            matches = re.findall(pattern, section_text, re.MULTILINE)
+            matches = re.findall(pattern, code_text, re.MULTILINE)
             self.assertEqual(
                 1, len(matches),
                 f"expected exactly one `{label}=$(sed -n '...')` "
-                f"reviewer-identity assignment in section 3 of "
+                f"reviewer-identity assignment in section 3's code block of "
                 f"{self.SKILL_PATH}, found {len(matches)}; update this test "
                 f"if the skill's identity derivation intentionally changed")
             sed_scripts[label] = matches[0]
