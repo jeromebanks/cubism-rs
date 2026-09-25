@@ -2888,6 +2888,7 @@ class CodexReviewEnvelopeTests(unittest.TestCase):
     SKILL_PATH = ROOT / ".agents" / "skills" / "codex-review" / "SKILL.md"
 
     def test_codex_exec_stderr_matches_reviewer_identity_patterns(self):
+        import os
         import re
         import shutil
         import subprocess
@@ -2896,15 +2897,35 @@ class CodexReviewEnvelopeTests(unittest.TestCase):
         # The same `sed -n '<script>'` scripts the skill runs against
         # `$REPORT.err`, pulled from its own source so this test and the
         # skill can never silently diverge (single source of truth).
-        sed_scripts = re.findall(r"sed -n '(s/[^']*)'", skill_text)
-        self.assertEqual(
-            2, len(sed_scripts),
-            f"expected exactly two `sed -n '...'` reviewer-identity scripts "
-            f"in {self.SKILL_PATH}, found {sed_scripts}; update this test if "
-            f"the skill's identity derivation intentionally changed")
+        # Anchored to the `MODEL=`/`SESSION=` assignments specifically, not
+        # any `sed -n '...'` in the file, so an unrelated sed elsewhere can't
+        # be miscounted as one of these two.
+        labeled_patterns = {
+            "MODEL": r"^MODEL=\$\(sed -n '(s/[^']*)'",
+            "SESSION": r"^SESSION=\$\(sed -n '(s/[^']*)'",
+        }
+        sed_scripts = {}
+        for label, pattern in labeled_patterns.items():
+            matches = re.findall(pattern, skill_text, re.MULTILINE)
+            self.assertEqual(
+                1, len(matches),
+                f"expected exactly one `{label}=$(sed -n '...')` "
+                f"reviewer-identity assignment in {self.SKILL_PATH}, found "
+                f"{len(matches)}; update this test if the skill's identity "
+                f"derivation intentionally changed")
+            sed_scripts[label] = matches[0]
 
         if not shutil.which("codex"):
             self.skipTest("codex is unavailable")
+
+        if os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1":
+            self.skipTest(
+                "running inside a Codex sandbox (CODEX_SANDBOX/"
+                "CODEX_SANDBOX_NETWORK_DISABLED set); a nested `codex exec` "
+                "cannot initialize or reach the network from in here "
+                "(confirmed: it fails with \"failed to initialize "
+                "in-process app-server client\"); run this test outside the "
+                "sandbox with `codex` on PATH")
 
         # Mirrors codex-review/SKILL.md section 1 exactly: the same flags,
         # the same closed stdin, stdout and stderr captured separately.
@@ -2927,18 +2948,24 @@ class CodexReviewEnvelopeTests(unittest.TestCase):
             f"could not run (auth, network, or config), not envelope drift. "
             f"stderr:\n{result.stderr[-2000:]}")
 
-        for script in sed_scripts:
+        for label, script in sed_scripts.items():
             sed_result = subprocess.run(
                 ["sed", "-n", script], input=result.stderr,
                 capture_output=True, text=True)
+            self.assertEqual(
+                0, sed_result.returncode,
+                f"`sed -n {script!r}` (the {label} pattern) failed (exit "
+                f"{sed_result.returncode}); this indicates a local `sed` "
+                f"incompatibility, not envelope drift. stderr:\n"
+                f"{sed_result.stderr}")
             lines = sed_result.stdout.splitlines()
             first_line = lines[0] if lines else ""
             self.assertTrue(
                 first_line.strip(),
-                f"reviewer-identity pattern {script!r} matched nothing in "
-                f"`codex exec`'s stderr; the envelope has likely drifted "
-                f"and the merge gate would refuse every receipt with "
-                f"\"cannot identify the reviewer\". Captured stderr:\n"
+                f"the {label} reviewer-identity pattern {script!r} matched "
+                f"nothing in `codex exec`'s stderr; the envelope has likely "
+                f"drifted and the merge gate would refuse every receipt "
+                f"with \"cannot identify the reviewer\". Captured stderr:\n"
                 f"{result.stderr}")
 
 
