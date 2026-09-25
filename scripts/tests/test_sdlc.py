@@ -554,6 +554,213 @@ Read one file.
         errors = self._evaluate(self._passing_pr(), comments, self.slice, self.config)
         self.assertTrue(any("is `fail`, not `pass`" in e for e in errors), errors)
 
+    # --- #110: review-round budget ---
+
+    def _budget_comment(self, kind, rounds, decided_by="jerome", created_at=None):
+        return {"body": sdlc.budget_marker(kind, rounds, decided_by), "created_at": created_at}
+
+    def test_budget_marker_round_trips_through_parse_budget_records(self):
+        comment = self._budget_comment("codex", 6, "jerome")
+        comment["html_url"] = "https://example/1"
+        records = sdlc.parse_budget_records([comment])
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            {"schema": 1, "kind": "codex", "rounds": 6, "decided_by": "jerome"},
+            {k: v for k, v in records[0].items() if k in {"schema", "kind", "rounds", "decided_by"}},
+        )
+
+    def test_budget_record_and_review_receipt_never_cross_parse(self):
+        receipt_comment = self._receipt("fresh-codex", "pass")
+        budget_comment = self._budget_comment("codex", 6)
+        self.assertEqual([], sdlc.parse_budget_records([receipt_comment]))
+        self.assertEqual([], sdlc.parse_review_receipts([budget_comment]))
+
+    def test_consumed_review_rounds_counts_every_head_sha_in_the_repair_sequence(self):
+        receipts = sdlc.parse_review_receipts([
+            self._receipt("fresh-codex", "fail", head="aaa"),
+            self._receipt("fresh-codex", "fail", head="bbb"),
+            self._receipt("fresh-codex", "pass", head="ccc"),
+        ])
+        # Not just the current head: a rebase moves `headRefOid` but posts no
+        # new receipt, so re-running this over the same parsed receipts (as a
+        # fresh session would, after reconstructing state from GitHub) must
+        # not change the count.
+        self.assertEqual(3, sdlc.consumed_review_rounds(receipts, "codex"))
+        self.assertEqual(3, sdlc.consumed_review_rounds(receipts, "codex"))
+
+    def test_consumed_review_rounds_is_scoped_to_one_kind(self):
+        receipts = sdlc.parse_review_receipts([
+            self._receipt("fresh-codex", "pass", head="aaa"),
+            {"body": sdlc.review_marker("advisor", "aaa", "pass", "r"), "user": {"login": "x"}},
+        ])
+        self.assertEqual(1, sdlc.consumed_review_rounds(receipts, "codex"))
+
+    def test_effective_review_budget_defaults_with_no_renewal(self):
+        self.assertEqual(3, sdlc.effective_review_budget([], "codex", 3))
+
+    def test_effective_review_budget_folds_by_maximum_order_independent(self):
+        records = sdlc.parse_budget_records([
+            self._budget_comment("codex", 2, created_at="2026-01-01T00:00:00Z"),
+            self._budget_comment("codex", 6, created_at="2026-01-02T00:00:00Z"),
+        ])
+        self.assertEqual(6, sdlc.effective_review_budget(records, "codex", 3))
+        self.assertEqual(6, sdlc.effective_review_budget(list(reversed(records)), "codex", 3))
+
+    def test_a_lower_renewal_never_lowers_the_effective_budget(self):
+        records = sdlc.parse_budget_records([
+            self._budget_comment("codex", 6, created_at="2026-01-01T00:00:00Z"),
+            self._budget_comment("codex", 2, created_at="2026-01-02T00:00:00Z"),
+        ])
+        self.assertEqual(6, sdlc.effective_review_budget(records, "codex", 3))
+
+    def test_malformed_renewal_records_are_excluded_from_the_fold(self):
+        good = {"schema": 1, "kind": "codex", "rounds": 6, "decided_by": "jerome"}
+        no_decider = {"schema": 1, "kind": "codex", "rounds": 9, "decided_by": ""}
+        bool_rounds = {"schema": 1, "kind": "codex", "rounds": True, "decided_by": "jerome"}
+        zero_rounds = {"schema": 1, "kind": "codex", "rounds": 0, "decided_by": "jerome"}
+        wrong_kind = {"schema": 1, "kind": "advisor", "rounds": 9, "decided_by": "jerome"}
+        for bad in (no_decider, bool_rounds, zero_rounds, wrong_kind):
+            with self.subTest(bad=bad):
+                self.assertFalse(sdlc.complete_budget_record(bad, "codex"))
+        # None of the malformed records lower or invalidate the one valid
+        # record's contribution.
+        self.assertEqual(
+            6,
+            sdlc.effective_review_budget(
+                [good, no_decider, bool_rounds, zero_rounds, wrong_kind], "codex", 3),
+        )
+
+    def test_budget_exhaustion_blocks_merge_even_on_a_passing_round(self):
+        # The historical shape of #75/#98/#105's real repair sequences: three
+        # recorded fails against earlier heads, then a clean independent pass
+        # against the current head. Default budget is 3; this is round 4.
+        comments = [
+            self._receipt("fresh-codex", "fail", head="aaa"),
+            self._receipt("fresh-codex", "fail", head="bbb"),
+            self._receipt("fresh-codex", "fail", head="ccc"),
+            self._receipt("fresh-codex", "pass", head="abc123"),
+        ]
+        errors = self._evaluate(self._passing_pr(), comments, self.slice, self.config)
+        self.assertTrue(
+            any(
+                "`codex` review budget exhausted" in e
+                and "4 rounds recorded, budget is 3" in e
+                and "renew-review-budget --pr" in e
+                for e in errors
+            ),
+            errors,
+        )
+
+    def test_a_valid_renewal_unblocks_an_exhausted_budget(self):
+        comments = [
+            self._receipt("fresh-codex", "fail", head="aaa"),
+            self._receipt("fresh-codex", "fail", head="bbb"),
+            self._receipt("fresh-codex", "fail", head="ccc"),
+            self._receipt("fresh-codex", "pass", head="abc123"),
+            self._budget_comment("codex", 4),
+        ]
+        self.assertEqual([], self._evaluate(self._passing_pr(), comments, self.slice, self.config))
+
+    def test_budget_error_does_not_inherit_the_rebase_advice(self):
+        # Advisor review finding: the budget check must run after the
+        # rebase-advice block and append its own error, so it never inherits
+        # the same-account/no-trailer note meant for a missing-receipt or
+        # failed-verdict error. `head_parent_count=2` and a trailerless merge-
+        # commit head are present here specifically so a regression that made
+        # the rebase note fire on parent-count alone -- not on the same-
+        # account condition it actually depends on -- would be caught.
+        pr = self._passing_pr(author=self.ONE_ACCOUNT, head="mergesha")
+        comments = [
+            self._receipt("reviewer-bot", "fail", head="aaa", reviewer="codex-cli fresh exec session"),
+            self._receipt("reviewer-bot", "fail", head="bbb", reviewer="codex-cli fresh exec session"),
+            self._receipt("reviewer-bot", "fail", head="ccc", reviewer="codex-cli fresh exec session"),
+            self._receipt("reviewer-bot", "pass", head="mergesha", reviewer="codex-cli fresh exec session"),
+        ]
+        errors = self._evaluate(
+            pr, comments, self.slice, self.config, self.MERGE_COMMIT_HEAD, head_parent_count=2)
+        self.assertTrue(any("review budget exhausted" in e for e in errors), errors)
+        self.assertFalse(any("rebase" in e for e in errors), errors)
+
+    def test_max_rounds_absent_disables_enforcement(self):
+        config = json.loads(json.dumps(self.config))
+        del config["review"]["max_rounds"]
+        comments = [
+            self._receipt("fresh-codex", "fail", head="aaa"),
+            self._receipt("fresh-codex", "fail", head="bbb"),
+            self._receipt("fresh-codex", "fail", head="ccc"),
+            self._receipt("fresh-codex", "pass", head="abc123"),
+        ]
+        self.assertEqual([], self._evaluate(self._passing_pr(), comments, self.slice, config))
+
+    def test_invalid_max_rounds_value_fails_closed(self):
+        for bad in (0, -1, True, "3", 3.0):
+            with self.subTest(bad=bad):
+                config = json.loads(json.dumps(self.config))
+                config["review"]["max_rounds"] = bad
+                errors = self._evaluate(
+                    self._passing_pr(), [self._receipt("fresh-codex")], self.slice, config)
+                self.assertTrue(any("review.max_rounds" in e for e in errors), errors)
+
+    def test_renew_review_budget_requires_apply_to_post(self):
+        import argparse
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("Approved after reviewing round 4's findings.\n", encoding="utf-8")
+            args = argparse.Namespace(
+                pr=110, kind="codex", rounds=4, decided_by="jerome", note_file=note, apply=False,
+            )
+            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
+                 patch.object(sdlc, "run_json") as poster:
+                self.assertEqual(0, sdlc.command_renew_review_budget(args, self.config))
+            poster.assert_not_called()
+
+    def test_renew_review_budget_refuses_without_decided_by(self):
+        import argparse
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("note\n", encoding="utf-8")
+            args = argparse.Namespace(
+                pr=110, kind="codex", rounds=4, decided_by="  ", note_file=note, apply=True,
+            )
+            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}):
+                with self.assertRaises(sdlc.SdlcError):
+                    sdlc.command_renew_review_budget(args, self.config)
+
+    def test_renew_review_budget_refuses_a_pr_that_does_not_resolve(self):
+        import argparse
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("note\n", encoding="utf-8")
+            args = argparse.Namespace(
+                pr=999999, kind="codex", rounds=4, decided_by="jerome", note_file=note, apply=True,
+            )
+            with patch.object(sdlc, "fetch_pr", side_effect=sdlc.SdlcError("no such PR")):
+                with self.assertRaises(sdlc.SdlcError):
+                    sdlc.command_renew_review_budget(args, self.config)
+
+    def test_renew_review_budget_posts_the_expected_marker_and_note(self):
+        import argparse
+        posted = {}
+
+        def run_json(command):
+            # Read the `--input` payload while the temp file still exists:
+            # the real command deletes it in a `finally` right after this
+            # call returns.
+            posted["body"] = json.loads(Path(command[command.index("--input") + 1]).read_text())["body"]
+            return {"html_url": "https://example/comment/1"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.md"
+            note.write_text("Approved after reviewing round 4's findings.\n", encoding="utf-8")
+            args = argparse.Namespace(
+                pr=110, kind="codex", rounds=4, decided_by="jerome", note_file=note, apply=True,
+            )
+            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
+                 patch.object(sdlc, "run_json", side_effect=run_json):
+                self.assertEqual(0, sdlc.command_renew_review_budget(args, self.config))
+        self.assertIn(sdlc.budget_marker("codex", 4, "jerome"), posted["body"])
+        self.assertIn("Approved after reviewing round 4's findings.", posted["body"])
+
     # --- applied merge ---
 
     CANDIDATE = "a" * 40
