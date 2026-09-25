@@ -524,6 +524,17 @@ def parse_budget_records(comments: Iterable[dict[str, Any]]) -> list[dict[str, A
     return records
 
 
+def _is_schema_one(value: dict[str, Any]) -> bool:
+    """True only for an actual integer 1, never `True` (`True == 1` in Python).
+
+    Codex round 1 finding 3: a hand-edited `"schema": true` record must not
+    be read as schema 1 by either the budget-record or the round-counting
+    check below.
+    """
+    schema = value.get("schema")
+    return isinstance(schema, int) and not isinstance(schema, bool) and schema == 1
+
+
 def complete_budget_record(record: dict[str, Any] | None, kind: str) -> bool:
     """True for a schema-1 renewal record for `kind` carrying a usable ceiling.
 
@@ -531,7 +542,7 @@ def complete_budget_record(record: dict[str, Any] | None, kind: str) -> bool:
     count) is simply excluded by the caller's fold-by-maximum — it never
     lowers or invalidates any other record's contribution.
     """
-    if not record or record.get("schema") != 1 or record.get("kind") != kind:
+    if not record or not _is_schema_one(record) or record.get("kind") != kind:
         return False
     decided_by = record.get("decided_by")
     if not isinstance(decided_by, str) or not decided_by.strip():
@@ -564,7 +575,7 @@ def consumed_review_rounds(receipts: Iterable[dict[str, Any]], kind: str) -> int
     counts, so a rebase that posts no new receipt never changes this number,
     and restarting a session cannot reset it — the count lives on GitHub.
     """
-    return sum(1 for receipt in receipts if receipt.get("schema") == 1 and receipt.get("kind") == kind)
+    return sum(1 for receipt in receipts if _is_schema_one(receipt) and receipt.get("kind") == kind)
 
 
 def gate_admission_errors(
@@ -1454,8 +1465,12 @@ def evaluate_merge_gate(
         # a missing-receipt or failed-verdict error, and it can fire even when
         # the exhausting round's own verdict is `pass` — the cap bounds round
         # *count*, not outcome.
-        raw_max_rounds = config["review"].get("max_rounds")
-        if raw_max_rounds is not None:
+        # `in`, not `.get(...) is not None`: an explicit `"max_rounds": null`
+        # is a present-but-invalid value that must fail closed, not a way to
+        # spell "key absent" -- those are different JSON shapes and only the
+        # second one means "no budget configured" (Codex round 1 finding 1).
+        if "max_rounds" in config["review"]:
+            raw_max_rounds = config["review"]["max_rounds"]
             if isinstance(raw_max_rounds, bool) or not isinstance(raw_max_rounds, int) or raw_max_rounds <= 0:
                 # Fail closed on a typo rather than silently disabling
                 # enforcement; the key's total absence, not a bad value, is
@@ -1787,7 +1802,11 @@ def command_renew_review_budget(args: argparse.Namespace, config: dict[str, Any]
     # single-line marker, so `BUDGET_RECORD_RE` would stop mid-JSON and the
     # record would be silently unparseable -- posted successfully, printed as
     # `RENEWED`, but never actually raising the budget. Same guard `set-gate`
-    # applies to `--checkpoint`/`--decided-by`.
+    # applies to `--checkpoint`/`--decided-by`. Checked (and later used) on
+    # the already-`.strip()`ped value, exactly like `set-gate`: a purely
+    # leading/trailing newline is removed before this check ever sees it, so
+    # the value that actually reaches the marker never contains one; only an
+    # *interior* newline, which `.strip()` cannot remove, is refused here.
     if "-->" in decided_by or any(char in decided_by for char in "\r\n"):
         raise SdlcError("--decided-by must be a single line and must not contain `-->`")
     if args.rounds <= 0:

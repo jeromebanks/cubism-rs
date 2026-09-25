@@ -641,7 +641,10 @@ Read one file.
         bool_rounds = {"schema": 1, "kind": "codex", "rounds": True, "decided_by": "jerome"}
         zero_rounds = {"schema": 1, "kind": "codex", "rounds": 0, "decided_by": "jerome"}
         wrong_kind = {"schema": 1, "kind": "advisor", "rounds": 9, "decided_by": "jerome"}
-        for bad in (no_decider, bool_rounds, zero_rounds, wrong_kind):
+        # Codex round 1 finding 3: `True == 1` in Python, so a hand-edited
+        # `"schema": true` record must not be read as schema 1 either.
+        bool_schema = {"schema": True, "kind": "codex", "rounds": 9, "decided_by": "jerome"}
+        for bad in (no_decider, bool_rounds, zero_rounds, wrong_kind, bool_schema):
             with self.subTest(bad=bad):
                 self.assertFalse(sdlc.complete_budget_record(bad, "codex"))
         # None of the malformed records lower or invalidate the one valid
@@ -649,8 +652,14 @@ Read one file.
         self.assertEqual(
             6,
             sdlc.effective_review_budget(
-                [good, no_decider, bool_rounds, zero_rounds, wrong_kind], "codex", 3),
+                [good, no_decider, bool_rounds, zero_rounds, wrong_kind, bool_schema], "codex", 3),
         )
+
+    def test_a_bool_schema_receipt_is_never_counted_as_schema_one(self):
+        # Same finding, on the round-counting side: `consumed_review_rounds`
+        # must not treat `"schema": true` as schema 1 either.
+        receipts = [{"schema": True, "kind": "codex", "head_sha": "aaa"}]
+        self.assertEqual(0, sdlc.consumed_review_rounds(receipts, "codex"))
 
     def test_budget_exhaustion_blocks_merge_even_on_a_passing_round(self):
         # The historical shape of #75/#98/#105's real repair sequences: three
@@ -713,13 +722,20 @@ Read one file.
         self.assertEqual([], self._evaluate(self._passing_pr(), comments, self.slice, config))
 
     def test_invalid_max_rounds_value_fails_closed(self):
-        for bad in (0, -1, True, "3", 3.0):
+        # `None` (Codex round 1 finding 1) is deliberately included: an
+        # explicit `"max_rounds": null` is a present-but-invalid value, not a
+        # way to spell "key absent" -- only the key's total absence (covered
+        # separately above) disables enforcement.
+        for bad in (0, -1, True, "3", 3.0, None):
             with self.subTest(bad=bad):
                 config = json.loads(json.dumps(self.config))
                 config["review"]["max_rounds"] = bad
                 errors = self._evaluate(
                     self._passing_pr(), [self._receipt("fresh-codex")], self.slice, config)
-                self.assertTrue(any("review.max_rounds" in e for e in errors), errors)
+                self.assertIn(
+                    f"`review.max_rounds` in config must be a positive integer, got {bad!r}",
+                    errors,
+                )
 
     def _renew_args(self, tmp, **overrides):
         import argparse
@@ -743,32 +759,62 @@ Read one file.
             args = self._renew_args(tmp, decided_by="  ")
             with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
                  patch.object(sdlc, "run_json") as poster:
-                with self.assertRaisesRegex(sdlc.SdlcError, "must name the person"):
+                with self.assertRaises(sdlc.SdlcError) as cm:
                     sdlc.command_renew_review_budget(args, self.config)
+            self.assertEqual(
+                "--decided-by must name the person who authorized this renewal", str(cm.exception))
             poster.assert_not_called()
 
     def test_renew_review_budget_refuses_a_decided_by_that_would_break_the_marker(self):
-        # #1: `-->` would close the HTML comment early; a bare newline breaks
-        # the single-line marker. Either way `BUDGET_RECORD_RE` would stop
-        # mid-JSON and the record would be silently unparseable even though
-        # the command reported success -- so refuse before posting anything.
+        # #1: `-->` would close the HTML comment early; an interior newline
+        # breaks the single-line marker. Either way `BUDGET_RECORD_RE` would
+        # stop mid-JSON and the record would be silently unparseable even
+        # though the command reported success -- so refuse before posting.
         for bad in ("evil --> injected", "two\nlines"):
             with self.subTest(decided_by=bad):
                 with tempfile.TemporaryDirectory() as tmp:
                     args = self._renew_args(tmp, decided_by=bad)
                     with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
                          patch.object(sdlc, "run_json") as poster:
-                        with self.assertRaisesRegex(sdlc.SdlcError, "must be a single line"):
+                        with self.assertRaises(sdlc.SdlcError) as cm:
                             sdlc.command_renew_review_budget(args, self.config)
+                    self.assertEqual(
+                        "--decided-by must be a single line and must not contain `-->`",
+                        str(cm.exception),
+                    )
                     poster.assert_not_called()
+
+    def test_a_purely_leading_or_trailing_newline_is_stripped_clean_before_posting(self):
+        # Codex round 1 finding 2: distinguishes this from the interior-
+        # newline case above. `--decided-by` is validated and used *after*
+        # `.strip()` (exactly like `set-gate`), so a value whose only
+        # newlines are leading/trailing never reaches the marker at all --
+        # there is nothing left to refuse, and refusing it would only reject
+        # ordinary shell/heredoc quoting artifacts for no safety benefit.
+        posted = {}
+
+        def run_json(command):
+            posted["body"] = json.loads(Path(command[command.index("--input") + 1]).read_text())["body"]
+            return {"html_url": "https://example/comment/1"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._renew_args(tmp, decided_by="\njerome\n")
+            with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
+                 patch.object(sdlc, "run_json", side_effect=run_json):
+                self.assertEqual(0, sdlc.command_renew_review_budget(args, self.config))
+        self.assertIn(sdlc.budget_marker("codex", 4, "jerome"), posted["body"])
+        # The posted marker line itself contains no raw newline mid-JSON.
+        marker_line = posted["body"].splitlines()[0]
+        self.assertTrue(marker_line.startswith(sdlc.BUDGET_PREFIX) and marker_line.endswith(sdlc.BUDGET_SUFFIX))
 
     def test_renew_review_budget_refuses_a_non_positive_rounds_value(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self._renew_args(tmp, rounds=0)
             with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
                  patch.object(sdlc, "run_json") as poster:
-                with self.assertRaisesRegex(sdlc.SdlcError, "positive integer"):
+                with self.assertRaises(sdlc.SdlcError) as cm:
                     sdlc.command_renew_review_budget(args, self.config)
+            self.assertEqual("--rounds must be a positive integer", str(cm.exception))
             poster.assert_not_called()
 
     def test_renew_review_budget_refuses_an_empty_note(self):
@@ -776,17 +822,20 @@ Read one file.
             args = self._renew_args(tmp, note_text="   \n")
             with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
                  patch.object(sdlc, "run_json") as poster:
-                with self.assertRaisesRegex(sdlc.SdlcError, "must not be empty"):
+                with self.assertRaises(sdlc.SdlcError) as cm:
                     sdlc.command_renew_review_budget(args, self.config)
+            self.assertEqual("renewal note must not be empty", str(cm.exception))
             poster.assert_not_called()
 
     def test_renew_review_budget_refuses_a_pr_that_does_not_resolve(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self._renew_args(tmp, pr=999999)
-            with patch.object(sdlc, "fetch_pr", side_effect=sdlc.SdlcError("no such PR")), \
+            with patch.object(sdlc, "fetch_pr", side_effect=sdlc.SdlcError("no such PR")) as fetch, \
                  patch.object(sdlc, "run_json") as poster:
-                with self.assertRaisesRegex(sdlc.SdlcError, "no such PR"):
+                with self.assertRaises(sdlc.SdlcError) as cm:
                     sdlc.command_renew_review_budget(args, self.config)
+            self.assertEqual("no such PR", str(cm.exception))
+            fetch.assert_called_once_with(999999, self.config)
             poster.assert_not_called()
 
     def test_renew_review_budget_refuses_a_response_with_no_url(self):
@@ -794,8 +843,13 @@ Read one file.
             args = self._renew_args(tmp)
             with patch.object(sdlc, "fetch_pr", return_value={"number": 110}), \
                  patch.object(sdlc, "run_json", return_value={"id": 900}):
-                with self.assertRaisesRegex(sdlc.SdlcError, "returned no URL"):
+                with self.assertRaises(sdlc.SdlcError) as cm:
                     sdlc.command_renew_review_budget(args, self.config)
+            self.assertEqual(
+                "budget renewal posted to PR #110 returned no URL; read the PR's "
+                "comments before retrying",
+                str(cm.exception),
+            )
 
     def test_renew_review_budget_posts_the_expected_marker_note_and_command(self):
         posted = {}
@@ -814,13 +868,19 @@ Read one file.
                  patch.object(sdlc, "run_json", side_effect=run_json):
                 self.assertEqual(0, sdlc.command_renew_review_budget(args, self.config))
         fetch.assert_called_once_with(110, self.config)
+        # Full equality, not a prefix check: an extra or missing argument
+        # (e.g. a stray flag) would otherwise pass unnoticed. Only the
+        # trailing temp-file path is nondeterministic.
+        self.assertEqual(7, len(posted["command"]))
         self.assertEqual(
-            ["gh", "api", "--method", "POST", f"repos/{self.config['repository']}/issues/110/comments"],
-            posted["command"][:5],
+            ["gh", "api", "--method", "POST",
+             f"repos/{self.config['repository']}/issues/110/comments", "--input"],
+            posted["command"][:6],
         )
-        self.assertEqual("--input", posted["command"][5])
-        self.assertIn(sdlc.budget_marker("codex", 4, "jerome"), posted["body"])
-        self.assertIn("Approved after reviewing round 4's findings.", posted["body"])
+        self.assertEqual(
+            f"{sdlc.budget_marker('codex', 4, 'jerome')}\n\nApproved after reviewing round 4's findings.\n",
+            posted["body"],
+        )
 
     def test_merge_gate_and_merge_both_block_on_an_exhausted_budget(self):
         # Acceptance: "`merge --apply` and `merge-gate` both block" -- driven
