@@ -2363,6 +2363,241 @@ Read one file.
         self.assertIn("BLOCKED", out)
         self.assertEqual([], effects)
 
+    def _mark_in_review(self, state="OPEN", labels=("type:slice", "in-progress")):
+        """Run `mark-in-review 11` with every effect recorded, none performed."""
+        import argparse
+        import contextlib
+        import io
+        issue = {"number": 11, "state": state, "labels": [{"name": name} for name in labels]}
+        effects = []
+
+        def run_text(args):
+            effects.append(args)
+            return ""
+
+        out = io.StringIO()
+        with patch.object(sdlc, "fetch_issue", return_value=issue), \
+                patch.object(sdlc, "run_text", side_effect=run_text), \
+                contextlib.redirect_stdout(out):
+            code = sdlc.command_mark_in_review(argparse.Namespace(issue=11), self.config)
+        return code, effects, out.getvalue()
+
+    def test_mark_in_review_adds_before_it_removes(self):
+        code, effects, out = self._mark_in_review(labels=("type:slice", "in-progress"))
+        self.assertEqual(0, code, out)
+        self.assertEqual(2, len(effects))
+        self.assertIn("--add-label", effects[0])
+        self.assertNotIn("--remove-label", effects[0])
+        self.assertEqual("in-review", effects[0][effects[0].index("--add-label") + 1])
+        self.assertIn("--remove-label", effects[1])
+        self.assertNotIn("--add-label", effects[1])
+        self.assertEqual("in-progress", effects[1][effects[1].index("--remove-label") + 1])
+
+    def test_mark_in_review_rerun_after_success_is_a_noop(self):
+        code, effects, out = self._mark_in_review(labels=("type:slice", "in-review"))
+        self.assertEqual(0, code, out)
+        self.assertEqual([], effects)
+
+    def test_mark_in_review_interrupted_rerun_removes_only_the_stale_label(self):
+        # Simulates a resume after a crash that added `in-review` but had not
+        # yet removed `in-progress`: only the stale label is touched.
+        code, effects, out = self._mark_in_review(labels=("type:slice", "in-progress", "in-review"))
+        self.assertEqual(0, code, out)
+        self.assertEqual(1, len(effects))
+        self.assertIn("--remove-label", effects[0])
+        self.assertNotIn("--add-label", effects[0])
+        self.assertEqual("in-progress", effects[0][effects[0].index("--remove-label") + 1])
+
+    def test_mark_in_review_blocked_when_closed(self):
+        code, effects, out = self._mark_in_review(state="CLOSED")
+        self.assertEqual(1, code)
+        self.assertIn("BLOCKED", out)
+        self.assertEqual([], effects)
+
+    def test_mark_in_review_blocked_when_neither_label_present(self):
+        code, effects, out = self._mark_in_review(labels=("type:slice",))
+        self.assertEqual(1, code)
+        self.assertIn("BLOCKED", out)
+        self.assertEqual([], effects)
+
+    def test_full_lifecycle_survives_interruption_at_every_mutating_step(self):
+        """The plan's R4 acceptance: rerunning after an interruption between
+        merge, closure, label cleanup and status repairs state without
+        duplicate work. This exercises it end to end across the two commands
+        that own an issue's delivery labels: `mark-in-review` (add
+        `in-review`, remove `in-progress`) and, after the issue closes,
+        `cleanup` (remove `in-review`, remove the worktree, delete the local
+        branch, write status). It simulates a crash immediately before or
+        after each of those six mutations, resumes with the interrupted
+        command, then runs the remaining steps, and checks that every run
+        ends in the same clean state with each label mutation applied exactly
+        once overall, however many retries it took. `git fetch --prune` and
+        the read-only `show-ref`/`merge-base` probes are intentionally
+        re-issued on every resume; that is expected rerun cost, not a
+        duplicate mutation.
+        """
+        import argparse
+        import contextlib
+        import io
+        import shutil
+        from collections import Counter
+
+        class Interrupted(Exception):
+            pass
+
+        def label_ops(calls):
+            ops = []
+            for kind, args in calls:
+                if kind == "text" and args[:3] == ["gh", "issue", "edit"]:
+                    i = 0
+                    while i < len(args):
+                        if args[i] == "--add-label":
+                            ops.append(("add", args[i + 1]))
+                            i += 2
+                            continue
+                        if args[i] == "--remove-label":
+                            ops.append(("remove", args[i + 1]))
+                            i += 2
+                            continue
+                        i += 1
+            return ops
+
+        def run(fail_at, mode):
+            world = {
+                "state": "OPEN",
+                "labels": {"type:slice", "in-progress"},
+                "worktree": True,
+                "local_branch": True,
+                "status_written": 0,
+            }
+            calls = []
+            counter = {"n": 0}
+            fired = {"v": False}
+
+            def maybe_interrupt(k, before):
+                matches = (before and mode == "before") or (not before and mode == "after")
+                if not fired["v"] and k == fail_at and matches:
+                    fired["v"] = True
+                    raise Interrupted()
+
+            def run_text(args):
+                # A "before" interruption means the underlying `gh`/`git`
+                # process never actually ran, so it is deliberately not
+                # recorded in `calls` until it is known to have started: the
+                # crash happens before this call, not as part of it.
+                if args[:3] == ["gh", "issue", "edit"]:
+                    k = counter["n"]
+                    maybe_interrupt(k, before=True)
+                    calls.append(("text", args))
+                    i = 0
+                    while i < len(args):
+                        if args[i] == "--add-label":
+                            world["labels"].add(args[i + 1])
+                            i += 2
+                            continue
+                        if args[i] == "--remove-label":
+                            world["labels"].discard(args[i + 1])
+                            i += 2
+                            continue
+                        i += 1
+                    counter["n"] += 1
+                    maybe_interrupt(k, before=False)
+                elif args[:3] == ["git", "worktree", "remove"]:
+                    k = counter["n"]
+                    maybe_interrupt(k, before=True)
+                    calls.append(("text", args))
+                    shutil.rmtree(args[3], ignore_errors=True)
+                    world["worktree"] = False
+                    counter["n"] += 1
+                    maybe_interrupt(k, before=False)
+                elif args[:3] == ["git", "branch", "-D"]:
+                    k = counter["n"]
+                    maybe_interrupt(k, before=True)
+                    calls.append(("text", args))
+                    world["local_branch"] = False
+                    counter["n"] += 1
+                    maybe_interrupt(k, before=False)
+                else:
+                    calls.append(("text", args))
+                return ""
+
+            def run_process(args, **kwargs):
+                calls.append(("proc", args))
+                if args[:2] == ["git", "show-ref"]:
+                    return subprocess.CompletedProcess(args, 0 if world["local_branch"] else 1, "", "")
+                if args[:2] == ["git", "merge-base"]:
+                    return subprocess.CompletedProcess(args, 0, "", "")
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            def write_atomic(path, _content):
+                calls.append(("write", path))
+                k = counter["n"]
+                maybe_interrupt(k, before=True)
+                world["status_written"] += 1
+                counter["n"] += 1
+                maybe_interrupt(k, before=False)
+
+            def fetch_issue(_number, _config):
+                return {"number": 11, "state": world["state"], "labels": [{"name": n} for n in world["labels"]]}
+
+            def fetch_status_data(_config):
+                return {"repository": "example/repo", "generated_at": "now", "issues": [], "pulls": []}
+
+            def run_with_retry(fn):
+                try:
+                    return fn()
+                except Interrupted:
+                    return fn()
+
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / ".worktrees" / "issue-11").mkdir(parents=True)
+                with patch.object(sdlc, "ROOT", root), \
+                        patch.object(sdlc, "fetch_issue", side_effect=fetch_issue), \
+                        patch.object(sdlc, "run_text", side_effect=run_text), \
+                        patch.object(sdlc, "run_process", side_effect=run_process), \
+                        patch.object(sdlc, "fetch_status_data", side_effect=fetch_status_data), \
+                        patch.object(sdlc, "write_atomic", side_effect=write_atomic), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    mark = lambda: sdlc.command_mark_in_review(argparse.Namespace(issue=11), self.config)
+                    clean = lambda: sdlc.command_cleanup(argparse.Namespace(issue=11), self.config)
+
+                    self.assertEqual(0, run_with_retry(mark))
+
+                    # Merge/closure boundary: cleanup must refuse a still-open
+                    # issue, with no effects, before the issue actually closes.
+                    effects_before = list(calls)
+                    self.assertEqual(1, clean())
+                    self.assertEqual(effects_before, calls, "cleanup on an open issue must have no effects")
+
+                    world["state"] = "CLOSED"
+                    self.assertEqual(0, run_with_retry(clean))
+
+            self.assertEqual({"type:slice"}, world["labels"])
+            self.assertFalse(world["worktree"])
+            self.assertFalse(world["local_branch"])
+            # Status is a re-rendered projection, not a delivery label: a
+            # rerun that reaches it re-writes it, which is idempotent and
+            # expected, not a duplicate mutation to guard against.
+            self.assertGreaterEqual(world["status_written"], 1)
+            ops = Counter(label_ops(calls))
+            self.assertEqual(
+                Counter({("add", "in-review"): 1, ("remove", "in-progress"): 1, ("remove", "in-review"): 1}),
+                ops,
+                f"fail_at={fail_at} mode={mode}: each label mutation must happen exactly once overall",
+            )
+
+        # Six mutating steps in lifecycle order: mark-in-review's add and
+        # remove, cleanup's label edit, worktree removal, branch deletion, and
+        # status write. Each is swept in both directions: "before" (the write
+        # never applied) and "after" (applied, then the process is lost
+        # before the response is recorded, the case that actually tests "no
+        # duplicate edits").
+        for fail_at in range(6):
+            for mode in ("before", "after"):
+                with self.subTest(fail_at=fail_at, mode=mode):
+                    run(fail_at, mode)
+
 
 if __name__ == "__main__":
     unittest.main()
