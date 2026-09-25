@@ -759,6 +759,45 @@ Read one file.
         ])
         self.assertEqual("fixed", sdlc.collect_findings(receipts, "codex")["114-1"]["disposition"])
 
+    def test_collect_findings_keeps_blocking_sticky_across_a_later_downgrade(self):
+        # Round-3 Codex finding: a later receipt repeating the same id with
+        # `blocking: false` and `disposition: "open"` must not silently
+        # clear it -- only a `fixed`/`resolved` disposition (with evidence)
+        # may. Otherwise a finding could be "un-blocked" with no fix and no
+        # resolution ever recorded.
+        receipts = sdlc.parse_review_receipts([
+            self._receipt(
+                "reviewer-a", "fail", head="aaa", created_at="2026-01-01T00:00:00Z",
+                findings=[{"id": "114-1", "blocking": True, "disposition": "open"}],
+            ),
+            self._receipt(
+                "reviewer-a", "pass", head="bbb", created_at="2026-01-02T00:00:00Z",
+                findings=[{"id": "114-1", "blocking": False, "disposition": "open"}],
+            ),
+        ])
+        found = sdlc.collect_findings(receipts, "codex")
+        self.assertTrue(found["114-1"]["blocking"])
+        self.assertEqual(["114-1"], [f["id"] for f in sdlc.unresolved_blocking_findings(receipts, "codex")])
+
+    def test_collect_findings_still_clears_a_sticky_blocking_finding_via_resolved(self):
+        receipts = sdlc.parse_review_receipts([
+            self._receipt(
+                "reviewer-a", "fail", head="aaa", created_at="2026-01-01T00:00:00Z",
+                findings=[{"id": "114-1", "blocking": True, "disposition": "open"}],
+            ),
+            self._receipt(
+                "reviewer-a", "pass", head="bbb", created_at="2026-01-02T00:00:00Z",
+                findings=[{
+                    "id": "114-1", "blocking": False, "disposition": "resolved",
+                    "evidence": "not a real defect, see PR comment 42",
+                }],
+            ),
+        ])
+        found = sdlc.collect_findings(receipts, "codex")
+        self.assertTrue(found["114-1"]["blocking"])
+        self.assertEqual("resolved", found["114-1"]["disposition"])
+        self.assertEqual([], sdlc.unresolved_blocking_findings(receipts, "codex"))
+
     def test_collect_findings_ignores_a_receipt_with_no_findings_key(self):
         receipts = sdlc.parse_review_receipts([self._receipt("reviewer-a", "pass", head="aaa")])
         self.assertEqual({}, sdlc.collect_findings(receipts, "codex"))
@@ -824,6 +863,25 @@ Read one file.
             ),
         ]
         self.assertEqual([], self._evaluate(self._passing_pr(), comments, self.slice, self.config))
+
+    def test_merge_gate_blocks_on_a_downgrade_that_never_disposed_the_finding(self):
+        # Round-3 Codex finding: a later `pass` receipt cannot silently
+        # un-block a finding by repeating its id with `blocking: false` and
+        # `disposition: "open"` -- only `fixed`/`resolved` with evidence may.
+        comments = [
+            self._receipt(
+                "reviewer-a", "fail", head="aaa",
+                findings=[{"id": "114-1", "blocking": True, "disposition": "open"}],
+            ),
+            self._receipt(
+                "reviewer-a", "pass", head="abc123",
+                findings=[{"id": "114-1", "blocking": False, "disposition": "open"}],
+            ),
+        ]
+        errors = self._evaluate(self._passing_pr(), comments, self.slice, self.config)
+        self.assertTrue(
+            any("unresolved blocking finding" in e and "114-1" in e for e in errors), errors,
+        )
 
     def test_merge_gate_blocks_on_a_malformed_findings_value_even_with_a_passing_verdict(self):
         # `findings="not-a-list"` models a hand-corrupted receipt: a truthy

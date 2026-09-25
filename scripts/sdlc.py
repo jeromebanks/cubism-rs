@@ -1251,10 +1251,23 @@ def collect_findings(receipts: Iterable[dict[str, Any]], kind: str) -> dict[str,
     `.get("schema") == 1` -- across every head SHA the PR has carried in its
     repair sequence, mirroring `consumed_review_rounds`'s own scope, so a
     finding raised in an earlier round is not forgotten once the head moves.
-    Newest receipt wins per finding id, the same newest-first resolution
-    `latest_receipt` applies to verdicts: a later disposition (a fix, an
-    explicit resolution, or a re-raised `open`) supersedes an earlier one for
-    the same id.
+    Newest receipt wins per finding id for `disposition` and `evidence`, the
+    same newest-first resolution `latest_receipt` applies to verdicts: a
+    later disposition (a fix, an explicit resolution, or a re-raised `open`)
+    supersedes an earlier one for the same id.
+
+    `blocking` is different: once any receipt reports an id as `blocking`,
+    it stays reported as `blocking` here regardless of what a later receipt
+    says about that flag. Round-3 Codex finding: without this, a later
+    receipt could repeat the same id with `blocking: false` and
+    `disposition: "open"`, and newest-wins folding would drop it from
+    `unresolved_blocking_findings` with no `fixed`/`resolved` disposition or
+    evidence ever recorded -- exactly the "auto-approved... without
+    resolution" bypass the plan calls out. Downgrading a finding that turns
+    out not to matter is still possible; it goes through `disposition:
+    "resolved"` with evidence explaining why, the same explicit channel a
+    real fix uses, matching `SDLC.md`'s "fixed or explicitly resolved"
+    language for step 8 generally.
 
     A receipt with no `findings` key contributes nothing -- the ordinary
     "nothing recorded" case every receipt before this feature existed, and
@@ -1269,6 +1282,7 @@ def collect_findings(receipts: Iterable[dict[str, Any]], kind: str) -> dict[str,
         key=lambda r: (r.get("created_at") or "", r.get("sequence") or 0),
     )
     latest: dict[str, dict[str, Any]] = {}
+    ever_blocking: set[str] = set()
     for receipt in ordered:
         if "findings" not in receipt:
             continue
@@ -1279,6 +1293,10 @@ def collect_findings(receipts: Iterable[dict[str, Any]], kind: str) -> dict[str,
             raise SdlcError(f"`{kind}` receipt at {location} carries an invalid `findings` value: {exc}") from exc
         for finding in findings:
             latest[finding["id"]] = {**finding, "comment_url": receipt.get("comment_url")}
+            if finding.get("blocking"):
+                ever_blocking.add(finding["id"])
+    for finding_id in ever_blocking:
+        latest[finding_id]["blocking"] = True
     return latest
 
 
