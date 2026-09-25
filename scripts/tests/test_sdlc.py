@@ -575,6 +575,23 @@ Read one file.
         self.assertEqual([], sdlc.parse_budget_records([receipt_comment]))
         self.assertEqual([], sdlc.parse_review_receipts([budget_comment]))
 
+    def test_a_quoted_receipt_marker_in_a_renewal_note_is_not_parsed_as_a_new_round(self):
+        # Codex round 2 finding: a renewal note that explains itself by
+        # pasting an earlier receipt's marker text (a plausible thing for a
+        # human to paste into --note-file) must not be counted as a genuine
+        # additional review round. `parse_review_receipts` only recognizes a
+        # marker at the very start of a comment body -- exactly like
+        # `parse_gate_records`/`parse_budget_records` already require.
+        quoted_marker = sdlc.review_marker("codex", "aaa", "fail", "fresh-codex")
+        note_quoting_a_receipt = sdlc.budget_marker("codex", 4, "jerome") + (
+            f"\n\nApproved after round 3. For context, round 1 read:\n\n{quoted_marker}\n"
+        )
+        comment = {"body": note_quoting_a_receipt, "html_url": "u", "created_at": "t"}
+        self.assertEqual([], sdlc.parse_review_receipts([comment]))
+        records = sdlc.parse_budget_records([comment])
+        self.assertEqual(1, len(records))
+        self.assertEqual(4, records[0]["rounds"])
+
     def test_consumed_review_rounds_counts_every_head_sha_in_the_repair_sequence(self):
         receipts = sdlc.parse_review_receipts([
             self._receipt("fresh-codex", "fail", head="aaa"),

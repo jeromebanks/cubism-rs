@@ -1085,10 +1085,20 @@ def implementer_identity(head_message: str | None) -> str | None:
 
 
 def parse_review_receipts(comments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Parses only a marker at the very start of a comment body.
+
+    Codex round 2 finding on #110: an unanchored `.search()` would also match
+    a review marker *quoted* anywhere later in a comment -- for example, a
+    `renew-review-budget` note that explains itself by pasting an earlier
+    receipt's marker text -- and count it as a genuine additional round.
+    `command_review_receipt` always writes the marker as the first thing in
+    the body, so anchoring costs nothing, and matches the discipline
+    `GATE_RECORD_RE`/`BUDGET_RECORD_RE` already apply for the same reason.
+    """
     receipts = []
-    pattern = re.compile(re.escape(REVIEW_PREFIX) + r"(\{.*?\})" + re.escape(REVIEW_SUFFIX))
+    pattern = re.compile(r"\A" + re.escape(REVIEW_PREFIX) + r"(\{.*?\})" + re.escape(REVIEW_SUFFIX))
     for sequence, comment in enumerate(comments):
-        match = pattern.search(comment.get("body") or "")
+        match = pattern.match(comment.get("body") or "")
         if not match:
             continue
         try:
