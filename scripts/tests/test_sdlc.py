@@ -2571,6 +2571,15 @@ Read one file.
                     counter["n"] += 1
                     maybe_interrupt(k, before=False)
                 elif args[:3] == ["git", "worktree", "remove"]:
+                    # Checked at call time, not against a path captured
+                    # before `sdlc.ROOT` was patched: a mock that removed
+                    # whatever path it was given, without checking it was
+                    # the one issue's own worktree, would not catch
+                    # `cleanup` being handed the wrong path (e.g. its
+                    # parent, which in real use would delete every issue's
+                    # worktree).
+                    self.assertEqual(
+                        ["git", "worktree", "remove", str(sdlc.ROOT / ".worktrees" / "issue-11")], args, args)
                     k = counter["n"]
                     maybe_interrupt(k, before=True)
                     calls.append(("text", args))
@@ -2579,6 +2588,7 @@ Read one file.
                     counter["n"] += 1
                     maybe_interrupt(k, before=False)
                 elif args[:3] == ["git", "branch", "-D"]:
+                    self.assertEqual(["git", "branch", "-D", "issue/11"], args, args)
                     k = counter["n"]
                     maybe_interrupt(k, before=True)
                     calls.append(("text", args))
@@ -2598,6 +2608,7 @@ Read one file.
                 return subprocess.CompletedProcess(args, 0, "", "")
 
             def write_atomic(path, _content):
+                self.assertEqual(sdlc.ROOT / self.config["status"]["output"], path, path)
                 calls.append(("write", path))
                 k = counter["n"]
                 maybe_interrupt(k, before=True)
