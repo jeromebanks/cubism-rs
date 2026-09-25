@@ -2373,6 +2373,10 @@ Read one file.
         self.assertEqual(str(issue), args[3], args)
         self.assertEqual(["--repo", self.config["repository"]], args[4:6], args)
         flags = args[6:]
+        # A bare `gh issue edit N --repo R` with no label flag would still
+        # pass every check above while doing nothing real -- an edit that
+        # exists only to be counted, not to change anything.
+        self.assertGreaterEqual(len(flags), 2, args)
         self.assertEqual(0, len(flags) % 2, args)
         self.assertTrue(set(flags[0::2]) <= {"--add-label", "--remove-label"}, args)
 
@@ -2523,17 +2527,24 @@ Read one file.
         source passes it explicitly, because a nonzero return there is an
         expected outcome to branch on, not a process failure; `check=True`
         would raise on exactly the rerun-after-branch-deleted case this
-        sweep exists to prove safe. Deliberately left unchecked: the
-        rendered status content passed to `write_atomic` (status
-        rendering is pre-existing, unrelated code, and #82's own tests pin
-        its call ordering) and the informational text printed to stdout
-        (nothing parses it).
+        sweep exists to prove safe. `write_atomic` receives exactly what
+        the real `render_status` computed from live data (issue 11's own
+        current state and labels, fed through `fetch_status_data`), and
+        that page is asserted to reflect a fully cleaned label state at
+        write time -- so a stale or disconnected status page would be
+        caught, not assumed correct. Deliberately left unchecked: the
+        informational text printed to stdout (nothing parses it).
         """
         import argparse
         import contextlib
         import io
         import shutil
         from collections import Counter
+
+        # Captured before any patching, so `render_status_spy` (defined per
+        # `build_world()` call, below) calls the real renderer rather than
+        # recursing into the mock that will later replace `sdlc.render_status`.
+        original_render_status = sdlc.render_status
 
         class Interrupted(Exception):
             pass
@@ -2655,8 +2666,31 @@ Read one file.
                     return subprocess.CompletedProcess(args, 0, "", "")
                 self.fail(f"unexpected run_process command: {args}")
 
-            def write_atomic(path, _content):
+            rendered = []
+
+            def render_status_spy(model):
+                # Runs the *real* renderer against real data (built from
+                # `fetch_status_data` below, which includes issue 11's
+                # current, live state), rather than mocking rendering away
+                # entirely -- so a status page that came out empty or stale
+                # would actually look empty or stale here, not just be
+                # assumed correct.
+                result = original_render_status(model)
+                rendered.append(result)
+                return result
+
+            def write_atomic(path, content):
                 self.assertEqual(sdlc.ROOT / self.config["status"]["output"], path, path)
+                # The exact string `render_status` just computed, not some
+                # other value: decouples "the page is correct" (asserted via
+                # `rendered`, built from live world state) from "the
+                # computed page actually reaches the file".
+                self.assertEqual(rendered[-1], content)
+                # Proves the page is not stale: by the time it's written,
+                # whichever command's job it was to clear each delivery
+                # label has already done so.
+                self.assertNotIn(self.config["labels"]["in_progress"], world["labels"])
+                self.assertNotIn(self.config["labels"]["in_review"], world["labels"])
                 calls.append(("write", path))
                 k = counter["n"]
                 maybe_interrupt(k, before=True)
@@ -2671,9 +2705,19 @@ Read one file.
 
             def fetch_status_data(config):
                 self.assertIs(self.config, config)
-                return {"repository": "example/repo", "generated_at": "now", "issues": [], "pulls": []}
+                # Issue 11 itself, with its live state and labels at call
+                # time, so the rendered page's content is actually derived
+                # from the state under test, not disconnected fixture data
+                # a stale-content bug could sail through unnoticed.
+                return {
+                    "repository": "example/repo",
+                    "generated_at": "now",
+                    "issues": [{"number": 11, "state": world["state"], "labels": [{"name": n} for n in world["labels"]]}],
+                    "pulls": [],
+                }
 
-            return world, calls, counter, fired, fail_at_box, mode_box, run_text, run_process, write_atomic, fetch_issue, fetch_status_data
+            return (world, calls, counter, fired, fail_at_box, mode_box, run_text, run_process,
+                    write_atomic, fetch_issue, fetch_status_data, render_status_spy)
 
         def assert_clean_end(world, calls, label):
             self.assertEqual({"type:slice"}, world["labels"], label)
@@ -2701,7 +2745,7 @@ Read one file.
             # Only cleanup's four steps can be interrupted here.
             label = f"before-mark fail_at={fail_at} mode={mode}"
             (world, calls, counter, fired, fail_at_box, mode_box, run_text, run_process,
-             write_atomic, fetch_issue, fetch_status_data) = build_world()
+             write_atomic, fetch_issue, fetch_status_data, render_status_spy) = build_world()
             world["state"] = "CLOSED"
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -2711,6 +2755,7 @@ Read one file.
                         patch.object(sdlc, "run_text", side_effect=run_text), \
                         patch.object(sdlc, "run_process", side_effect=run_process), \
                         patch.object(sdlc, "fetch_status_data", side_effect=fetch_status_data), \
+                        patch.object(sdlc, "render_status", side_effect=render_status_spy), \
                         patch.object(sdlc, "write_atomic", side_effect=write_atomic), \
                         contextlib.redirect_stdout(io.StringIO()):
                     mark = lambda: sdlc.command_mark_in_review(argparse.Namespace(issue=11), self.config)
@@ -2734,7 +2779,7 @@ Read one file.
             # finish the transition; cleanup then finishes uninterrupted.
             label = f"mid-mark fail_at={fail_at} mode={mode}"
             (world, calls, counter, fired, fail_at_box, mode_box, run_text, run_process,
-             write_atomic, fetch_issue, fetch_status_data) = build_world()
+             write_atomic, fetch_issue, fetch_status_data, render_status_spy) = build_world()
             fail_at_box["v"], mode_box["v"] = fail_at, mode
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -2744,6 +2789,7 @@ Read one file.
                         patch.object(sdlc, "run_text", side_effect=run_text), \
                         patch.object(sdlc, "run_process", side_effect=run_process), \
                         patch.object(sdlc, "fetch_status_data", side_effect=fetch_status_data), \
+                        patch.object(sdlc, "render_status", side_effect=render_status_spy), \
                         patch.object(sdlc, "write_atomic", side_effect=write_atomic), \
                         contextlib.redirect_stdout(io.StringIO()):
                     mark = lambda: sdlc.command_mark_in_review(argparse.Namespace(issue=11), self.config)
@@ -2768,7 +2814,7 @@ Read one file.
             # cleanup (also swept).
             label = f"after-mark fail_at={fail_at} mode={mode}"
             (world, calls, counter, fired, fail_at_box, mode_box, run_text, run_process,
-             write_atomic, fetch_issue, fetch_status_data) = build_world()
+             write_atomic, fetch_issue, fetch_status_data, render_status_spy) = build_world()
             fail_at_box["v"], mode_box["v"] = fail_at, mode
 
             def run_with_retry(fn):
@@ -2785,6 +2831,7 @@ Read one file.
                         patch.object(sdlc, "run_text", side_effect=run_text), \
                         patch.object(sdlc, "run_process", side_effect=run_process), \
                         patch.object(sdlc, "fetch_status_data", side_effect=fetch_status_data), \
+                        patch.object(sdlc, "render_status", side_effect=render_status_spy), \
                         patch.object(sdlc, "write_atomic", side_effect=write_atomic), \
                         contextlib.redirect_stdout(io.StringIO()):
                     mark = lambda: sdlc.command_mark_in_review(argparse.Namespace(issue=11), self.config)
