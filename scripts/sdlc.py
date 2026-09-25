@@ -1874,16 +1874,27 @@ def command_cleanup(args: argparse.Namespace, config: dict[str, Any]) -> int:
     return 0
 
 
+def _read_text_raw(path: Path) -> str:
+    """Decodes a file as UTF-8 without any newline translation.
+
+    `Path.read_text()`'s default text mode normalizes `\\r\\n`/`\\r` to `\\n`
+    before a caller ever sees the content, which would silently accept a CRLF
+    verdict line the bash `awk` this replaces rejects. `read_text(newline="")`
+    would say that directly, but that parameter was only added to
+    `pathlib.Path.read_text` in Python 3.13 -- this repository's CI pins
+    3.12, and `TypeError: unexpected keyword argument 'newline'` would fail
+    every invocation. `bytes.decode()` performs no newline translation on any
+    version, so reading raw bytes and decoding keeps every parser
+    byte-literal against the shell semantics it mirrors, portably.
+    """
+    return path.read_bytes().decode("utf-8")
+
+
 def command_codex_envelope(args: argparse.Namespace, config: dict[str, Any]) -> int:
-    # `newline=""` is deliberate: the default text-mode read normalizes
-    # `\r\n`/`\r` to `\n` before this function ever sees the content, which
-    # would silently accept a CRLF verdict line the bash `awk` it replaces
-    # rejects. Reading raw keeps every parser byte-literal against the shell
-    # semantics it mirrors.
-    report_text = args.report.read_text(encoding="utf-8", newline="")
+    report_text = _read_text_raw(args.report)
     require_nonempty_report(report_text, args.err)
     if args.field == "reviewer":
-        err_text = args.err.read_text(encoding="utf-8", newline="")
+        err_text = _read_text_raw(args.err)
         print(parse_codex_identity(err_text))
     else:
         print(parse_codex_verdict(report_text))

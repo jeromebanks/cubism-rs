@@ -3368,7 +3368,9 @@ class CodexEnvelopeTests(unittest.TestCase):
     def test_command_codex_envelope_reads_files_raw_not_universal_newlines(self):
         # A `Path.read_text()` default call normalizes `\r\n` to `\n` before
         # the parser ever sees it, which would make a CRLF report pass when
-        # the bash it replaces rejects it. `newline=""` is what prevents that.
+        # the bash it replaces rejects it. `_read_text_raw`'s byte-decode is
+        # what prevents that, portably (`read_text(newline="")` would say the
+        # same thing directly, but needs Python 3.13; CI pins 3.12).
         with tempfile.TemporaryDirectory() as tmp:
             args = self._envelope_args(
                 tmp, report_text="findings\r\nVERDICT: pass\r\n",
@@ -3557,17 +3559,33 @@ class CodexEnvelopeTests(unittest.TestCase):
     # byte-identical reimplementation that never calls it -- both produce the
     # same correct values. Requiring these specific sentinel strings, which
     # nothing but this shim ever produces, is what rules that out.
+    # Matched positionally ($1, $2, ...), never by a `case "$*" in *pattern*`
+    # substring test: a substring match would let a decoy such as
+    # `rtk proxy echo codex-envelope --field reviewer ...` receive the
+    # sentinel without ever invoking `codex-envelope` -- passing the
+    # structural tests below while proving nothing about what the skill
+    # actually called. Requiring `$1` to literally be `python3` (the real
+    # invocation's first argument after stripping `proxy`) closes that: a
+    # decoy's `$1` is whatever ran instead, so it falls through to the
+    # `UNRECOGNIZED-CALL` branch.
     SENTINEL_SHIM = (
         '#!/bin/sh\n'
         'if [ "$1" = "proxy" ]; then shift; fi\n'
         'echo "$@" >> "$RTK_SHIM_LOG"\n'
-        'case "$*" in\n'
-        '  *"codex-envelope --field reviewer"*) echo "SENTINEL-REVIEWER" ;;\n'
-        '  *"codex-envelope --field verdict"*) echo "SENTINEL-VERDICT" ;;\n'
-        '  *"codex-await-head"*) echo "SENTINEL-HEAD" ;;\n'
-        '  "git rev-parse HEAD") echo "LOCAL-HEAD" ;;\n'
-        '  *) echo "UNRECOGNIZED-CALL: $*" >&2; exit 99 ;;\n'
-        'esac\n'
+        'if [ "$1" = "python3" ] && [ "$2" = "scripts/sdlc.py" ] '
+        '&& [ "$3" = "codex-envelope" ] && [ "$4" = "--field" ] && [ "$5" = "reviewer" ]; then\n'
+        '  echo "SENTINEL-REVIEWER"\n'
+        'elif [ "$1" = "python3" ] && [ "$2" = "scripts/sdlc.py" ] '
+        '&& [ "$3" = "codex-envelope" ] && [ "$4" = "--field" ] && [ "$5" = "verdict" ]; then\n'
+        '  echo "SENTINEL-VERDICT"\n'
+        'elif [ "$1" = "python3" ] && [ "$2" = "scripts/sdlc.py" ] && [ "$3" = "codex-await-head" ]; then\n'
+        '  echo "SENTINEL-HEAD"\n'
+        'elif [ "$1" = "git" ] && [ "$2" = "rev-parse" ] && [ "$3" = "HEAD" ] && [ "$#" -eq 3 ]; then\n'
+        '  echo "LOCAL-HEAD"\n'
+        'else\n'
+        '  echo "UNRECOGNIZED-CALL: $*" >&2\n'
+        '  exit 99\n'
+        'fi\n'
     )
 
     def _run_with_sentinel_shim(self, code_text, *, env_extra, script_suffix):
@@ -3628,10 +3646,25 @@ class CodexEnvelopeTests(unittest.TestCase):
         # the sentinel values -- proving a regression back to inline
         # `sed`/`awk`/a manual retry loop would show up as a content
         # mismatch, not a crash a reviewer could dismiss as unrelated.
-        old_skill_text = subprocess.run(
+        #
+        # `origin/main` is a real ref in a developer/agent checkout (SDLC.md
+        # makes it the one diff/rebase base, and `claim`/`cleanup` fetch it),
+        # but CI's `sdlc tooling` job is a plain `actions/checkout@v4` with no
+        # extra fetch step, so a PR branch's checkout there does not carry
+        # `origin/main` at all. Skip rather than error when it is missing, the
+        # same way the codex-gated test below skips when `codex` is absent --
+        # this is an environment limitation, not a code failure.
+        git_show = subprocess.run(
             ["git", "show", "origin/main:.agents/skills/codex-review/SKILL.md"],
-            cwd=ROOT, capture_output=True, text=True, timeout=10, check=True,
-        ).stdout
+            cwd=ROOT, capture_output=True, text=True, timeout=10,
+        )
+        if git_show.returncode != 0:
+            self.skipTest(
+                f"origin/main is not resolvable in this checkout (e.g. a "
+                f"shallow, single-ref CI checkout of a PR branch); skipping "
+                f"the meta-verification against the pre-#112 baseline. "
+                f"git stderr: {git_show.stderr.strip()}")
+        old_skill_text = git_show.stdout
         old_section_3 = self._code_block(
             old_skill_text, "## 3. Derive identity and verdict from the run",
             source_label="origin/main's SKILL.md")
