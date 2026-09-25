@@ -142,8 +142,9 @@ State required user action or “none” and give the precise continuation promp
 ## Current capability boundary
 
 Inspect current CLI help and code when capabilities matter. Today the owners
-provide `check-slice`, `claim`, `review-receipt`, `merge-gate`, `merge`,
-`cleanup`, `status`, and milestone commands. R1–R6 propose repairs for candidate
+provide `check-slice`, `claim`, `mark-in-review`, `review-receipt`,
+`merge-gate`, `merge`, `cleanup`, `status`, and milestone commands. R1–R6
+propose repairs for candidate
 binding, gates, dependencies, reconciliation, budgets and trust. Stage N's
 attempt journal, leases, executor adapters and dispatcher do not exist merely
 because this skill describes continuation. Reassess this boundary as repairs

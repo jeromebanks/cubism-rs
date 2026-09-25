@@ -1559,8 +1559,9 @@ def command_claim(args: argparse.Namespace, config: dict[str, Any]) -> int:
 
 def command_mark_in_review(args: argparse.Namespace, config: dict[str, Any]) -> int:
     issue = fetch_issue(args.issue, config)
-    if issue.get("state") == "CLOSED":
-        print(f"BLOCKED: issue #{args.issue} is closed; run `cleanup` instead")
+    if issue.get("state") != "OPEN":
+        print(f"BLOCKED: issue #{args.issue} is not open (state: {issue.get('state')!r}); "
+              f"if it is closed, run `cleanup` instead")
         return 1
     names = label_names(issue)
     in_progress = config["labels"]["in_progress"]

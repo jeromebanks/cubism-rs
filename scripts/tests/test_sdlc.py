@@ -2408,11 +2408,16 @@ Read one file.
         self.assertNotIn("--add-label", effects[0])
         self.assertEqual("in-progress", effects[0][effects[0].index("--remove-label") + 1])
 
-    def test_mark_in_review_blocked_when_closed(self):
-        code, effects, out = self._mark_in_review(state="CLOSED")
-        self.assertEqual(1, code)
-        self.assertIn("BLOCKED", out)
-        self.assertEqual([], effects)
+    def test_mark_in_review_blocked_when_not_open(self):
+        # Fails closed on anything other than OPEN, not just CLOSED: a
+        # missing or unrecognized state must not fall through and edit
+        # labels.
+        for state in ("CLOSED", "MERGED", None):
+            with self.subTest(state=state):
+                code, effects, out = self._mark_in_review(state=state)
+                self.assertEqual(1, code)
+                self.assertIn("BLOCKED", out)
+                self.assertEqual([], effects)
 
     def test_mark_in_review_blocked_when_neither_label_present(self):
         code, effects, out = self._mark_in_review(labels=("type:slice",))
