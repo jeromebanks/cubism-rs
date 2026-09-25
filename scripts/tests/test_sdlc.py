@@ -712,6 +712,17 @@ Read one file.
             [{"id": "a-->b", "blocking": True, "disposition": "open"}],
             [{"id": "a\nb", "blocking": True, "disposition": "open"}],
             [{"id": "a", "blocking": True, "disposition": "fixed", "evidence": "closes -->here"}],
+            # Round-1 Codex finding: a purely leading/trailing `\r`/`\n`,
+            # which `.strip()` would otherwise discard before the guard ever
+            # saw it, must still be rejected -- checked on the raw value.
+            [{"id": "a\n", "blocking": True, "disposition": "open"}],
+            [{"id": "\ra", "blocking": True, "disposition": "open"}],
+            [{"id": "a", "blocking": True, "disposition": "fixed", "evidence": "ok\n"}],
+            # Round-1 Codex finding: an unhashable `disposition` (a list or
+            # dict) must raise SdlcError, not escape as a bare TypeError from
+            # `in` against a set.
+            [{"id": "a", "blocking": True, "disposition": ["open"]}],
+            [{"id": "a", "blocking": True, "disposition": {"open": True}}],
         ]
         for raw in bad_inputs:
             with self.subTest(raw=raw):

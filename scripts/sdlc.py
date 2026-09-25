@@ -1194,19 +1194,33 @@ def parse_findings(raw: Any) -> list[dict[str, Any]]:
         evidence = entry.get("evidence")
         if not isinstance(finding_id, str) or not finding_id.strip():
             raise SdlcError(f"finding entry missing a non-empty string `id`: {entry!r}")
-        finding_id = finding_id.strip()
-        evidence_text = evidence.strip() if isinstance(evidence, str) else ""
-        for label, value in (("id", finding_id), ("evidence", evidence_text)):
+        evidence_raw = evidence if isinstance(evidence, str) else ""
+        # Checked on the *raw* value, before `.strip()`: stripping first (as
+        # `command_set_gate`/`command_renew_review_budget` do for
+        # `--checkpoint`/`--decided-by`, where the value only ever reaches
+        # them already stripped by argparse/shell quoting) would silently
+        # discard a leading/trailing `\r`/`\n` instead of rejecting it,
+        # which a JSON `--findings` payload can supply directly with no
+        # shell in between. Round-1 Codex finding.
+        for label, value in (("id", finding_id), ("evidence", evidence_raw)):
             if "-->" in value or any(char in value for char in "\r\n"):
                 raise SdlcError(
                     f"finding `{label}` must be a single line and must not contain `-->`: {value!r}"
                 )
+        finding_id = finding_id.strip()
+        evidence_text = evidence_raw.strip()
         if finding_id in seen:
             raise SdlcError(f"duplicate finding id {finding_id!r} in one findings payload")
         seen.add(finding_id)
         if not isinstance(blocking, bool):
             raise SdlcError(f"finding {finding_id!r} needs a boolean `blocking`, got {blocking!r}")
-        if disposition not in FINDING_DISPOSITIONS:
+        # `isinstance` first: `disposition not in FINDING_DISPOSITIONS` alone
+        # raises `TypeError` for an unhashable `disposition` (a list or
+        # dict), which is not `SdlcError` and so escapes both
+        # `collect_findings`'s receipt-specific wrapping and
+        # `evaluate_merge_gate`'s `except SdlcError` -- a traceback instead
+        # of a fail-closed gate error. Round-1 Codex finding.
+        if not isinstance(disposition, str) or disposition not in FINDING_DISPOSITIONS:
             raise SdlcError(
                 f"finding {finding_id!r} has disposition {disposition!r}; "
                 f"must be one of {sorted(FINDING_DISPOSITIONS)}"
