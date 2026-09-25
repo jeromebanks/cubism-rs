@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Reproduce the required CI jobs with terse output and retained failure logs.
+# Reproduce most required CI jobs with terse output and retained failure logs.
+# The "sdlc tooling" required check is not reproduced here; see the notice
+# this script prints near the end of every run.
 set -uo pipefail
 
 ROOT="$(rtk git rev-parse --show-toplevel)"
@@ -55,6 +57,8 @@ if command -v maturin >/dev/null 2>&1; then
 else
   echo "SKIP: Python binding build (maturin unavailable; CI remains authoritative)"
 fi
+
+echo "NOT RUN: sdlc tooling (required CI check \"sdlc tooling\" is not reproduced locally; CI remains authoritative; run it yourself with \`rtk python3 scripts/tests/test_sdlc.py\`)"
 
 if [ "$FAILED" -eq 0 ]; then
   rtk proxy rm -rf "$LOG_DIR"
