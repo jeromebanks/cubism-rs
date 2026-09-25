@@ -2384,6 +2384,10 @@ Read one file.
         issue_obj = {"number": issue, "state": state, "labels": [{"name": name} for name in labels]}
         effects = []
 
+        def fetch_issue(number, _config):
+            self.assertEqual(issue, number, "fetch_issue must be asked for the issue under test, not any issue")
+            return issue_obj
+
         def run_text(args):
             if args[:3] == ["gh", "issue", "edit"]:
                 self._assert_gh_edit_shape(args, issue)
@@ -2391,7 +2395,7 @@ Read one file.
             return ""
 
         out = io.StringIO()
-        with patch.object(sdlc, "fetch_issue", return_value=issue_obj), \
+        with patch.object(sdlc, "fetch_issue", side_effect=fetch_issue), \
                 patch.object(sdlc, "run_text", side_effect=run_text), \
                 contextlib.redirect_stdout(out):
             code = sdlc.command_mark_in_review(argparse.Namespace(issue=issue), self.config)
@@ -2616,7 +2620,8 @@ Read one file.
                 counter["n"] += 1
                 maybe_interrupt(k, before=False)
 
-            def fetch_issue(_number, _config):
+            def fetch_issue(number, _config):
+                self.assertEqual(11, number, "fetch_issue must be asked for the issue under test, not any issue")
                 return {"number": 11, "state": world["state"], "labels": [{"name": n} for n in world["labels"]]}
 
             def fetch_status_data(_config):
