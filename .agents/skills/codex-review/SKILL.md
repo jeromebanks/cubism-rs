@@ -284,12 +284,12 @@ steps**:
   subcommands or the `disable-model-invocation` frontmatter. That affects only
   the optional pass in the previous section.
 
-`scripts/tests/test_sdlc.py::CodexReviewEnvelopeTests` extracts these two `sed`
-patterns from this file and, when `codex` is on `PATH` outside a Codex sandbox,
-runs the real CLI and asserts both still match its stderr — a CLI upgrade that
-renames either label fails that test instead of surfacing mid-slice as "cannot
-identify the reviewer".
+`python3 -m unittest scripts.tests.test_sdlc.CodexReviewEnvelopeTests -v`
+extracts these two `sed` patterns from this file and, when `codex` is on `PATH`
+outside a Codex sandbox, runs the real CLI and asserts both still match its
+stderr — a CLI upgrade that renames either label fails that command instead of
+surfacing mid-slice as "cannot identify the reviewer".
 
-So: after a CLI upgrade, re-check section 3's two `sed` patterns. After a plugin
+So: after a CLI upgrade, run that command (outside a Codex sandbox). After a plugin
 upgrade, re-check the companion's subcommand list. Doing only the second is the
 easy mistake, because the plugin is the thing that looks like a dependency.
