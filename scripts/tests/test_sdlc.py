@@ -2363,26 +2363,38 @@ Read one file.
         self.assertIn("BLOCKED", out)
         self.assertEqual([], effects)
 
-    def _mark_in_review(self, state="OPEN", labels=("type:slice", "in-progress")):
-        """Run `mark-in-review 11` with every effect recorded, none performed."""
+    def _assert_gh_edit_shape(self, args, issue):
+        """Every `gh issue edit` call this file's mocks accept must name the
+        exact issue and repository, and carry only recognized label flags --
+        otherwise a call targeting the wrong issue, the wrong repository, or
+        an unrelated flag like `--title` would mutate a real issue while
+        still passing every label-focused assertion downstream."""
+        self.assertEqual(["gh", "issue", "edit"], args[:3], args)
+        self.assertEqual(str(issue), args[3], args)
+        self.assertEqual(["--repo", self.config["repository"]], args[4:6], args)
+        flags = args[6:]
+        self.assertEqual(0, len(flags) % 2, args)
+        self.assertTrue(set(flags[0::2]) <= {"--add-label", "--remove-label"}, args)
+
+    def _mark_in_review(self, state="OPEN", labels=("type:slice", "in-progress"), issue=11):
+        """Run `mark-in-review <issue>` with every effect recorded, none performed."""
         import argparse
         import contextlib
         import io
-        issue = {"number": 11, "state": state, "labels": [{"name": name} for name in labels]}
+        issue_obj = {"number": issue, "state": state, "labels": [{"name": name} for name in labels]}
         effects = []
 
         def run_text(args):
             if args[:3] == ["gh", "issue", "edit"]:
-                self.assertEqual("11", args[3], args)
-                self.assertEqual(["--repo", self.config["repository"]], args[4:6], args)
+                self._assert_gh_edit_shape(args, issue)
             effects.append(args)
             return ""
 
         out = io.StringIO()
-        with patch.object(sdlc, "fetch_issue", return_value=issue), \
+        with patch.object(sdlc, "fetch_issue", return_value=issue_obj), \
                 patch.object(sdlc, "run_text", side_effect=run_text), \
                 contextlib.redirect_stdout(out):
-            code = sdlc.command_mark_in_review(argparse.Namespace(issue=11), self.config)
+            code = sdlc.command_mark_in_review(argparse.Namespace(issue=issue), self.config)
         return code, effects, out.getvalue()
 
     def test_mark_in_review_adds_before_it_removes(self):
@@ -2395,6 +2407,18 @@ Read one file.
         self.assertIn("--remove-label", effects[1])
         self.assertNotIn("--add-label", effects[1])
         self.assertEqual("in-progress", effects[1][effects[1].index("--remove-label") + 1])
+
+    def test_mark_in_review_targets_the_given_issue_number_not_a_fixed_one(self):
+        # Every other test in this file uses issue 11, so a hardcoded "11"
+        # in the command would be indistinguishable from `str(args.issue)`
+        # across all of them. Run against a different number and assert
+        # the edit command actually names it -- `_assert_gh_edit_shape`
+        # would fail this if the literal were hardcoded.
+        code, effects, out = self._mark_in_review(labels=("type:slice", "in-progress"), issue=47)
+        self.assertEqual(0, code, out)
+        self.assertEqual(2, len(effects))
+        self.assertEqual("47", effects[0][3])
+        self.assertEqual("47", effects[1][3])
 
     def test_mark_in_review_rerun_after_success_is_a_noop(self):
         code, effects, out = self._mark_in_review(labels=("type:slice", "in-review"))
@@ -2529,8 +2553,7 @@ Read one file.
                 # recorded in `calls` until it is known to have started: the
                 # crash happens before this call, not as part of it.
                 if args[:3] == ["gh", "issue", "edit"]:
-                    self.assertEqual("11", args[3], args)
-                    self.assertEqual(["--repo", self.config["repository"]], args[4:6], args)
+                    self._assert_gh_edit_shape(args, 11)
                     k = counter["n"]
                     maybe_interrupt(k, before=True)
                     calls.append(("text", args))
