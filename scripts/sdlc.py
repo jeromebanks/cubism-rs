@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Callable, Iterable, NamedTuple, Optional, Sequence
 
 
@@ -1139,6 +1140,109 @@ def latest_receipt(
     return matching[-1]
 
 
+# Codex review envelope: `.agents/skills/codex-review/SKILL.md` sections 1, 3
+# and 5 call the `codex-envelope`/`codex-await-head` commands below instead of
+# deriving reviewer identity, the verdict, or the post-push head-agreement
+# retry with their own inline `sed`/`awk`/loop. Each function below takes
+# already-read text (or an injected callback) rather than doing its own I/O,
+# so a test can exercise every fail-closed path with a fixture instead of a
+# real `codex exec` run or a live GitHub read.
+#
+# The three parsers below are deliberately byte-literal, matching the exact
+# `sed`/`awk` semantics they replace rather than "cleaning up" the input:
+# splitting on `\n` alone (not `str.splitlines()`, which also breaks on `\r`,
+# `\x0c`, U+2028 and others) and treating only a run of spaces/tabs as
+# "blank" (not `str.strip()`, which blanks `\r` and other whitespace `awk`'s
+# default field splitting does not). A CRLF report or a stray form-feed line
+# must fail exactly as it does today; `scripts/tests/test_sdlc.py` pins this
+# with a fixture table diffed against the literal bash this replaces.
+def parse_codex_identity(stderr_text: str) -> str:
+    """Mirrors section 3's `sed -n 's/^model: //p' | head -1` for `model:`
+    and `session id:` -- the *first* matching line for each label, even when
+    that first match is an empty value, never the first *non-empty* one. A
+    later, non-empty line must not paper over an earlier empty match: `sed`
+    would already have committed to the empty one via `head -1`.
+    """
+    model: str | None = None
+    session: str | None = None
+    for line in stderr_text.split("\n"):
+        if model is None and line.startswith("model: "):
+            model = line[len("model: "):]
+        if session is None and line.startswith("session id: "):
+            session = line[len("session id: "):]
+    if not model or not session:
+        raise SdlcError("cannot identify the reviewer; refusing to record")
+    return f"Codex {model} / {session}"
+
+
+def parse_codex_verdict(report_text: str) -> str:
+    """Mirrors section 3's `awk 'NF {line=$0} END {print line}'`: the last
+    line that is not entirely spaces/tabs, matched exactly against the two
+    permitted verdict lines. Anything else -- trailing prose, a stray
+    control character, a line whose only "blank" run `awk` does not
+    recognize as blank -- fails closed exactly as the `case` statement does.
+    """
+    last: str | None = None
+    for line in report_text.split("\n"):
+        if line.strip(" \t") != "":
+            last = line
+    if last == "VERDICT: pass":
+        return "pass"
+    if last == "VERDICT: fail":
+        return "fail"
+    raise SdlcError("report does not end with a verdict line; refusing to record")
+
+
+def require_nonempty_report(report_text: str, err_path: Path) -> None:
+    """Mirrors section 1's `test -s "$REPORT" || { echo ...; exit 1; }`.
+
+    `test -s` checks size in bytes, not content: a whitespace-only report is
+    not "empty" to it, and must fail closed later, at `parse_codex_verdict`,
+    with that step's own message -- not this one's. Checking `.strip()`
+    instead would raise the wrong error for that input.
+    """
+    if not report_text:
+        raise SdlcError(f"empty report; see {err_path}")
+
+
+def await_matching_head(
+    fetch_head: Callable[[], str],
+    local_head: str,
+    *,
+    attempts: int = 5,
+    delay_seconds: float = 4.0,
+    sleep: Callable[[float], None] | None = None,
+) -> str:
+    """Mirrors section 5's `for _ in 1 2 3 4 5; do ...; sleep 4; done` retry.
+
+    GitHub's API can report a pushed branch's pre-push head for several
+    seconds, so a single read can return the SHA a fix commit or rebase just
+    replaced. `fetch_head` is called up to `attempts` times, sleeping
+    `delay_seconds` between non-matching reads, until it agrees with
+    `local_head`. A transient read failure -- `fetch_head` raising
+    `SdlcError`, exactly as a `gh` failure would leave `$HEAD_SHA` unset in
+    the bash loop -- counts as a non-matching attempt rather than aborting
+    the retry outright.
+
+    `sleep` defaults to `None` rather than binding `time.sleep` directly as
+    the parameter default: a default is captured once, at function-definition
+    time, so a caller that leaves it unset must still see a test's
+    `unittest.mock.patch.object(sdlc.time, "sleep")` take effect on every
+    call, not just ones made before the patch.
+    """
+    sleep = sleep or time.sleep
+    head: str | None = None
+    for _ in range(attempts):
+        try:
+            head = fetch_head()
+        except SdlcError:
+            head = None
+        if head == local_head:
+            return head
+        sleep(delay_seconds)
+    raise SdlcError("GitHub still reports a different head; not reviewing yet")
+
+
 def pr_check_outcomes(pr: dict[str, Any]) -> dict[str, str]:
     outcomes: dict[str, str] = {}
     for item in pr.get("statusCheckRollup") or []:
@@ -1770,6 +1874,39 @@ def command_cleanup(args: argparse.Namespace, config: dict[str, Any]) -> int:
     return 0
 
 
+def _read_text_raw(path: Path) -> str:
+    """Decodes a file as UTF-8 without any newline translation.
+
+    `Path.read_text()`'s default text mode normalizes `\\r\\n`/`\\r` to `\\n`
+    before a caller ever sees the content, which would silently accept a CRLF
+    verdict line the bash `awk` this replaces rejects. `read_text(newline="")`
+    would say that directly, but that parameter was only added to
+    `pathlib.Path.read_text` in Python 3.13 -- this repository's CI pins
+    3.12, and `TypeError: unexpected keyword argument 'newline'` would fail
+    every invocation. `bytes.decode()` performs no newline translation on any
+    version, so reading raw bytes and decoding keeps every parser
+    byte-literal against the shell semantics it mirrors, portably.
+    """
+    return path.read_bytes().decode("utf-8")
+
+
+def command_codex_envelope(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    report_text = _read_text_raw(args.report)
+    require_nonempty_report(report_text, args.err)
+    if args.field == "reviewer":
+        err_text = _read_text_raw(args.err)
+        print(parse_codex_identity(err_text))
+    else:
+        print(parse_codex_verdict(report_text))
+    return 0
+
+
+def command_codex_await_head(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    head = await_matching_head(lambda: fetch_pr(args.pr, config)["headRefOid"], args.local_head)
+    print(head)
+    return 0
+
+
 def command_review_receipt(args: argparse.Namespace, config: dict[str, Any]) -> int:
     pr = fetch_pr(args.pr, config)
     head = pr["headRefOid"]
@@ -2235,6 +2372,23 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup = sub.add_parser("cleanup", help="after merge: clear delivery labels, remove the worktree and local branch, then regenerate status")
     cleanup.add_argument("issue", type=int)
     cleanup.set_defaults(func=command_cleanup)
+
+    envelope = sub.add_parser(
+        "codex-envelope",
+        help="derive reviewer identity or verdict from a codex-review report/stderr pair (codex-review/SKILL.md section 1+3)",
+    )
+    envelope.add_argument("--field", choices=["reviewer", "verdict"], required=True)
+    envelope.add_argument("--report", type=Path, required=True, help="the review report ($REPORT)")
+    envelope.add_argument("--err", type=Path, required=True, help="the run's captured stderr ($REPORT.err)")
+    envelope.set_defaults(func=command_codex_envelope)
+
+    await_head = sub.add_parser(
+        "codex-await-head",
+        help="retry until a PR's reported head agrees with a local head (codex-review/SKILL.md section 5)",
+    )
+    await_head.add_argument("--pr", type=int, required=True)
+    await_head.add_argument("--local-head", required=True, help="local `git rev-parse HEAD`")
+    await_head.set_defaults(func=command_codex_await_head)
 
     receipt = sub.add_parser("review-receipt", help="post a SHA-bound structured review result")
     receipt.add_argument("--pr", type=int, required=True)

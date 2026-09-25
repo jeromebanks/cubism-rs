@@ -1,10 +1,12 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -3248,56 +3250,463 @@ Read one file.
                     run_after_mark(fail_at, mode)
 
 
-class CodexReviewEnvelopeTests(unittest.TestCase):
-    """`.agents/skills/codex-review/SKILL.md` derives reviewer identity by
-    scraping `model:` and `session id:` labels out of `codex exec`'s stderr.
-    Nothing else notices if OpenAI renames or reformats either label: the
-    skill already refuses to record an empty identity, so drift fails
-    closed, but only at review time, mid-slice, looking like a Codex
-    malfunction rather than a version skew. This is the loud, earlier
-    signal instead.
+class CodexEnvelopeTests(unittest.TestCase):
+    """`scripts/sdlc.py`'s codex-review envelope: report/exit validation,
+    reviewer-identity derivation, verdict parsing, and the post-push
+    head-agreement retry that `.agents/skills/codex-review/SKILL.md` sections
+    1, 3 and 5 call instead of embedding their own `sed`/`awk`/retry-loop
+    logic. Every fixture below was diffed against the literal bash it
+    replaces (`git show origin/main:.agents/skills/codex-review/SKILL.md`'s
+    section 3, before #112) before this test was written, precisely because
+    `str.splitlines()`/`str.strip()` are *not* drop-in replacements for
+    `sed`/`awk`'s narrower idea of a line ending or a blank line.
     """
+
+    def setUp(self):
+        # `command_codex_envelope` never reads `config`; `command_codex_await_head`
+        # only threads it through to `fetch_pr`, which every test below patches
+        # directly. An empty dict is deliberate, not a stand-in for real config.
+        self.config = {}
+
+    # (name, stderr text, expected "Codex {model} / {session}" or None for a
+    # fail-closed `SdlcError`). Mirrors `sed -n 's/^model: //p' | head -1`:
+    # the *first* match wins, even an empty one.
+    IDENTITY_CASES = [
+        ("normal", "model: gpt-5\nsession id: sess-123\n", "Codex gpt-5 / sess-123"),
+        ("crlf_is_carried_through_literally",
+         "model: gpt-5\r\nsession id: sess-123\r\n", "Codex gpt-5\r / sess-123\r"),
+        ("empty_first_match_wins_over_a_later_nonempty_one",
+         "model: \nmodel: gpt-5\nsession id: sess-1\n", None),
+        ("leading_space_does_not_match_the_anchored_prefix",
+         " model: gpt-5\nsession id: sess-1\n", None),
+        ("missing_space_after_colon_does_not_match",
+         "model:gpt-5\nsession id: sess-1\n", None),
+        ("no_session_line_at_all", "model: gpt-5\n", None),
+        ("no_model_line_at_all", "session id: sess-1\n", None),
+        ("both_missing", "", None),
+    ]
+
+    # (name, report text, expected "pass"/"fail" or None for a fail-closed
+    # `SdlcError`). Mirrors `awk 'NF {line=$0} END {print line}'`: the last
+    # line that is not entirely spaces/tabs.
+    VERDICT_CASES = [
+        ("normal_pass", "findings...\nVERDICT: pass\n", "pass"),
+        ("normal_fail", "findings...\nVERDICT: fail\n", "fail"),
+        ("crlf_verdict_line_does_not_match_exactly",
+         "findings\r\nVERDICT: pass\r\n", None),
+        ("trailing_space_and_tab_only_lines_are_blank",
+         "VERDICT: pass\n   \n\t\n", "pass"),
+        ("trailing_form_feed_line_is_not_blank_to_awk",
+         "VERDICT: pass\n\x0c\n", None),
+        ("trailing_nbsp_line_is_not_blank_to_awk",
+         "VERDICT: pass\n \n", None),
+        ("text_after_the_verdict_line_is_the_real_last_line",
+         "VERDICT: pass\nmore stuff\n", None),
+        ("empty_report", "", None),
+        ("blank_report", "   \n\t\n", None),
+    ]
+
+    def test_parse_codex_identity_matches_section_3s_sed_semantics(self):
+        for name, stderr_text, expected in self.IDENTITY_CASES:
+            with self.subTest(case=name):
+                if expected is None:
+                    with self.assertRaises(sdlc.SdlcError) as cm:
+                        sdlc.parse_codex_identity(stderr_text)
+                    self.assertEqual(
+                        "cannot identify the reviewer; refusing to record", str(cm.exception))
+                else:
+                    self.assertEqual(expected, sdlc.parse_codex_identity(stderr_text))
+
+    def test_parse_codex_verdict_matches_section_3s_awk_semantics(self):
+        for name, report_text, expected in self.VERDICT_CASES:
+            with self.subTest(case=name):
+                if expected is None:
+                    with self.assertRaises(sdlc.SdlcError) as cm:
+                        sdlc.parse_codex_verdict(report_text)
+                    self.assertEqual(
+                        "report does not end with a verdict line; refusing to record",
+                        str(cm.exception),
+                    )
+                else:
+                    self.assertEqual(expected, sdlc.parse_codex_verdict(report_text))
+
+    def test_require_nonempty_report_matches_section_1s_test_dash_s(self):
+        with self.assertRaises(sdlc.SdlcError) as cm:
+            sdlc.require_nonempty_report("", Path("/tmp/review.md.err"))
+        self.assertEqual("empty report; see /tmp/review.md.err", str(cm.exception))
+
+        # `test -s` checks byte size, not content: a whitespace-only report
+        # is not "empty" to it, and must reach `parse_codex_verdict`'s own
+        # fail-closed path with that step's own message instead -- checking
+        # `.strip()` here would raise the wrong error for this input.
+        for nonempty in ("   ", "\n\n\t\n", "findings\n"):
+            with self.subTest(report=repr(nonempty)):
+                sdlc.require_nonempty_report(nonempty, Path("/tmp/review.md.err"))
+
+    def _envelope_args(self, tmp, *, report_text, err_text, field):
+        import argparse
+        report = Path(tmp) / "report"
+        err = Path(tmp) / "report.err"
+        report.write_bytes(report_text.encode("utf-8"))
+        err.write_bytes(err_text.encode("utf-8"))
+        return argparse.Namespace(field=field, report=report, err=err)
+
+    def test_command_codex_envelope_prints_the_requested_field(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._envelope_args(
+                tmp, report_text="findings\nVERDICT: pass\n",
+                err_text="model: gpt-5\nsession id: sess-1\n", field="reviewer")
+            with patch("builtins.print") as mock_print:
+                self.assertEqual(0, sdlc.command_codex_envelope(args, self.config))
+            mock_print.assert_called_once_with("Codex gpt-5 / sess-1")
+
+            args.field = "verdict"
+            with patch("builtins.print") as mock_print:
+                self.assertEqual(0, sdlc.command_codex_envelope(args, self.config))
+            mock_print.assert_called_once_with("pass")
+
+    def test_command_codex_envelope_reads_files_raw_not_universal_newlines(self):
+        # A `Path.read_text()` default call normalizes `\r\n` to `\n` before
+        # the parser ever sees it, which would make a CRLF report pass when
+        # the bash it replaces rejects it. `_read_text_raw`'s byte-decode is
+        # what prevents that, portably (`read_text(newline="")` would say the
+        # same thing directly, but needs Python 3.13; CI pins 3.12).
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self._envelope_args(
+                tmp, report_text="findings\r\nVERDICT: pass\r\n",
+                err_text="model: gpt-5\nsession id: sess-1\n", field="verdict")
+            with self.assertRaises(sdlc.SdlcError) as cm:
+                sdlc.command_codex_envelope(args, self.config)
+            self.assertEqual(
+                "report does not end with a verdict line; refusing to record", str(cm.exception))
+
+    def test_command_codex_envelope_empty_report_fails_before_either_field(self):
+        for field in ("reviewer", "verdict"):
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory() as tmp:
+                    args = self._envelope_args(
+                        tmp, report_text="", err_text="model: gpt-5\nsession id: sess-1\n",
+                        field=field)
+                    with self.assertRaises(sdlc.SdlcError) as cm:
+                        sdlc.command_codex_envelope(args, self.config)
+                    self.assertEqual(f"empty report; see {args.err}", str(cm.exception))
+
+    def test_await_matching_head_returns_as_soon_as_it_matches(self):
+        fetch = MagicMock(return_value="abc123")
+        sleep = MagicMock()
+        self.assertEqual(
+            "abc123", sdlc.await_matching_head(fetch, "abc123", sleep=sleep))
+        fetch.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_await_matching_head_retries_through_a_stale_read(self):
+        fetch = MagicMock(side_effect=["old-sha", "old-sha", "new-sha"])
+        sleep = MagicMock()
+        self.assertEqual(
+            "new-sha", sdlc.await_matching_head(fetch, "new-sha", sleep=sleep))
+        self.assertEqual(3, fetch.call_count)
+        self.assertEqual(2, sleep.call_count)
+
+    def test_await_matching_head_treats_a_transient_read_failure_as_a_mismatch(self):
+        # A `gh` failure inside the bash loop would leave `$HEAD_SHA` unset
+        # (still not equal to local HEAD) and let the loop retry; a raising
+        # `fetch_pr` must behave the same way, not abort the whole retry.
+        fetch = MagicMock(side_effect=[sdlc.SdlcError("gh: transient network error"), "new-sha"])
+        sleep = MagicMock()
+        self.assertEqual(
+            "new-sha", sdlc.await_matching_head(fetch, "new-sha", sleep=sleep))
+        self.assertEqual(2, fetch.call_count)
+
+    def test_await_matching_head_fails_closed_after_exhausting_attempts(self):
+        fetch = MagicMock(return_value="stale-sha")
+        sleep = MagicMock()
+        with self.assertRaises(sdlc.SdlcError) as cm:
+            sdlc.await_matching_head(fetch, "new-sha", attempts=3, sleep=sleep)
+        self.assertEqual("GitHub still reports a different head; not reviewing yet", str(cm.exception))
+        self.assertEqual(3, fetch.call_count)
+        self.assertEqual(3, sleep.call_count)
+
+    def test_command_codex_await_head_uses_time_sleep_when_unset(self):
+        # `await_matching_head`'s `sleep` parameter defaults lazily to
+        # `time.sleep`, looked up at call time rather than bound once at
+        # function-definition time, so patching `sdlc.time.sleep` here -- as
+        # a real caller never overriding `sleep` would experience -- actually
+        # takes effect instead of silently sleeping for real.
+        import argparse
+        args = argparse.Namespace(pr=110, local_head="new-sha")
+        with patch.object(sdlc, "fetch_pr", return_value={"headRefOid": "new-sha"}) as fetch, \
+             patch.object(sdlc.time, "sleep") as sleep, \
+             patch("builtins.print") as mock_print:
+            self.assertEqual(0, sdlc.command_codex_await_head(args, self.config))
+        fetch.assert_called_once_with(110, self.config)
+        sleep.assert_not_called()
+        mock_print.assert_called_once_with("new-sha")
+
+    def test_command_codex_await_head_blocks_after_repeated_stale_reads(self):
+        import argparse
+        args = argparse.Namespace(pr=110, local_head="new-sha")
+        with patch.object(sdlc, "fetch_pr", return_value={"headRefOid": "stale-sha"}), \
+             patch.object(sdlc.time, "sleep") as sleep:
+            with self.assertRaises(sdlc.SdlcError) as cm:
+                sdlc.command_codex_await_head(args, self.config)
+        self.assertEqual("GitHub still reports a different head; not reviewing yet", str(cm.exception))
+        self.assertEqual(5, sleep.call_count)
+
+    def test_a_helper_derived_reviewer_is_counted_like_any_other_receipt(self):
+        # `consumed_review_rounds` (the #110 budget parser) only looks at
+        # `schema`/`kind`; it has no opinion on how `reviewer` was produced.
+        # This nails down that non-coupling rather than assuming it: a
+        # receipt whose `--reviewer` came from `parse_codex_identity` must
+        # count exactly like a hand-typed one, or #112 would have quietly
+        # changed the shape of every future receipt.
+        reviewer = sdlc.parse_codex_identity("model: gpt-5\nsession id: sess-1\n")
+        comment = {
+            "body": sdlc.review_marker("codex", "abc123", "pass", reviewer),
+            "user": {"login": "implementer"},
+            "created_at": "2026-09-25T00:00:00Z",
+        }
+        receipts = sdlc.parse_review_receipts([comment])
+        self.assertEqual(1, len(receipts))
+        self.assertEqual(reviewer, receipts[0]["reviewer"])
+        self.assertEqual(1, sdlc.consumed_review_rounds(receipts, "codex"))
 
     SKILL_PATH = ROOT / ".agents" / "skills" / "codex-review" / "SKILL.md"
 
-    def test_codex_exec_stderr_matches_reviewer_identity_patterns(self):
-        import os
-        import re
-        import shutil
-        import subprocess
-        import tempfile
+    @staticmethod
+    def _extract_section(skill_text, heading, next_marker="^## "):
+        match = re.search(
+            rf"^{re.escape(heading)}\n(.*?)(?={next_marker}|\Z)", skill_text,
+            re.DOTALL | re.MULTILINE)
+        return match
 
-        skill_text = self.SKILL_PATH.read_text()
-        # Scope to section 3's own fenced *code block* -- the text that
-        # actually runs -- not the whole file and not the section's prose.
-        section_match = re.search(
-            r"^## 3\. Derive identity and verdict from the run\n(.*?)(?=^## |\Z)",
-            skill_text, re.DOTALL | re.MULTILINE)
+    def _code_block(self, skill_text, heading, *, source_label):
+        section_match = self._extract_section(skill_text, heading)
         self.assertIsNotNone(
             section_match,
-            f"expected a '## 3. Derive identity and verdict from the run' "
-            f"section in {self.SKILL_PATH}; update this test if the skill "
-            f"was restructured")
-        section_text = section_match.group(1)
-
-        code_blocks = re.findall(r"```(?:[a-zA-Z]*)\n(.*?)```", section_text, re.DOTALL)
+            f"expected a {heading!r} section in {source_label}; update this "
+            f"test if the skill was restructured")
+        code_blocks = re.findall(r"```(?:[a-zA-Z]*)\n(.*?)```", section_match.group(1), re.DOTALL)
         self.assertEqual(
             1, len(code_blocks),
-            f"expected exactly one fenced code block in section 3 of "
-            f"{self.SKILL_PATH}, found {len(code_blocks)}; update this test "
-            f"if the skill was restructured, so this keeps executing only "
-            f"the code that actually runs")
-        code_text = code_blocks[0]
-        self.assertIn(
-            "MODEL=", code_text,
-            f"section 3's code block in {self.SKILL_PATH} no longer assigns "
-            f"MODEL; update this test if identity derivation intentionally "
-            f"changed")
-        self.assertIn(
-            "SESSION=", code_text,
-            f"section 3's code block in {self.SKILL_PATH} no longer assigns "
-            f"SESSION; update this test if identity derivation intentionally "
-            f"changed")
+            f"expected exactly one fenced code block under {heading!r} in "
+            f"{source_label}, found {len(code_blocks)}; update this test if "
+            f"the skill was restructured")
+        return code_blocks[0]
+
+    def _section_code_block(self, heading):
+        return self._code_block(self.SKILL_PATH.read_text(), heading, source_label=str(self.SKILL_PATH))
+
+    def _run_with_real_passthrough(self, code_text, *, report_text, err_text, extra_script=""):
+        """Runs a skill code block with a real (if stubbed) `rtk`: it strips a
+        leading `proxy` argument and execs the rest, exactly what
+        `rtk proxy <command>` promises for raw output. This proves argument
+        wiring end to end -- `--report`/`--err` reach the right files and the
+        parsed result reaches the right shell variable -- but a
+        reimplementation that computed the same values without ever calling
+        `codex-envelope` would pass it too; `_run_with_sentinel_shim` below is
+        what rules that out.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            rtk_shim = bin_dir / "rtk"
+            rtk_shim.write_text('#!/bin/sh\nif [ "$1" = "proxy" ]; then shift; fi\nexec "$@"\n')
+            rtk_shim.chmod(0o755)
+
+            report_path = Path(tmp) / "report.md"
+            report_path.write_bytes(report_text.encode("utf-8"))
+            (Path(tmp) / "report.md.err").write_bytes(err_text.encode("utf-8"))
+
+            script = code_text + extra_script
+            return subprocess.run(
+                ["bash", "-c", script], cwd=ROOT,
+                env={**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                     "REPORT": str(report_path)},
+                capture_output=True, text=True, timeout=30)
+
+    def test_section_3_block_derives_both_values_through_a_real_codex_envelope_call(self):
+        code_text = self._section_code_block("## 3. Derive identity and verdict from the run")
+        result = self._run_with_real_passthrough(
+            code_text, report_text="findings\nVERDICT: pass\n",
+            err_text="model: gpt-5\nsession id: sess-1\n",
+            extra_script='\nprintf "%s\\n%s\\n" "$REVIEWER" "$VERDICT"\n')
+        self.assertEqual(
+            0, result.returncode,
+            f"section 3's code block failed against a well-formed fixture; "
+            f"this means it no longer calls codex-envelope correctly. "
+            f"stdout: {result.stdout!r} stderr: {result.stderr!r}")
+        self.assertEqual(["Codex gpt-5 / sess-1", "pass"], result.stdout.splitlines())
+
+    def test_section_3_block_fails_closed_when_the_helper_cannot_identify_the_reviewer(self):
+        # No `session id:` line at all. `codex-envelope`'s diagnostic reaches
+        # stderr, not `$REVIEWER` -- section 3 no longer folds the two
+        # streams together, so a stray stderr line on an otherwise
+        # successful run can never end up inside a recorded receipt.
+        code_text = self._section_code_block("## 3. Derive identity and verdict from the run")
+        result = self._run_with_real_passthrough(
+            code_text, report_text="findings\nVERDICT: pass\n", err_text="model: gpt-5\n",
+            extra_script='\nprintf "%s\\n%s\\n" "$REVIEWER" "$VERDICT"\n')
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertIn("cannot identify the reviewer; refusing to record", result.stderr)
+
+    # A shim that logs every call's arguments and returns a distinguishing
+    # sentinel instead of doing real work, and fails loudly on anything it
+    # does not recognize. A grep for leftover `sed`/`awk`/a manual retry loop
+    # can be fooled by a decoy assignment (#85 spent three review rounds on
+    # exactly that class), and even running the block for real against a
+    # well-formed fixture cannot tell a call to `codex-envelope` apart from a
+    # byte-identical reimplementation that never calls it -- both produce the
+    # same correct values. Requiring these specific sentinel strings, which
+    # nothing but this shim ever produces, is what rules that out.
+    # Matched positionally ($1, $2, ...), never by a `case "$*" in *pattern*`
+    # substring test: a substring match would let a decoy such as
+    # `rtk proxy echo codex-envelope --field reviewer ...` receive the
+    # sentinel without ever invoking `codex-envelope` -- passing the
+    # structural tests below while proving nothing about what the skill
+    # actually called. Requiring `$1` to literally be `python3` (the real
+    # invocation's first argument after stripping `proxy`) closes that: a
+    # decoy's `$1` is whatever ran instead, so it falls through to the
+    # `UNRECOGNIZED-CALL` branch.
+    SENTINEL_SHIM = (
+        '#!/bin/sh\n'
+        'if [ "$1" = "proxy" ]; then shift; fi\n'
+        'echo "$@" >> "$RTK_SHIM_LOG"\n'
+        'if [ "$1" = "python3" ] && [ "$2" = "scripts/sdlc.py" ] '
+        '&& [ "$3" = "codex-envelope" ] && [ "$4" = "--field" ] && [ "$5" = "reviewer" ]; then\n'
+        '  echo "SENTINEL-REVIEWER"\n'
+        'elif [ "$1" = "python3" ] && [ "$2" = "scripts/sdlc.py" ] '
+        '&& [ "$3" = "codex-envelope" ] && [ "$4" = "--field" ] && [ "$5" = "verdict" ]; then\n'
+        '  echo "SENTINEL-VERDICT"\n'
+        'elif [ "$1" = "python3" ] && [ "$2" = "scripts/sdlc.py" ] && [ "$3" = "codex-await-head" ]; then\n'
+        '  echo "SENTINEL-HEAD"\n'
+        'elif [ "$1" = "git" ] && [ "$2" = "rev-parse" ] && [ "$3" = "HEAD" ] && [ "$#" -eq 3 ]; then\n'
+        '  echo "LOCAL-HEAD"\n'
+        'else\n'
+        '  echo "UNRECOGNIZED-CALL: $*" >&2\n'
+        '  exit 99\n'
+        'fi\n'
+    )
+
+    def _run_with_sentinel_shim(self, code_text, *, env_extra, script_suffix):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            log_path = Path(tmp) / "calls.log"
+            rtk_shim = bin_dir / "rtk"
+            rtk_shim.write_text(self.SENTINEL_SHIM)
+            rtk_shim.chmod(0o755)
+            script = code_text + script_suffix
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                "RTK_SHIM_LOG": str(log_path),
+                **env_extra,
+            }
+            result = subprocess.run(
+                ["bash", "-c", script], cwd=ROOT, env=env,
+                capture_output=True, text=True, timeout=30)
+            log_lines = log_path.read_text().splitlines() if log_path.exists() else []
+            return result, log_lines
+
+    def test_section_3_block_structurally_calls_codex_envelope_for_both_fields(self):
+        code_text = self._section_code_block("## 3. Derive identity and verdict from the run")
+        result, log_lines = self._run_with_sentinel_shim(
+            code_text, env_extra={"REPORT": "/fake/review.md"},
+            script_suffix='\nprintf "%s\\n%s\\n" "$REVIEWER" "$VERDICT"\n')
+        self.assertEqual(
+            0, result.returncode,
+            f"section 3's block made no recognized codex-envelope call; "
+            f"stdout={result.stdout!r} stderr={result.stderr!r} log={log_lines!r}")
+        self.assertEqual(["SENTINEL-REVIEWER", "SENTINEL-VERDICT"], result.stdout.splitlines())
+        self.assertEqual(2, len(log_lines))
+        self.assertIn("codex-envelope --field reviewer", log_lines[0])
+        self.assertIn("--report /fake/review.md --err /fake/review.md.err", log_lines[0])
+        self.assertIn("codex-envelope --field verdict", log_lines[1])
+        self.assertIn("--report /fake/review.md --err /fake/review.md.err", log_lines[1])
+
+    def test_section_5_block_structurally_calls_codex_await_head_with_the_local_head(self):
+        code_text = self._section_code_block("## 5. After the head changes")
+        result, log_lines = self._run_with_sentinel_shim(
+            code_text, env_extra={"PR": "112"}, script_suffix='\nprintf "%s\\n" "$HEAD_SHA"\n')
+        self.assertEqual(
+            0, result.returncode,
+            f"section 5's block made no recognized rtk call; "
+            f"stdout={result.stdout!r} stderr={result.stderr!r} log={log_lines!r}")
+        self.assertEqual(["SENTINEL-HEAD"], result.stdout.splitlines())
+        self.assertEqual(2, len(log_lines))
+        self.assertEqual("git rev-parse HEAD", log_lines[0])
+        self.assertIn("codex-await-head --pr 112", log_lines[1])
+        self.assertIn("--local-head LOCAL-HEAD", log_lines[1])
+
+    def test_sentinel_shim_does_not_falsely_pass_against_pre_112_inline_bash(self):
+        # Confirms the two structural tests above actually discriminate: the
+        # shim intercepts only `rtk`, and the pre-#112 section 3/5 blocks
+        # never called `rtk` at all, so this must succeed *without* producing
+        # the sentinel values -- proving a regression back to inline
+        # `sed`/`awk`/a manual retry loop would show up as a content
+        # mismatch, not a crash a reviewer could dismiss as unrelated.
+        #
+        # `origin/main` is a real ref in a developer/agent checkout (SDLC.md
+        # makes it the one diff/rebase base, and `claim`/`cleanup` fetch it),
+        # but CI's `sdlc tooling` job is a plain `actions/checkout@v4` with no
+        # extra fetch step, so a PR branch's checkout there does not carry
+        # `origin/main` at all. Skip rather than error when it is missing, the
+        # same way the codex-gated test below skips when `codex` is absent --
+        # this is an environment limitation, not a code failure.
+        git_show = subprocess.run(
+            ["git", "show", "origin/main:.agents/skills/codex-review/SKILL.md"],
+            cwd=ROOT, capture_output=True, text=True, timeout=10,
+        )
+        if git_show.returncode != 0:
+            self.skipTest(
+                f"origin/main is not resolvable in this checkout (e.g. a "
+                f"shallow, single-ref CI checkout of a PR branch); skipping "
+                f"the meta-verification against the pre-#112 baseline. "
+                f"git stderr: {git_show.stderr.strip()}")
+        old_skill_text = git_show.stdout
+        old_section_3 = self._code_block(
+            old_skill_text, "## 3. Derive identity and verdict from the run",
+            source_label="origin/main's SKILL.md")
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "report.md"
+            report_path.write_text("VERDICT: pass\n")
+            (Path(tmp) / "report.md.err").write_text("model: gpt-5\nsession id: sess-1\n")
+            result, log_lines = self._run_with_sentinel_shim(
+                old_section_3, env_extra={"REPORT": str(report_path)},
+                script_suffix='\nprintf "%s\\n%s\\n" "$REVIEWER" "$VERDICT"\n')
+        self.assertEqual(
+            0, result.returncode,
+            "origin/main's old section 3 does not call `rtk` at all, so the "
+            "shim should never even run; a non-zero exit here means this "
+            "meta-test's own fixture is broken, not that the real behavior "
+            "changed")
+        self.assertEqual([], log_lines, "old section 3 should never call rtk")
+        self.assertEqual(
+            ["Codex gpt-5 / sess-1", "pass"], result.stdout.splitlines(),
+            "old section 3 derives real values directly via sed/awk; if this "
+            "ever printed the sentinel strings instead, the shim would no "
+            "longer be able to tell old and new section 3 apart")
+
+
+class CodexReviewEnvelopeTests(unittest.TestCase):
+    """`parse_codex_identity` derives reviewer identity by scraping `model:`
+    and `session id:` labels out of `codex exec`'s stderr. Nothing else
+    notices if OpenAI renames or reformats either label: `codex-envelope`
+    already refuses to record an empty identity, so drift fails closed, but
+    only at review time, mid-slice, looking like a Codex malfunction rather
+    than a version skew. This is the loud, earlier signal instead.
+
+    `CodexEnvelopeTests` above already pins `parse_codex_identity`'s exact
+    behavior against fixtures, and separately confirms section 3's own code
+    block actually calls `codex-envelope`. This class is the one layer that
+    additionally needs a real `codex` binary, because only a live run can
+    catch an actual upstream label rename rather than a fixture nobody
+    updated.
+    """
+
+    def test_parse_codex_identity_against_real_codex_exec_stderr(self):
+        import shutil
 
         if not shutil.which("codex"):
             self.skipTest("codex is unavailable")
@@ -3332,63 +3741,20 @@ class CodexReviewEnvelopeTests(unittest.TestCase):
             f"could not run (auth, network, or config), not envelope drift. "
             f"stderr:\n{result.stderr[-2000:]}")
 
-        # Execute section 3's block verbatim against the real stderr, rather
-        # than re-deriving its `sed` patterns by regex and running those
-        # separately. Three review rounds each found a different way a
-        # regex re-derivation could be fooled by a stale or decoy
-        # assignment (elsewhere in the file, in section 3's prose, or a
-        # second, differently-quoted assignment of the same name inside the
-        # fence -- a later assignment wins at runtime and a regex counting
-        # only one *form* would miss it). Running the block sidesteps the
-        # whole class: bash resolves `$MODEL`/`$SESSION` exactly as
-        # codex-review itself would, so there is nothing left to fool.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            report_path = os.path.join(tmpdir, "report")
-            # The block reads "$REPORT" (for the verdict line) and
-            # "$REPORT.err" (for MODEL/SESSION). The verdict half is not
-            # this issue's concern -- identity derivation is -- so the
-            # fixture report ends with a valid verdict line purely so that
-            # half of the block doesn't `exit 1` for an unrelated reason.
-            with open(report_path, "w") as f:
-                f.write("VERDICT: pass\n")
-            with open(report_path + ".err", "w") as f:
-                f.write(result.stderr)
-
-            probe_script = code_text + '\nprintf "%s\\n%s\\n" "$MODEL" "$SESSION"\n'
-            try:
-                block_result = subprocess.run(
-                    ["bash", "-c", probe_script],
-                    env={**os.environ, "REPORT": report_path},
-                    capture_output=True, text=True, timeout=30)
-            except subprocess.TimeoutExpired as exc:
-                self.fail(
-                    "section 3's code block did not finish within 30s "
-                    f"against real `codex exec` stderr. Captured so far:\n"
-                    f"stdout: {exc.stdout!r}\nstderr: {exc.stderr!r}")
-
-        if block_result.returncode != 0:
+        try:
+            reviewer = sdlc.parse_codex_identity(result.stderr)
+        except sdlc.SdlcError:
             self.fail(
-                f"section 3's code block exited {block_result.returncode} "
-                f"against real `codex exec` stderr -- the merge gate would "
-                f"refuse every receipt with the same failure (most likely "
-                f"\"cannot identify the reviewer\"), which means the "
-                f"envelope has drifted. Block stdout: {block_result.stdout!r}\n"
-                f"Block stderr: {block_result.stderr!r}\n"
-                f"codex exec stderr was:\n{result.stderr}")
+                "parse_codex_identity could not identify the reviewer from "
+                "a real `codex exec` run's stderr -- the merge gate would "
+                "refuse every receipt with the same failure, which means "
+                f"OpenAI's `model:`/`session id:` labels have drifted. "
+                f"stderr:\n{result.stderr}")
 
-        printed = block_result.stdout.splitlines()
-        self.assertEqual(
-            2, len(printed),
-            f"expected section 3's block to print MODEL then SESSION on "
-            f"exit 0; got {printed!r} (stderr: {block_result.stderr!r})")
-        model_value, session_value = printed
-        self.assertTrue(
-            model_value.strip() and session_value.strip(),
-            f"section 3's block derived an empty MODEL or SESSION from "
-            f"real `codex exec` stderr without exiting non-zero, which "
-            f"should be impossible given its own guard -- treat this as a "
-            f"bug in this test, not envelope drift. codex exec stderr:\n"
-            f"{result.stderr}")
+        self.assertRegex(
+            reviewer, r"^Codex \S.* / \S.*$",
+            f"parse_codex_identity returned an unexpected shape from real "
+            f"codex exec stderr: {reviewer!r}")
 
 
 if __name__ == "__main__":
