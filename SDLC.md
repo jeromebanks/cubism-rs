@@ -235,6 +235,38 @@ need for more.
    before this existed — but if it fails for its own reasons, its error
    gains the same rebase note as an informational aside: that fact holds
    regardless of which account's receipt is being evaluated.
+
+   Each required review `kind` also carries a finite round budget
+   (`review.max_rounds` in `.sdlc/config.json`, default 3, per the adopted
+   plan's R5): the count of every schema-1 review receipt of that kind ever
+   recorded for the PR, across every head SHA it has carried in this repair
+   sequence — not just the current head. Rebasing itself posts no receipt, so
+   it does not consume a round by itself — but the re-review a `BEHIND`
+   rebase requires under step 9 above does, exactly like any other round,
+   once it is recorded. The count is reconstructed from GitHub on every
+   read, so restarting a session or a fresh `continue-plan` invocation
+   cannot reset it. Once consumed rounds
+   exceed the effective budget, `merge`/`merge-gate` block — even a round
+   whose own verdict is `pass` — until a human records an explicit renewal:
+
+   ```bash
+   rtk python3 scripts/sdlc.py renew-review-budget --pr P --kind codex \
+     --rounds N --decided-by <human> --note-file <path> --apply
+   ```
+
+   Like a gate decision, an agent records only a renewal a human actually
+   gave it; `--decided-by` is attribution, not proof, exactly as `set-gate`
+   documents for its own decisions. The effective budget is the maximum of
+   the config default and every structurally valid renewal recorded for that
+   PR/kind — folded by maximum rather than "latest wins", so it is order-
+   independent and a renewal can only raise the ceiling, never lower it. A
+   malformed renewal (missing `decided_by`, or a non-positive or boolean
+   `rounds`) is simply excluded from that fold. The count is scoped to one
+   PR: closing it and opening a new one for the same issue resets consumed
+   rounds to zero — a known, documented limitation, not a claim that every
+   restart path is closed. Renewal and receipt comments are read from anyone
+   who can comment on this public repository; the same trust limit already
+   applies to review receipts and gate records, and is unresolved until R6.
 10. **Reconcile.** Confirm the issue closed, then run
     `rtk python3 scripts/sdlc.py cleanup N` from the primary checkout. It owns
     the closing transition: it removes whichever of `in-progress` and

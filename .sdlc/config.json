@@ -30,7 +30,8 @@
   ],
   "review": {
     "required": ["codex"],
-    "advisor_when_available": true
+    "advisor_when_available": true,
+    "max_rounds": 3
   },
   "merge": {
     "method": "merge",

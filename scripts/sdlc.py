@@ -31,6 +31,11 @@ REVIEW_PREFIX = "<!-- nightshift-review "
 REVIEW_SUFFIX = " -->"
 GATE_PREFIX = "<!-- nightshift-gate "
 GATE_SUFFIX = " -->"
+# Deliberately not an extension of REVIEW_PREFIX ("nightshift-review-budget")
+# so a budget record and a review receipt can never be mistaken for each
+# other by either parser, even by a future prefix typo.
+BUDGET_PREFIX = "<!-- nightshift-budget "
+BUDGET_SUFFIX = " -->"
 PARENT_RE = re.compile(r"(?im)^\s*(?:parent(?:\s+epic)?|parent lifecycle epic):\s*#(\d+)\b.*$")
 PART_OF_RE = re.compile(r"(?im)^\s*part of\s+#(\d+)\b.*$")
 CHECKBOX_CHILD_RE = re.compile(r"(?im)^\s*-\s*\[[ xX]\]\s*#(\d+)\b")
@@ -482,6 +487,95 @@ def complete_gate_record(record: dict[str, Any] | None, state: str) -> bool:
 def latest_gate_record(records: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
     ordered = sorted(records, key=lambda record: (record.get("created_at") or "", record.get("sequence") or 0))
     return ordered[-1] if ordered else None
+
+
+BUDGET_RECORD_RE = re.compile(r"\A" + re.escape(BUDGET_PREFIX) + r"(.*?)" + re.escape(BUDGET_SUFFIX))
+
+
+def budget_marker(kind: str, rounds: int, decided_by: str) -> str:
+    payload = json.dumps(
+        {"schema": 1, "kind": kind, "rounds": rounds, "decided_by": decided_by},
+        sort_keys=True, separators=(",", ":"),
+    )
+    return f"{BUDGET_PREFIX}{payload}{BUDGET_SUFFIX}"
+
+
+def parse_budget_records(comments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Review-round-budget renewal records posted as PR comments.
+
+    Anchored at the start of the comment body, exactly like a gate record, so
+    a comment that merely quotes or fences the marker cannot be parsed as one.
+    """
+    records = []
+    for sequence, comment in enumerate(comments):
+        match = BUDGET_RECORD_RE.match(comment.get("body") or "")
+        if not match:
+            continue
+        try:
+            payload = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload["comment_url"] = comment.get("html_url") or comment.get("url")
+        payload["created_at"] = comment.get("created_at")
+        payload["sequence"] = sequence
+        records.append(payload)
+    return records
+
+
+def _is_schema_one(value: dict[str, Any]) -> bool:
+    """True only for an actual integer 1, never `True` (`True == 1` in Python).
+
+    Codex round 1 finding 3: a hand-edited `"schema": true` record must not
+    be read as schema 1 by either the budget-record or the round-counting
+    check below.
+    """
+    schema = value.get("schema")
+    return isinstance(schema, int) and not isinstance(schema, bool) and schema == 1
+
+
+def complete_budget_record(record: dict[str, Any] | None, kind: str) -> bool:
+    """True for a schema-1 renewal record for `kind` carrying a usable ceiling.
+
+    A malformed record (missing fields, a non-int/non-positive/`bool` round
+    count) is simply excluded by the caller's fold-by-maximum — it never
+    lowers or invalidates any other record's contribution.
+    """
+    if not record or not _is_schema_one(record) or record.get("kind") != kind:
+        return False
+    decided_by = record.get("decided_by")
+    if not isinstance(decided_by, str) or not decided_by.strip():
+        return False
+    rounds = record.get("rounds")
+    # bool is an int subclass in Python; exclude it explicitly so a stray
+    # `true`/`false` in a hand-edited record cannot be read as 1/0.
+    return isinstance(rounds, int) and not isinstance(rounds, bool) and rounds > 0
+
+
+def effective_review_budget(records: Iterable[dict[str, Any]], kind: str, default: int) -> int:
+    """The budget for one PR/kind: the config default, raised by any valid renewal.
+
+    Folding by maximum rather than "latest wins" makes the result order-
+    independent (no ambiguity between same-timestamp records to resolve) and
+    monotonic: a renewal can only raise the ceiling, never lower it.
+    """
+    budget = default
+    for record in records:
+        if complete_budget_record(record, kind):
+            budget = max(budget, record["rounds"])
+    return budget
+
+
+def consumed_review_rounds(receipts: Iterable[dict[str, Any]], kind: str) -> int:
+    """Rounds consumed for one PR/kind, across every head SHA it has carried.
+
+    Unfiltered by `head_sha`, unlike the independence checks in
+    `evaluate_merge_gate`: a round consumed anywhere in this repair sequence
+    counts, so a rebase that posts no new receipt never changes this number,
+    and restarting a session cannot reset it — the count lives on GitHub.
+    """
+    return sum(1 for receipt in receipts if _is_schema_one(receipt) and receipt.get("kind") == kind)
 
 
 def gate_admission_errors(
@@ -991,10 +1085,20 @@ def implementer_identity(head_message: str | None) -> str | None:
 
 
 def parse_review_receipts(comments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Parses only a marker at the very start of a comment body.
+
+    Codex round 2 finding on #110: an unanchored `.search()` would also match
+    a review marker *quoted* anywhere later in a comment -- for example, a
+    `renew-review-budget` note that explains itself by pasting an earlier
+    receipt's marker text -- and count it as a genuine additional round.
+    `command_review_receipt` always writes the marker as the first thing in
+    the body, so anchoring costs nothing, and matches the discipline
+    `GATE_RECORD_RE`/`BUDGET_RECORD_RE` already apply for the same reason.
+    """
     receipts = []
-    pattern = re.compile(re.escape(REVIEW_PREFIX) + r"(\{.*?\})" + re.escape(REVIEW_SUFFIX))
+    pattern = re.compile(r"\A" + re.escape(REVIEW_PREFIX) + r"(\{.*?\})" + re.escape(REVIEW_SUFFIX))
     for sequence, comment in enumerate(comments):
-        match = pattern.search(comment.get("body") or "")
+        match = pattern.match(comment.get("body") or "")
         if not match:
             continue
         try:
@@ -1240,6 +1344,7 @@ def evaluate_merge_gate(
             errors.append(f"required check `{required}` is {outcomes.get(required, 'missing')}")
 
     receipts = parse_review_receipts(comments)
+    budget_records = parse_budget_records(comments)
     # An implementer must not be able to write their own passing receipt.
     # Independence is established at the account level when it can be — a
     # receipt from a different GitHub account is the strongest evidence
@@ -1364,6 +1469,37 @@ def evaluate_merge_gate(
                 f"establish independence on this head (a merge commit with no "
                 f"`{AGENT_SESSION_TRAILERS[0]}:` trailer of its own) — " + rebase_advice
             )
+        # Evaluated last, after the rebase-advice block above, and appended as
+        # its own error rather than folded into it: a budget-exhaustion error
+        # must never inherit the same-account/no-trailer rebase note meant for
+        # a missing-receipt or failed-verdict error, and it can fire even when
+        # the exhausting round's own verdict is `pass` — the cap bounds round
+        # *count*, not outcome.
+        # `in`, not `.get(...) is not None`: an explicit `"max_rounds": null`
+        # is a present-but-invalid value that must fail closed, not a way to
+        # spell "key absent" -- those are different JSON shapes and only the
+        # second one means "no budget configured" (Codex round 1 finding 1).
+        if "max_rounds" in config["review"]:
+            raw_max_rounds = config["review"]["max_rounds"]
+            if isinstance(raw_max_rounds, bool) or not isinstance(raw_max_rounds, int) or raw_max_rounds <= 0:
+                # Fail closed on a typo rather than silently disabling
+                # enforcement; the key's total absence, not a bad value, is
+                # what means "no budget configured".
+                errors.append(
+                    f"`review.max_rounds` in config must be a positive integer, "
+                    f"got {raw_max_rounds!r}"
+                )
+            else:
+                consumed = consumed_review_rounds(receipts, kind)
+                budget = effective_review_budget(budget_records, kind, raw_max_rounds)
+                if consumed > budget:
+                    errors.append(
+                        f"`{kind}` review budget exhausted for PR #{pr.get('number')}: "
+                        f"{consumed} rounds recorded, budget is {budget}; record a human "
+                        f"decision with `renew-review-budget --pr {pr.get('number')} "
+                        f"--kind {kind} --rounds {consumed} --decided-by <human> "
+                        "--note-file <path> --apply`"
+                    )
     return errors
 
 
@@ -1659,6 +1795,56 @@ def command_review_receipt(args: argparse.Namespace, config: dict[str, Any]) -> 
     finally:
         Path(temp_name).unlink(missing_ok=True)
     print(f"RECORDED: {args.kind}={args.verdict} for {head}")
+    return 0
+
+
+def command_renew_review_budget(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    # Confirms the PR exists before anything else; `fetch_pr` raises `SdlcError`
+    # for a number GitHub does not recognize.
+    fetch_pr(args.pr, config)
+    note = args.note_file.read_text(encoding="utf-8").strip()
+    if not note:
+        raise SdlcError("renewal note must not be empty")
+    decided_by = (args.decided_by or "").strip()
+    if not decided_by:
+        raise SdlcError("--decided-by must name the person who authorized this renewal")
+    # `-->` would close the HTML comment early and a newline would break the
+    # single-line marker, so `BUDGET_RECORD_RE` would stop mid-JSON and the
+    # record would be silently unparseable -- posted successfully, printed as
+    # `RENEWED`, but never actually raising the budget. Same guard `set-gate`
+    # applies to `--checkpoint`/`--decided-by`. Checked (and later used) on
+    # the already-`.strip()`ped value, exactly like `set-gate`: a purely
+    # leading/trailing newline is removed before this check ever sees it, so
+    # the value that actually reaches the marker never contains one; only an
+    # *interior* newline, which `.strip()` cannot remove, is refused here.
+    if "-->" in decided_by or any(char in decided_by for char in "\r\n"):
+        raise SdlcError("--decided-by must be a single line and must not contain `-->`")
+    if args.rounds <= 0:
+        raise SdlcError("--rounds must be a positive integer")
+    record = f"{budget_marker(args.kind, args.rounds, decided_by)}\n\n{note}\n"
+    if not args.apply:
+        print("DRY RUN:")
+        print(record)
+        return 0
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as handle:
+        json.dump({"body": record}, handle)
+        temp_name = handle.name
+    try:
+        posted = run_json([
+            "gh", "api", "--method", "POST",
+            f"repos/{config['repository']}/issues/{args.pr}/comments",
+            "--input", temp_name,
+        ])
+    finally:
+        Path(temp_name).unlink(missing_ok=True)
+    url = (posted or {}).get("html_url") if isinstance(posted, dict) else None
+    if not url:
+        raise SdlcError(
+            f"budget renewal posted to PR #{args.pr} returned no URL; read the PR's "
+            "comments before retrying"
+        )
+    print(f"RENEWED: {args.kind} budget for PR #{args.pr} to {args.rounds} rounds")
+    print(f"BUDGET_RECORD={url}")
     return 0
 
 
@@ -2062,6 +2248,15 @@ def build_parser() -> argparse.ArgumentParser:
     receipt.add_argument("--body-file", type=Path, required=True)
     receipt.add_argument("--dry-run", action="store_true")
     receipt.set_defaults(func=command_review_receipt)
+
+    budget = sub.add_parser("renew-review-budget", help="record a human-authorized increase to a PR's review-round budget")
+    budget.add_argument("--pr", type=int, required=True)
+    budget.add_argument("--kind", choices=["advisor", "codex"], required=True)
+    budget.add_argument("--rounds", type=int, required=True, help="new round ceiling for this PR/kind")
+    budget.add_argument("--decided-by", required=True, help="the human whose decision this records")
+    budget.add_argument("--note-file", type=Path, required=True)
+    budget.add_argument("--apply", action="store_true")
+    budget.set_defaults(func=command_renew_review_budget)
 
     gate = sub.add_parser("merge-gate", help="check deterministic auto-merge eligibility")
     gate.add_argument("--pr", type=int, required=True)
