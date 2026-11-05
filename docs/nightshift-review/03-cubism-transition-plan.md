@@ -11,7 +11,25 @@
 Ordered, with a stated end state per step. Step 0 is a prerequisite the design
 does not mention.
 
-## Where Cubism actually is
+## Status
+
+Steps 0 and 1 are **done and merged** (PRs #66, #68, #69). Step 2 is next and
+nothing in the repository has reached it yet. The record below is kept as
+written so the starting position stays legible; the "as reviewed" table is
+**historical**, not current.
+
+| Now on `main` (`236ef35`) | |
+|---|---|
+| SDLC tooling | Landed. `SDLC.md`, `AGENTS.md`, `CLAUDE.md`, `.sdlc/`, `scripts/`, `.agents/`, `.claude/skills/` |
+| Gate defects | All five fixed: applied merge, self-authored receipts, stale passes, feedback exemption, claim exclusivity |
+| Tests | 8 → 28, running in CI as the `sdlc` job inside `CI required checks` |
+| Engine portability | `scripts/sdlc.py` contains zero project-specific strings; markers are `nightshift-review` / `nightshift-gate` and pinned by test |
+| Status page | Untracked; `status --json` is the projection surface |
+| `type:slice` issues | **Still 0.** `claim` → Codex receipt → `merge --apply` has never run end to end |
+| Label drift | Still open: #55 closed + `in-review`; #53 open + `in-review` with PR #65 open |
+| Unmapped issues | 22 of 45 open |
+
+## Where Cubism was, as reviewed on 2026-09-15
 
 | Fact | Value |
 |---|---|
@@ -31,7 +49,13 @@ branch named "before it's lost."
 
 ---
 
-## Step 0 — Land the tooling on `main`
+## Step 0 — Land the tooling on `main`  ·  **done, merged in #66**
+
+Landed as **two** PRs, not three. The three-way split does not work:
+`docs/sdlc/HUMAN_TUTORIAL.md` links `../../SDLC.md` and `../../scripts/sdlc.py`,
+and the CI link check covers `docs/**/*.md`, so a docs-only PR cannot pass CI
+without the tooling. The lifecycle policy and its human-facing explanation are
+one concern.
 
 Nothing else can proceed. But **do not merge the checkpoint branch as one
 commit** — 56 files spanning three unrelated concerns is exactly the kind of
@@ -55,11 +79,11 @@ there yet. Say so in the PR descriptions rather than pretending otherwise.
 
 **End state:** a fresh clone of `main` has one coherent, current process.
 
-## Step 1 — Make the gate real  ·  *done in the working tree, uncommitted*
+## Step 1 — Make the gate real  ·  **done, merged in #66 and #69**
 
-The gate was 902 lines of untested, never-successfully-executed code. Items 1–5
-below are now implemented on `docs/nightshift-design-draft`; item 6 is a design
-decision, not a patch, and remains open.
+The gate was 902 lines of untested, never-successfully-executed code. All six
+items below are now on `main`. Item 6 was resolved rather than documented: the
+claim is genuinely exclusive, via GitHub's create-only ref endpoint.
 
 1. **Fix the `NameError`.** Line 686 reads `if add or remove:` — both are locals
    of `command_set_gate` at line 715. Delete the condition; the `run_text(command)`
@@ -79,7 +103,7 @@ decision, not a patch, and remains open.
 5. **Narrow the feedback exemption** at `sdlc.py:372` to `gate:changes-requested`
    only, and require a link to the feedback decision — matching `AGENTS.md`,
    which is already stricter than the code.
-6. **Be honest about the claim race.** *(still open)* The `issue/N` push at `sdlc.py:594` is not
+6. **Be honest about the claim race.** *(fixed in #69, not merely documented)* The `issue/N` push at `sdlc.py:594` is not
    an exclusive claim. Either fix it or write the limitation into `SDLC.md`.
    Single-operator today makes it low-risk; silently implying safety is the
    problem, not the race.
@@ -176,3 +200,89 @@ could possibly have.
   engineering — #1, #2, #8, #14, #59. The process exists to ship those. If a
   quarter passes with SDLC commits and no crate commits, the process failed
   regardless of how well it works.
+
+---
+
+# Decisions of record
+
+Made in session on 2026-09-15/16. Recorded here because they are architectural
+commitments with consequences, not session notes: without a durable record the
+next session either re-litigates them or silently contradicts them.
+
+## D1 — Adopt Stage 0; defer Stages 1–4 pending evidence
+
+Stage 0 is Cubism's process as of #66. Stages 1–4 (PostgreSQL kernel, hosted
+runners, multi-tenancy, enterprise) are a **separate product decision**, to be
+made on the human-minutes-per-slice figure that Step 3 produces — not on the
+design's own merits.
+
+Stages 1–4 describe a different product than Cubism. Cubism is a Rust
+aggregation library with real unfinished engineering and two live CVEs. The
+factory must not become the project: a quarter of SDLC commits with no crate
+commits means the process failed, however well it works.
+
+## D2 — `scripts/sdlc.py` is Nightshift Stage 0 and will be peeled out
+
+The engine is intended to serve every project Nightshift manages, not only this
+one. It already contains no project-specific string, and its comment protocol
+markers are `nightshift-`, not `cubism-` (#69).
+
+Consequence: changes to this engine are Nightshift design evidence, not just
+Cubism maintenance. Keep it project-neutral by default; anything Cubism-specific
+belongs in `quality-gate.sh` or `.sdlc/config.json`.
+
+## D3 — The coupling surface between Nightshift and a managed project is three files
+
+A project (Cubism, or any later one) retains exactly:
+
+| File | Role |
+|---|---|
+| `.sdlc/config.json` | Tenant registration — repository, branch, labels, required checks, review policy |
+| `scripts/quality-gate.sh` | **Project adapter** — "here is how you verify me." The engine invokes it and never inspects its contents |
+| `.github/ISSUE_TEMPLATE/` | Nightshift's contract schema, installed per project |
+
+Everything else — the engine, `SDLC.md`, `docs/sdlc/` — belongs to Nightshift.
+Keep this surface at three files. Projects managed by Nightshift have no links
+to each other; cross-project visibility is a Nightshift concern, not a
+project-repo concern.
+
+## D4 — Split the Nightshift repository when it has an executable artifact
+
+Not before. Today Nightshift is ~15,000 words of Markdown and a renderer; a
+repository for documents is overhead, not separation. Once there is a package
+with a schema and tests, the split is obvious and natural.
+
+Sequencing matters: Nightshift's only evidence is Cubism. Moving the design to a
+repository with no code makes it a document about a hypothetical, reviewable only
+on prose — and it cannot produce the D1 human-minutes figure.
+
+Interim measure that captures most of the benefit: keep `docs/nightshift-design/`
+off `main` (it publishes from the `nightshift-pages` branch), so its ~5,500 lines
+stay out of every clone, out of `docs/**/*.md` link checking, and out of agent
+context. Its evidence links are commit-pinned URLs, so they survive the move.
+
+## D5 — Nightshift's design is missing a project-adapter layer
+
+The design specifies **source adapters** (§5, GitHub first) and **harness
+adapters** (§9, `describe_capabilities`/`qualify`/`start`). It has no equivalent
+for the project: the standing declaration of how to verify, build, and demo a
+given repository.
+
+`quality-gate.sh` is empirically that thing (see D3). §6's slice contract carries
+per-slice `validation.commands`, which is finer-grained and does not cover the
+repository-level contract. This is the interface that makes a second project
+onboardable without Nightshift knowing anything about its domain, and it should
+be added to the design.
+
+## What a handoff is for
+
+These decisions are durable records. A session handoff is a different artifact:
+reading order, what is half-done, what to start with — **pointers only**.
+
+The retired `TIMESERIES_PHASE_N_HANDOFF.md` chain is what happens when the two
+are confused: state lived in prose, drifted from reality, grew without bound, and
+made every session load 20KB to learn what a label would have said.
+
+The test is one question — *what breaks if this file disappears?* "I would have
+to re-derive the reading order" is a handoff, and that is fine. "We would lose
+why we chose X" means X belonged here instead.
