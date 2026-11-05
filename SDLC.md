@@ -205,10 +205,16 @@ need for more.
    until a receipt explicitly closes it with evidence. A receipt recorded
    without `--findings` carries none and is unaffected either way.
 
-   No current step wires a real reviewer to emit `--findings`; the mechanism
-   is dormant until a future slice teaches the codex-review prompt to emit
-   and carry forward structured ids. Recording a disposition change is not
-   independently verified beyond the same account/reviewer checks already
+   `.agents/skills/codex-review/SKILL.md` (#116) wires a real reviewer to
+   this: section 2 has the reviewer run `python3 scripts/sdlc.py findings
+   --pr P --kind codex` (a new, read-only command) to see every id a prior
+   round left open, and report an optional `FINDINGS: <json>` line — the
+   last non-blank line before the trailing `VERDICT:` line — that section 3
+   parses via `codex-envelope --field findings` and section 4 passes straight
+   to `review-receipt --findings`. A reviewer that renumbers a still-open id
+   instead of reusing it is not caught by any of this; the `findings` command
+   only gives it the means to avoid that. Recording a disposition change is
+   not independently verified beyond the same account/reviewer checks already
    applied to the verdict itself — self-attesting, like the mechanisms
    above, pending the R6 trusted-execution-boundary work.
 9. **Merge automatically.** Run `rtk python3 scripts/sdlc.py merge --pr P --apply`. It

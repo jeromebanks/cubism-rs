@@ -1368,6 +1368,93 @@ def parse_codex_verdict(report_text: str) -> str:
     raise SdlcError("report does not end with a verdict line; refusing to record")
 
 
+# codex-review/SKILL.md section 2's optional structured-findings line. Kept
+# next to `REVIEW_PREFIX`/`REVIEW_SUFFIX` in spirit -- it is the report's
+# own on-the-wire contract, not a detail private to one parser.
+FINDINGS_LINE_PREFIX = "FINDINGS: "
+_VERDICT_LINES = ("VERDICT: pass", "VERDICT: fail")
+# A *looser* detector than `FINDINGS_LINE_PREFIX`, used only to decide
+# whether an ill-formed line was an attempt at the structured-findings line
+# -- codex writes markdown, so a real attempt is likely to arrive indented,
+# in backticks, as a list item or blockquote, or missing the space after the
+# colon, none of which `str.startswith(FINDINGS_LINE_PREFIX)` catches.
+# Matched case-insensitively for the same reason. Without this, any of those
+# near-misses is invisible to the exact-prefix check below and silently
+# reads as "no findings" -- exactly the dropped-blocking-finding failure
+# mode this function exists to prevent.
+#
+# Deliberately requires a `[` after the colon (through any run of
+# whitespace or further markdown emphasis characters), not just the word
+# "findings:" -- section 2 also tells a reviewer with nothing to report to
+# "say so explicitly", and free-form report prose routinely produces a line
+# like "Findings: none material" or a bolded "**Findings:**" section header.
+# Neither is an attempt at the structured line; requiring the opening
+# bracket is what tells a real (if malformed) JSON attempt apart from an
+# ordinary prose sentence that happens to start with the same word. An
+# earlier version of this detector omitted `\[` and matched both prose forms
+# above, which would have forced an ordinary clean-pass round into
+# `VERDICT: fail` on the round budget (see section 3's forced-fail
+# fallback) -- found in pre-PR self-review, not by any test, and closed by
+# the negative fixtures in `FINDINGS_CASES` below, which pin it. Separately
+# (evidence, not a test in this suite): every codex receipt already recorded
+# on PRs #109, #111, #113 and #115 was checked by hand against this final
+# pattern and returns `[]` without raising.
+_FINDINGS_ATTEMPT_RE = re.compile(r"^[ \t>`*_-]*findings:[\s*_`]*\[", re.IGNORECASE)
+
+
+def parse_codex_findings(report_text: str) -> list[dict[str, Any]]:
+    """The report's optional structured-findings line, validated.
+
+    Mirrors `parse_codex_verdict`'s byte-literal line discipline (`split`
+    on `"\\n"` alone; a line is blank only when it is entirely spaces/tabs)
+    for the same reason: this replaces no existing bash, but the contract
+    lives in the same report and must fail exactly as literally as the
+    verdict line already does, not by a looser `str.strip()`/`splitlines()`
+    reading.
+
+    The contract (section 2): a line written *exactly* as `FINDINGS: <json>`
+    -- no leading whitespace, list marker, or code formatting -- must be the
+    last non-blank line before the trailing `VERDICT: pass|fail` line. No
+    line anywhere that even loosely resembles an attempt (see
+    `_FINDINGS_ATTEMPT_RE`) means "no structured findings" -- `[]`,
+    byte-identical to every report written before this field existed and
+    every future report that omits it. Any near-miss -- indented, in
+    backticks, a list item, missing the space, after `VERDICT:`, not
+    immediately preceding a well-formed trailing verdict line, malformed
+    JSON, or a payload `parse_findings` itself rejects -- is a report that
+    unambiguously tried to supply one and got the contract wrong, and fails
+    closed rather than being silently read as "none": a dropped or
+    unrecognized line must not be able to drop a blocking finding.
+
+    The candidate line is also rejected outright if it contains a literal
+    `\\r`. `json.loads` treats a trailing `\\r` as insignificant whitespace
+    and would otherwise accept a CRLF-corrupted line that the verdict
+    parser -- matching `"VERDICT: pass"` by exact string equality -- already
+    rejects; without this check a CRLF report could pass on the findings
+    side while failing on the verdict side, an asymmetry with no reason to
+    exist.
+    """
+    lines = [line for line in report_text.split("\n") if line.strip(" \t") != ""]
+    if len(lines) >= 2 and lines[-1] in _VERDICT_LINES and lines[-2].startswith(FINDINGS_LINE_PREFIX):
+        candidate = lines[-2]
+        if "\r" in candidate:
+            raise SdlcError("FINDINGS line must not contain a carriage return")
+        payload_text = candidate[len(FINDINGS_LINE_PREFIX):]
+        try:
+            raw = json.loads(payload_text)
+        except json.JSONDecodeError as exc:
+            raise SdlcError(f"FINDINGS line is not valid JSON: {exc}") from exc
+        return parse_findings(raw)
+    if any(_FINDINGS_ATTEMPT_RE.match(line) for line in lines):
+        raise SdlcError(
+            "a `FINDINGS:` line must be written exactly as `FINDINGS: <json>` "
+            "at the start of the line -- no leading whitespace, list marker, "
+            "blockquote, or code formatting -- and must be the last non-blank "
+            "line before the trailing `VERDICT: pass|fail` line"
+        )
+    return []
+
+
 def require_nonempty_report(report_text: str, err_path: Path) -> None:
     """Mirrors section 1's `test -s "$REPORT" || { echo ...; exit 1; }`.
 
@@ -2094,8 +2181,28 @@ def command_codex_envelope(args: argparse.Namespace, config: dict[str, Any]) -> 
     if args.field == "reviewer":
         err_text = _read_text_raw(args.err)
         print(parse_codex_identity(err_text))
-    else:
+    elif args.field == "verdict":
         print(parse_codex_verdict(report_text))
+    else:
+        print(json.dumps(parse_codex_findings(report_text), separators=(",", ":"), sort_keys=True))
+    return 0
+
+
+def command_findings(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    """Read-only: the cumulative structured findings for one PR/kind.
+
+    `codex-review/SKILL.md` section 2 has a fresh reviewer run this itself,
+    before writing its report, to learn every id a prior round left open --
+    the means to reuse an id verbatim instead of guessing or renumbering it.
+    No mutation: same `fetch_comments` -> `parse_review_receipts` ->
+    `collect_findings` path `evaluate_merge_gate` already reads, so this
+    command adds no second notion of "the current findings," only a
+    read/print wrapper around the existing one.
+    """
+    comments = fetch_comments(args.pr, config)
+    receipts = parse_review_receipts(comments)
+    result = collect_findings(receipts, args.kind)
+    print(json.dumps(result, separators=(",", ":"), sort_keys=True))
     return 0
 
 
@@ -2578,12 +2685,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     envelope = sub.add_parser(
         "codex-envelope",
-        help="derive reviewer identity or verdict from a codex-review report/stderr pair (codex-review/SKILL.md section 1+3)",
+        help="derive reviewer identity, verdict, or structured findings from a codex-review report/stderr pair (codex-review/SKILL.md section 1+3)",
     )
-    envelope.add_argument("--field", choices=["reviewer", "verdict"], required=True)
+    envelope.add_argument("--field", choices=["reviewer", "verdict", "findings"], required=True)
     envelope.add_argument("--report", type=Path, required=True, help="the review report ($REPORT)")
     envelope.add_argument("--err", type=Path, required=True, help="the run's captured stderr ($REPORT.err)")
     envelope.set_defaults(func=command_codex_envelope)
+
+    findings_cmd = sub.add_parser(
+        "findings",
+        help="print the cumulative structured findings for a PR/kind, read-only (codex-review/SKILL.md section 2)",
+    )
+    findings_cmd.add_argument("--pr", type=int, required=True)
+    findings_cmd.add_argument("--kind", choices=["advisor", "codex"], required=True)
+    findings_cmd.set_defaults(func=command_findings)
 
     await_head = sub.add_parser(
         "codex-await-head",
