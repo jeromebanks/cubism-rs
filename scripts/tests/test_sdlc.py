@@ -3528,7 +3528,7 @@ class CodexEnvelopeTests(unittest.TestCase):
     head-agreement retry that `.agents/skills/codex-review/SKILL.md` sections
     1, 3 and 5 call instead of embedding their own `sed`/`awk`/retry-loop
     logic. Every fixture below was diffed against the literal bash it
-    replaces (`git show origin/main:.agents/skills/codex-review/SKILL.md`'s
+    replaces (`git show 1a549ef^:.agents/skills/codex-review/SKILL.md`'s
     section 3, before #112) before this test was written, precisely because
     `str.splitlines()`/`str.strip()` are *not* drop-in replacements for
     `sed`/`awk`'s narrower idea of a line ending or a blank line.
@@ -3860,6 +3860,27 @@ class CodexEnvelopeTests(unittest.TestCase):
         'fi\n'
     )
 
+    # Verbatim section 3 code block from `.agents/skills/codex-review/SKILL.md`
+    # as of `1a549ef^` (the parent of #112's extraction commit): inline
+    # `sed`/`awk` that never calls `rtk`. Embedded rather than read from
+    # `git show origin/main:...` because once #112 merged, `origin/main` is
+    # itself post-#112 wherever the ref resolves (a developer checkout, or a
+    # push-to-main CI run), which made the old read fail there while it only
+    # skipped on PR CI. A fixed fixture runs identically everywhere.
+    PRE_112_SECTION_3 = '''MODEL=$(sed -n 's/^model: //p' "$REPORT.err" | head -1)
+SESSION=$(sed -n 's/^session id: //p' "$REPORT.err" | head -1)
+[ -n "$MODEL" ] && [ -n "$SESSION" ] \\
+  || { echo "cannot identify the reviewer; refusing to record"; exit 1; }
+REVIEWER="Codex $MODEL / $SESSION"
+
+LAST=$(awk 'NF {line=$0} END {print line}' "$REPORT")
+case "$LAST" in
+  "VERDICT: pass") VERDICT=pass ;;
+  "VERDICT: fail") VERDICT=fail ;;
+  *) echo "report does not end with a verdict line; refusing to record"; exit 1 ;;
+esac
+'''
+
     def _run_with_sentinel_shim(self, code_text, *, env_extra, script_suffix):
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp) / "bin"
@@ -3919,27 +3940,7 @@ class CodexEnvelopeTests(unittest.TestCase):
         # `sed`/`awk`/a manual retry loop would show up as a content
         # mismatch, not a crash a reviewer could dismiss as unrelated.
         #
-        # `origin/main` is a real ref in a developer/agent checkout (SDLC.md
-        # makes it the one diff/rebase base, and `claim`/`cleanup` fetch it),
-        # but CI's `sdlc tooling` job is a plain `actions/checkout@v4` with no
-        # extra fetch step, so a PR branch's checkout there does not carry
-        # `origin/main` at all. Skip rather than error when it is missing, the
-        # same way the codex-gated test below skips when `codex` is absent --
-        # this is an environment limitation, not a code failure.
-        git_show = subprocess.run(
-            ["git", "show", "origin/main:.agents/skills/codex-review/SKILL.md"],
-            cwd=ROOT, capture_output=True, text=True, timeout=10,
-        )
-        if git_show.returncode != 0:
-            self.skipTest(
-                f"origin/main is not resolvable in this checkout (e.g. a "
-                f"shallow, single-ref CI checkout of a PR branch); skipping "
-                f"the meta-verification against the pre-#112 baseline. "
-                f"git stderr: {git_show.stderr.strip()}")
-        old_skill_text = git_show.stdout
-        old_section_3 = self._code_block(
-            old_skill_text, "## 3. Derive identity and verdict from the run",
-            source_label="origin/main's SKILL.md")
+        old_section_3 = self.PRE_112_SECTION_3
         with tempfile.TemporaryDirectory() as tmp:
             report_path = Path(tmp) / "report.md"
             report_path.write_text("VERDICT: pass\n")
@@ -3949,7 +3950,7 @@ class CodexEnvelopeTests(unittest.TestCase):
                 script_suffix='\nprintf "%s\\n%s\\n" "$REVIEWER" "$VERDICT"\n')
         self.assertEqual(
             0, result.returncode,
-            "origin/main's old section 3 does not call `rtk` at all, so the "
+            "the pre-#112 section 3 does not call `rtk` at all, so the "
             "shim should never even run; a non-zero exit here means this "
             "meta-test's own fixture is broken, not that the real behavior "
             "changed")
