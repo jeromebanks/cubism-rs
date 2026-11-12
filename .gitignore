@@ -9,3 +9,6 @@ examples/web_analytics_demo/.temporal_build/
 
 # Generated locally by `scripts/sdlc.py status`; the durable record is GitHub.
 docs/project-status.html
+
+# Input artifact: the original Nightshift design brief, not a repository asset.
+astra-sdlc.txt

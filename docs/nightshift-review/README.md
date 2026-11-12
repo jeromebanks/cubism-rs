@@ -24,6 +24,15 @@ GitHub Pages via `git subtree split --prefix=docs/nightshift-design`, and
 `scripts/render-nightshift-docs.py --check` validates every file in it. Review
 notes should not become a public page or break the reproducibility check.
 
+## Which of these stay with Cubism
+
+`03-cubism-transition-plan.md` is Cubism's own record — its transition steps and
+the decisions of record at the end. It stays.
+
+`01-docs-and-pages-feedback.md` and `02-design-critique.md` are addressed to the
+Nightshift design and travel with it when that work moves to its own repository
+(see D4 in `03`).
+
 ## The one fact that reframes everything
 
 The SDLC apparatus is not on `main`.
