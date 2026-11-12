@@ -33,6 +33,13 @@ ignore = [
     # done here to satisfy a scanner.
     { id = "RUSTSEC-2026-0176", reason = "fixed in pyo3 0.29.0; blocked on an arrow 58->59 + datafusion major bump across the workspace, tracked in #59" },
     { id = "RUSTSEC-2026-0177", reason = "fixed in pyo3 0.29.0; blocked on an arrow 58->59 + datafusion major bump across the workspace, tracked in #59" },
+    # Fixed in libsqlite3-sys >=0.39.0, but no sqlx release can take it:
+    # sqlx-sqlite 0.9.0 (latest) still caps libsqlite3-sys at <0.38, and
+    # iceberg-catalog-sql 0.10.1 requires sqlx ^0.8.1 (cubism-iceberg pins
+    # sqlx =0.8.1 for it). Exposure is limited to opening a db + `-wal` pair
+    # written by a less-trusted party; cubism-iceberg's SQLite use is its own
+    # self-written Iceberg catalog. Remove this entry once #121 is resolved.
+    { id = "RUSTSEC-2026-0459", reason = "fixed in libsqlite3-sys >=0.39.0; no sqlx release allows it (sqlx-sqlite 0.9.0 caps <0.38, iceberg-catalog-sql needs sqlx ^0.8); exposure needs an attacker-written db+wal pair, tracked in #121" },
 ]
 
 [licenses]
